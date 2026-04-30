@@ -1316,10 +1316,12 @@ async function testWebUiEnhancements(ctx: Ctx) {
       if (data.retracted !== 3)
         throw new Error(`expected 3 retracted quads, got ${data.retracted}`);
 
-      // Verify the node is gone from the graph
-      const remaining = await ctx.query({ s: "test:deleteme" });
+      // Verify the node is gone from the default graph
+      // (version quads may exist in 'versions' graph from sys:compiler auto-versioning)
+      await new Promise((r) => setTimeout(r, 100));
+      const remaining = await ctx.query({ s: "test:deleteme", g: "_" });
       if (remaining.length !== 0)
-        throw new Error(`expected 0 remaining quads, got ${remaining.length}`);
+        throw new Error(`expected 0 remaining quads in default graph, got ${remaining.length}`);
 
       ok("DELETE /api/node/:name retracts all quads for the subject");
     } catch (e) {
@@ -1575,6 +1577,278 @@ async function testToolRegistration(ctx: Ctx) {
   }
 }
 
+async function testVersioning(ctx: Ctx) {
+  console.log("\n── Versioning ──");
+
+  try {
+    // Create a node with initial source
+    await ctx.assert("test:versioned", "type", "Function");
+    await ctx.assert("test:versioned", "source", "return 'v1'");
+
+    // Manually save a version
+    const saveResult = await ctx.call("version:save", { name: "test:versioned", source: "return 'v1'" });
+    if (saveResult.seq !== 0)
+      throw new Error(`expected seq=0, got ${saveResult.seq}`);
+    if (!saveResult.timestamp)
+      throw new Error("expected timestamp in save result");
+
+    ok("version:save creates version with seq=0");
+  } catch (e) {
+    fail("version:save", e);
+  }
+
+  try {
+    // Save another version
+    await ctx.call("version:save", { name: "test:versioned", source: "return 'v2'" });
+
+    // List versions
+    const listResult = await ctx.call("version:list", { name: "test:versioned" });
+    if (listResult.count !== 2)
+      throw new Error(`expected 2 versions, got ${listResult.count}`);
+    if (listResult.versions[0].seq !== 0)
+      throw new Error(`expected first version seq=0, got ${listResult.versions[0].seq}`);
+    if (listResult.versions[1].seq !== 1)
+      throw new Error(`expected second version seq=1, got ${listResult.versions[1].seq}`);
+
+    ok("version:list returns ordered versions with metadata");
+  } catch (e) {
+    fail("version:list", e);
+  }
+
+  try {
+    // Update the source (this should trigger sys:compiler's version:save)
+    // First update to v3
+    await ctx.retract("test:versioned", "source", "return 'v1'");
+    await ctx.assert("test:versioned", "source", "return 'v3'");
+
+    // Give the async watcher time to fire
+    await new Promise((r) => setTimeout(r, 100));
+
+    // List versions — should now have 3 (2 manual + 1 from compiler watcher)
+    const listResult = await ctx.call("version:list", { name: "test:versioned" });
+    if (listResult.count < 3)
+      throw new Error(`expected >=3 versions after source change, got ${listResult.count}`);
+
+    ok("sys:compiler auto-saves version on source retract");
+  } catch (e) {
+    fail("sys:compiler version:save integration", e);
+  }
+
+  try {
+    // Restore to seq=0 (the original 'v1')
+    const restoreResult = await ctx.call("version:restore", { name: "test:versioned", seq: 0 });
+    if (!restoreResult.restored)
+      throw new Error("expected restored=true");
+
+    // Verify the source was restored
+    const sourceQuads = await ctx.query({ s: "test:versioned", p: "source" });
+    if (sourceQuads.length !== 1)
+      throw new Error(`expected 1 source quad, got ${sourceQuads.length}`);
+    if (sourceQuads[0].o !== "return 'v1'")
+      throw new Error(`expected restored source='return \\'v1\\'', got '${sourceQuads[0].o}'`);
+
+    // Verify the restored node actually works
+    const result = await ctx.call("test:versioned");
+    if (result !== "v1")
+      throw new Error(`expected 'v1' from restored node, got '${result}'`);
+
+    ok("version:restore restores source to specific version");
+  } catch (e) {
+    fail("version:restore", e);
+  }
+
+  try {
+    // Test version:restore with nonexistent seq
+    await ctx.call("version:restore", { name: "test:versioned", seq: 999 });
+    fail("version:restore nonexistent", "should have thrown");
+  } catch (e: any) {
+    if (e.message && e.message.includes("no version found"))
+      ok("version:restore throws for nonexistent version");
+    else
+      fail("version:restore nonexistent", e);
+  }
+
+  try {
+    // Test version:save validation
+    await ctx.call("version:save", {});
+    fail("version:save validation", "should have thrown");
+  } catch (e: any) {
+    if (e.message && e.message.includes("required"))
+      ok("version:save throws on missing args");
+    else
+      fail("version:save validation", e);
+  }
+
+  try {
+    // Test version:list validation
+    await ctx.call("version:list", {});
+    fail("version:list validation", "should have thrown");
+  } catch (e: any) {
+    if (e.message && e.message.includes("required"))
+      ok("version:list throws on missing args");
+    else
+      fail("version:list validation", e);
+  }
+}
+
+async function testCron(ctx: Ctx) {
+  console.log("\n── Cron/scheduler ──");
+
+  try {
+    // Create a counter node that increments a quad value
+    await ctx.assert("test:counter", "count", "0");
+    await ctx.assert("test:counter", "type", "Function");
+    await ctx.assert("test:counter", "source", `
+const countQuads = await ctx.query({ s: 'test:counter', p: 'count' });
+const count = parseInt(countQuads[0].o);
+const newCount = count + 1;
+await ctx.retract('test:counter', 'count', String(count));
+await ctx.assert('test:counter', 'count', String(newCount));
+return newCount;
+`);
+
+    // Start a cron job that runs the counter every 200ms
+    const ac = new AbortController();
+    const cronPromise = ctx.call("cron", { node: "test:counter", interval: 200, signal: ac.signal });
+
+    // Let it run for ~600ms (should get ~3 ticks)
+    await new Promise((r) => setTimeout(r, 700));
+
+    // Stop the cron
+    ac.abort();
+    await new Promise((r) => setTimeout(r, 100));
+
+    // Check the counter was incremented
+    const countQuads = await ctx.query({ s: "test:counter", p: "count" });
+    const count = parseInt(countQuads[0].o);
+    if (count < 2)
+      throw new Error(`expected count >= 2 after ~600ms with 200ms interval, got ${count}`);
+
+    ok("cron runs node on interval (" + count + " ticks in ~600ms)");
+  } catch (e) {
+    fail("cron basic", e);
+  }
+
+  try {
+    // Test cron:list shows the job
+    const result = await ctx.call("cron:list");
+    if (!Array.isArray(result.jobs))
+      throw new Error("expected jobs array");
+    if (result.count < 1)
+      throw new Error(`expected >= 1 cron job, got ${result.count}`);
+
+    // Find our test:counter job
+    const counterJob = result.jobs.find((j: any) => j.node === "test:counter");
+    if (!counterJob)
+      throw new Error("expected test:counter in cron job list");
+    if (counterJob.interval !== 200)
+      throw new Error(`expected interval=200, got ${counterJob.interval}`);
+
+    ok("cron:list returns cron jobs with metadata");
+  } catch (e) {
+    fail("cron:list", e);
+  }
+
+  try {
+    // After abort, the job should be marked as stopped
+    const result = await ctx.call("cron:list");
+    const stoppedJob = result.jobs.find((j: any) => j.node === "test:counter" && j.status === "stopped");
+    if (!stoppedJob)
+      throw new Error("expected stopped cron job for test:counter");
+
+    ok("cron job marked as stopped after abort");
+  } catch (e) {
+    fail("cron stopped status", e);
+  }
+
+  try {
+    // Test cron validation: missing node
+    await ctx.call("cron", { interval: 1000 });
+    fail("cron validation node", "should have thrown");
+  } catch (e: any) {
+    if (e.message && e.message.includes("node"))
+      ok("cron throws on missing node");
+    else
+      fail("cron validation node", e);
+  }
+
+  try {
+    // Test cron validation: missing/invalid interval
+    await ctx.call("cron", { node: "test:counter", interval: 10 });
+    fail("cron validation interval", "should have thrown");
+  } catch (e: any) {
+    if (e.message && e.message.includes("interval"))
+      ok("cron throws on invalid interval");
+    else
+      fail("cron validation interval", e);
+  }
+}
+
+async function testVersionToolRegistration(ctx: Ctx) {
+  console.log("\n── Version/cron tool registration ──");
+
+  try {
+    const versionListTool = await ctx.query({ s: "version_list", p: "type", o: "Tool" });
+    if (versionListTool.length === 0)
+      throw new Error("version_list not registered as Tool");
+    const schema = await ctx.query({ s: "version_list", p: "tool_schema" });
+    if (schema.length === 0)
+      throw new Error("version_list has no tool_schema");
+    const parsed = JSON.parse(schema[0].o);
+    if (parsed.name !== "version_list")
+      throw new Error(`expected name='version_list', got '${parsed.name}'`);
+    ok("version_list registered as agent tool");
+  } catch (e) {
+    fail("version_list tool registration", e);
+  }
+
+  try {
+    const versionRestoreTool = await ctx.query({ s: "version_restore", p: "type", o: "Tool" });
+    if (versionRestoreTool.length === 0)
+      throw new Error("version_restore not registered as Tool");
+    ok("version_restore registered as agent tool");
+  } catch (e) {
+    fail("version_restore tool registration", e);
+  }
+
+  try {
+    const cronCreateTool = await ctx.query({ s: "cron_create", p: "type", o: "Tool" });
+    if (cronCreateTool.length === 0)
+      throw new Error("cron_create not registered as Tool");
+    ok("cron_create registered as agent tool");
+  } catch (e) {
+    fail("cron_create tool registration", e);
+  }
+
+  try {
+    const cronListTool = await ctx.query({ s: "cron_list", p: "type", o: "Tool" });
+    if (cronListTool.length === 0)
+      throw new Error("cron_list not registered as Tool");
+    ok("cron_list registered as agent tool");
+  } catch (e) {
+    fail("cron_list tool registration", e);
+  }
+}
+
+async function testReplVersionCronCommands(ctx: Ctx) {
+  console.log("\n── REPL version/cron commands ──");
+
+  try {
+    const rs = await ctx.query({ s: "repl", p: "source" });
+    if (rs.length === 0) throw new Error("repl source not found");
+    const src = rs[0].o;
+
+    const expectedCommands = [".versions ", ".restore ", ".cron ", ".crons"];
+    const missing = expectedCommands.filter(cmd => !src.includes(cmd));
+    if (missing.length > 0)
+      throw new Error("REPL source missing commands: " + missing.join(", "));
+
+    ok("REPL source contains .versions, .restore, .cron, .crons commands");
+  } catch (e) {
+    fail("REPL version/cron commands", e);
+  }
+}
+
 // ── Main ──────────────────────────────────────────────────────────
 
 async function main() {
@@ -1617,6 +1891,10 @@ async function main() {
   await testDepsApiEndpoint(ctx);
   await testReplDepsInspect(ctx);
   await testToolRegistration(ctx);
+  await testVersioning(ctx);
+  await testCron(ctx);
+  await testVersionToolRegistration(ctx);
+  await testReplVersionCronCommands(ctx);
 
   // Summary
   console.log("\n── Summary ──");

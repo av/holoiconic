@@ -8,6 +8,7 @@ const nodes: Record<string, string> = {
 
   // ── sys:compiler ────────────────────────────────────────────────
   // Replaces ctx.call with a cached, reactively-invalidated version.
+  // On source changes, snapshots the old source via version:save before invalidating.
   "sys:compiler": `
 const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor;
 const cache = new Map();
@@ -27,9 +28,19 @@ ctx.call = async function cachedCall(name, callArgs) {
   return nodeStorage.run(name, () => fn(ctx, callArgs));
 };
 
-// Watch for source changes and invalidate cache
-ctx.on({ p: 'source' }, (change) => {
-  cache.delete(change.quad.s);
+// Watch for source changes — snapshot old source before invalidating cache
+ctx.on({ p: 'source' }, async (change) => {
+  const name = change.quad.s;
+  cache.delete(name);
+
+  // When a source is retracted, save it as a version
+  if (change.type === 'retract') {
+    try {
+      await ctx.call('version:save', { name, source: change.quad.o });
+    } catch (e) {
+      // version:save may not exist yet during boot — silently skip
+    }
+  }
 });
 
 console.log('[sys:compiler] installed — ctx.call now cached and reactive');
@@ -407,7 +418,63 @@ await ctx.assert('inspect', 'tool_schema', JSON.stringify({
   }
 }));
 
-console.log('[agent:tools] registered 13 tools');
+// Version list tool
+await ctx.assert('version_list', 'type', 'Tool');
+await ctx.assert('version_list', 'tool_schema', JSON.stringify({
+  name: 'version_list',
+  description: 'List all saved source versions for a node. Returns version history with sequence numbers and timestamps.',
+  input_schema: {
+    type: 'object',
+    properties: {
+      name: { type: 'string', description: 'The node name to list versions for' }
+    },
+    required: ['name']
+  }
+}));
+
+// Version restore tool
+await ctx.assert('version_restore', 'type', 'Tool');
+await ctx.assert('version_restore', 'tool_schema', JSON.stringify({
+  name: 'version_restore',
+  description: 'Restore a node\\'s source to a specific version by sequence number.',
+  input_schema: {
+    type: 'object',
+    properties: {
+      name: { type: 'string', description: 'The node name to restore' },
+      seq: { type: 'number', description: 'The version sequence number to restore' }
+    },
+    required: ['name', 'seq']
+  }
+}));
+
+// Cron tool
+await ctx.assert('cron_create', 'type', 'Tool');
+await ctx.assert('cron_create', 'tool_schema', JSON.stringify({
+  name: 'cron_create',
+  description: 'Create a cron job that runs a node on a setInterval. The node is called repeatedly at the specified interval.',
+  input_schema: {
+    type: 'object',
+    properties: {
+      node: { type: 'string', description: 'The node name to run periodically' },
+      interval: { type: 'number', description: 'Interval in milliseconds (minimum 100ms)' },
+      cronArgs: { type: 'object', description: 'Optional arguments to pass to the node on each tick' }
+    },
+    required: ['node', 'interval']
+  }
+}));
+
+// Cron list tool
+await ctx.assert('cron_list', 'type', 'Tool');
+await ctx.assert('cron_list', 'tool_schema', JSON.stringify({
+  name: 'cron_list',
+  description: 'List all cron jobs (active and stopped).',
+  input_schema: {
+    type: 'object',
+    properties: {}
+  }
+}));
+
+console.log('[agent:tools] registered 17 tools');
 `,
 
   // ── agent:loop ─────────────────────────────────────────────────
@@ -539,6 +606,16 @@ for (let i = 0; i < maxIterations; i++) {
         result = JSON.stringify(await ctx.call('graph:deps', toolInput));
       } else if (toolName === 'inspect') {
         result = JSON.stringify(await ctx.call('inspect', toolInput));
+      } else if (toolName === 'version_list') {
+        result = JSON.stringify(await ctx.call('version:list', toolInput));
+      } else if (toolName === 'version_restore') {
+        result = JSON.stringify(await ctx.call('version:restore', toolInput));
+      } else if (toolName === 'cron_create') {
+        // Spawn cron as a supervised node so it can be stopped
+        const cronResult = await ctx.call('cron', toolInput);
+        result = JSON.stringify(cronResult);
+      } else if (toolName === 'cron_list') {
+        result = JSON.stringify(await ctx.call('cron:list', toolInput));
       } else {
         // Try calling it as a generic node
         result = JSON.stringify(await ctx.call(toolName, toolInput));
@@ -1706,6 +1783,158 @@ return {
 };
 `,
 
+  // ── version:save ─────────────────────────────────────────────────
+  // Saves a version of a node's source. Called by sys:compiler when source is retracted.
+  // Pattern: (name, 'version', oldSource, 'versions') with sequential numbering.
+  "version:save": `
+const name = args && args.name;
+const source = args && args.source;
+if (!name || !source) throw new Error('[version:save] args.name and args.source are required');
+
+// Determine next sequence number by counting existing versions
+const existing = await ctx.query({ s: name, p: 'version', g: 'versions' });
+const seq = existing.length;
+const timestamp = new Date().toISOString();
+
+// Store as a unique quad: use seq in the object to ensure uniqueness
+const versionData = JSON.stringify({ seq, timestamp, source });
+await ctx.assert(name, 'version', versionData, 'versions');
+
+return { name, seq, timestamp };
+`,
+
+  // ── version:list ────────────────────────────────────────────────
+  // Lists all saved versions of a node's source.
+  "version:list": `
+const name = args && args.name;
+if (!name) throw new Error('[version:list] args.name is required');
+
+const versionQuads = await ctx.query({ s: name, p: 'version', g: 'versions' });
+const versions = versionQuads.map(q => {
+  const data = JSON.parse(q.o);
+  return { seq: data.seq, timestamp: data.timestamp, sourceLength: data.source.length };
+}).sort((a, b) => a.seq - b.seq);
+
+return { name, versions, count: versions.length };
+`,
+
+  // ── version:restore ─────────────────────────────────────────────
+  // Restores a specific version of a node's source.
+  "version:restore": `
+const name = args && args.name;
+const seq = args && args.seq;
+if (!name) throw new Error('[version:restore] args.name is required');
+if (seq === undefined || seq === null) throw new Error('[version:restore] args.seq is required');
+
+const versionQuads = await ctx.query({ s: name, p: 'version', g: 'versions' });
+const match = versionQuads.find(q => {
+  const data = JSON.parse(q.o);
+  return data.seq === seq;
+});
+
+if (!match) throw new Error('[version:restore] no version found with seq=' + seq + ' for node ' + name);
+
+const versionData = JSON.parse(match.o);
+const restoredSource = versionData.source;
+
+// Retract current source and assert the restored version
+const currentSource = await ctx.query({ s: name, p: 'source' });
+if (currentSource.length > 0) {
+  await ctx.retract(name, 'source', currentSource[0].o);
+}
+await ctx.assert(name, 'source', restoredSource);
+
+return { name, seq, timestamp: versionData.timestamp, restored: true };
+`,
+
+  // ── cron ────────────────────────────────────────────────────────
+  // Runs a node on a setInterval. Args: { node, interval (ms), args?, signal? }
+  // Stores active cron jobs as quads for visibility.
+  "cron": `
+const node = args && args.node;
+const interval = args && args.interval;
+const cronArgs = args && args.cronArgs;
+const signal = args && args.signal;
+
+if (!node) throw new Error('[cron] args.node is required');
+if (!interval || typeof interval !== 'number' || interval < 100) {
+  throw new Error('[cron] args.interval (number >= 100ms) is required');
+}
+
+// Generate a cron job ID
+const cronId = 'cron:' + node + ':' + Date.now();
+
+// Register the cron job in the graph
+await ctx.assert(cronId, 'type', 'CronJob');
+await ctx.assert(cronId, 'cron:node', node);
+await ctx.assert(cronId, 'cron:interval', String(interval));
+await ctx.assert(cronId, 'cron:status', 'running');
+await ctx.assert(cronId, 'cron:started', new Date().toISOString());
+
+let tickCount = 0;
+const timer = setInterval(async () => {
+  try {
+    tickCount++;
+    await ctx.call(node, cronArgs);
+  } catch (err) {
+    console.error('[cron] error running ' + node + ' (tick ' + tickCount + '):', err.message || err);
+  }
+}, interval);
+
+console.log('[cron] started ' + cronId + ' — runs ' + node + ' every ' + interval + 'ms');
+
+// Clean up on abort signal
+if (signal) {
+  signal.addEventListener('abort', async () => {
+    clearInterval(timer);
+    // Update status in graph
+    try {
+      await ctx.retract(cronId, 'cron:status', 'running');
+      await ctx.assert(cronId, 'cron:status', 'stopped');
+      await ctx.assert(cronId, 'cron:stopped', new Date().toISOString());
+      await ctx.assert(cronId, 'cron:ticks', String(tickCount));
+    } catch {}
+    console.log('[cron] stopped ' + cronId + ' after ' + tickCount + ' ticks');
+  }, { once: true });
+
+  // Keep alive until aborted
+  await new Promise((resolve) => {
+    signal.addEventListener('abort', resolve, { once: true });
+  });
+} else {
+  // No signal — return the cronId and timer info for manual management
+}
+
+return { cronId, node, interval };
+`,
+
+  // ── cron:list ─────────────────────────────────────────────────
+  // Lists all active cron jobs by querying the graph.
+  "cron:list": `
+const cronQuads = await ctx.query({ p: 'type', o: 'CronJob' });
+const jobs = [];
+
+for (const cq of cronQuads) {
+  const cronId = cq.s;
+  const nodeQuads = await ctx.query({ s: cronId, p: 'cron:node' });
+  const intervalQuads = await ctx.query({ s: cronId, p: 'cron:interval' });
+  const statusQuads = await ctx.query({ s: cronId, p: 'cron:status' });
+  const startedQuads = await ctx.query({ s: cronId, p: 'cron:started' });
+
+  const status = statusQuads.length > 0 ? statusQuads[statusQuads.length - 1].o : 'unknown';
+
+  jobs.push({
+    cronId,
+    node: nodeQuads.length > 0 ? nodeQuads[0].o : 'unknown',
+    interval: intervalQuads.length > 0 ? parseInt(intervalQuads[0].o) : 0,
+    status,
+    started: startedQuads.length > 0 ? startedQuads[0].o : null,
+  });
+}
+
+return { jobs, count: jobs.length };
+`,
+
   // ── set ─────────────────────────────────────────────────────────
   // Convenience: retracts all quads matching (s, p, *, g) then asserts (s, p, o, g).
   // Useful for single-valued predicates like 'source', 'status', etc.
@@ -1903,6 +2132,61 @@ for await (const line of rl) {
         console.log(JSON.stringify(result, null, 2));
       }
 
+    } else if (trimmed.startsWith('.versions ')) {
+      const name = trimmed.slice(10).trim();
+      if (!name) { console.log('usage: .versions <name>'); }
+      else {
+        const result = await ctx.call('version:list', { name });
+        if (result.count === 0) {
+          console.log('no versions found for: ' + name);
+        } else {
+          console.log('versions for ' + name + ' (' + result.count + '):');
+          for (const v of result.versions) {
+            console.log('  seq ' + v.seq + '  ' + v.timestamp + '  (' + v.sourceLength + ' chars)');
+          }
+        }
+      }
+
+    } else if (trimmed.startsWith('.restore ')) {
+      const parts = trimmed.slice(9).trim().split(/\\s+/);
+      if (parts.length < 2) { console.log('usage: .restore <name> <seq>'); }
+      else {
+        const name = parts[0];
+        const seq = parseInt(parts[1]);
+        if (isNaN(seq)) { console.log('seq must be a number'); }
+        else {
+          const result = await ctx.call('version:restore', { name, seq });
+          console.log('restored ' + name + ' to version ' + result.seq + ' (from ' + result.timestamp + ')');
+        }
+      }
+
+    } else if (trimmed.startsWith('.cron ')) {
+      const parts = trimmed.slice(6).trim().split(/\\s+/);
+      if (parts.length < 2) { console.log('usage: .cron <name> <interval_ms>'); }
+      else {
+        const node = parts[0];
+        const interval = parseInt(parts[1]);
+        if (isNaN(interval) || interval < 100) { console.log('interval must be a number >= 100'); }
+        else {
+          // Spawn cron as a supervised node
+          const ac = new AbortController();
+          ctx.call('cron', { node, interval, signal: ac.signal }).catch(err => {
+            if (err.name !== 'AbortError') console.error('[cron] error:', err.message || err);
+          });
+          console.log('cron started for ' + node + ' every ' + interval + 'ms');
+        }
+      }
+
+    } else if (trimmed === '.crons') {
+      const result = await ctx.call('cron:list');
+      if (result.count === 0) {
+        console.log('(no cron jobs)');
+      } else {
+        for (const j of result.jobs) {
+          console.log('  ' + j.cronId + '  node=' + j.node + '  interval=' + j.interval + 'ms  status=' + j.status);
+        }
+      }
+
     } else if (trimmed.startsWith('.eval ')) {
       const code = trimmed.slice(6);
       const AsyncFn = Object.getPrototypeOf(async function () {}).constructor;
@@ -1926,6 +2210,10 @@ for await (const line of rl) {
       console.log('  .import <path>                — import snapshot');
       console.log('  .deps <name>                  — show node dependencies');
       console.log('  .inspect <name>               — comprehensive node info');
+      console.log('  .versions <name>              — list saved versions of a node');
+      console.log('  .restore <name> <seq>         — restore a node to a specific version');
+      console.log('  .cron <name> <interval_ms>    — run a node on a timer');
+      console.log('  .crons                        — list cron jobs');
       console.log('  .eval <code>                  — eval code with ctx');
       console.log('  .session                      — show current session ID');
       console.log('  .help                         — this help');
