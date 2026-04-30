@@ -33,6 +33,10 @@ export type Ctx = {
   call(name: string, args?: any): Promise<any>;
   on(pattern: Pattern, callback: Subscriber): () => void;
   readonly self: string;
+  /** @internal — exposed for sys:compiler to use the same AsyncLocalStorage */
+  _nodeStorage: AsyncLocalStorage<string>;
+  /** @internal — dynamic properties added by nodes (e.g. _supervisorControllers) */
+  [key: `_${string}`]: any;
 };
 
 // ── Internals ──────────────────────────────────────────────────────
@@ -80,6 +84,7 @@ export function createCtx(db: Client): Ctx {
   }
 
   const ctx: Ctx = {
+    _nodeStorage: nodeStorage,
     // ── assert ───────────────────────────────────────────────────
     async assert(s: string, p: string, o: string, g: string = "_"): Promise<Quad> {
       const insertResult = await db.execute({
