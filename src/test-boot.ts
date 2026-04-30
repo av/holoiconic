@@ -391,6 +391,171 @@ async function testWebUi(ctx: Ctx) {
   }
 }
 
+async function testSnapshotExportImport(ctx: Ctx) {
+  console.log("\n── Snapshot export/import ──");
+
+  try {
+    // Export all quads as JSON string
+    const json = await ctx.call("snapshot:export");
+    const quads = JSON.parse(json);
+    if (!Array.isArray(quads) || quads.length === 0)
+      throw new Error(`expected non-empty array, got ${typeof quads} with length ${quads.length || 0}`);
+    // Every quad should have s, p, o, g
+    const first = quads[0];
+    if (!first.s || !first.p || typeof first.o !== "string" || !first.g)
+      throw new Error(`quad missing fields: ${JSON.stringify(first)}`);
+    ok("snapshot:export returns JSON array of quads (" + quads.length + " quads)");
+  } catch (e) {
+    fail("snapshot:export", e);
+  }
+
+  try {
+    // Export to file
+    const tmpPath = "/tmp/test-holo-snapshot-" + Date.now() + ".json";
+    const result = await ctx.call("snapshot:export", { path: tmpPath });
+    if (!result.path || result.path !== tmpPath)
+      throw new Error(`expected path=${tmpPath}, got ${result.path}`);
+    if (result.count < 1)
+      throw new Error(`expected count >= 1, got ${result.count}`);
+
+    // Read back and verify it's valid JSON
+    const file = Bun.file(tmpPath);
+    const content = await file.text();
+    const parsed = JSON.parse(content);
+    if (!Array.isArray(parsed) || parsed.length !== result.count)
+      throw new Error(`file contains ${parsed.length} quads, expected ${result.count}`);
+    ok("snapshot:export writes to file (" + result.count + " quads)");
+
+    // Import from file into a fresh context to verify round-trip
+    // We'll use the same ctx but import a known subset
+    const testData = [
+      { s: "rt:test1", p: "value", o: "hello", g: "_" },
+      { s: "rt:test2", p: "value", o: "world", g: "_" },
+    ];
+    const testJson = JSON.stringify(testData);
+
+    const importResult = await ctx.call("snapshot:import", { data: testJson });
+    if (importResult.count !== 2)
+      throw new Error(`expected import count=2, got ${importResult.count}`);
+
+    // Verify the quads exist
+    const q1 = await ctx.query({ s: "rt:test1", p: "value" });
+    if (q1.length === 0 || q1[0].o !== "hello")
+      throw new Error(`rt:test1 not found or wrong value`);
+    const q2 = await ctx.query({ s: "rt:test2", p: "value" });
+    if (q2.length === 0 || q2[0].o !== "world")
+      throw new Error(`rt:test2 not found or wrong value`);
+    ok("snapshot:import round-trip (data string) — 2 quads imported and verified");
+
+    // Import from file
+    const testFilePath = "/tmp/test-holo-import-" + Date.now() + ".json";
+    await Bun.write(testFilePath, JSON.stringify([
+      { s: "rt:test3", p: "value", o: "from-file", g: "_" },
+    ]));
+    const importFileResult = await ctx.call("snapshot:import", { path: testFilePath });
+    if (importFileResult.count !== 1)
+      throw new Error(`expected import count=1, got ${importFileResult.count}`);
+    const q3 = await ctx.query({ s: "rt:test3", p: "value" });
+    if (q3.length === 0 || q3[0].o !== "from-file")
+      throw new Error("rt:test3 not found after file import");
+    ok("snapshot:import from file path — 1 quad imported and verified");
+
+    // Cleanup temp files
+    const { unlinkSync } = await import("node:fs");
+    try { unlinkSync(tmpPath); } catch {}
+    try { unlinkSync(testFilePath); } catch {}
+  } catch (e) {
+    fail("snapshot:export/import round-trip", e);
+  }
+}
+
+async function testSnapshotBackup(ctx: Ctx) {
+  console.log("\n── Snapshot backup ──");
+
+  try {
+    const dest = "/tmp/test-holo-backup-" + Date.now() + ".db";
+    const result = await ctx.call("snapshot:backup", {
+      path: dest,
+      srcPath: "test-holoiconic.db",
+    });
+    if (result.path !== dest)
+      throw new Error(`expected path=${dest}, got ${result.path}`);
+
+    // Verify the backup file exists and is non-empty
+    const file = Bun.file(dest);
+    const exists = await file.exists();
+    if (!exists) throw new Error("backup file does not exist");
+    const size = file.size;
+    if (size < 100)
+      throw new Error(`backup file too small: ${size} bytes`);
+    ok("snapshot:backup creates valid database copy (" + size + " bytes)");
+
+    // Cleanup
+    const { unlinkSync } = await import("node:fs");
+    try { unlinkSync(dest); } catch {}
+  } catch (e) {
+    fail("snapshot:backup", e);
+  }
+}
+
+async function testEmbedNode(ctx: Ctx) {
+  console.log("\n── Embed node ──");
+
+  try {
+    // Without API key, uses stub
+    const result = await ctx.call("embed", { text: "hello world" });
+    if (!result.embedding || !Array.isArray(result.embedding))
+      throw new Error(`expected embedding array, got ${typeof result.embedding}`);
+    if (result.embedding.length !== 1536)
+      throw new Error(`expected 1536 dimensions, got ${result.embedding.length}`);
+    if (result.model !== "stub")
+      throw new Error(`expected model='stub', got '${result.model}'`);
+
+    // Verify it's normalized (unit vector)
+    let norm = 0;
+    for (const v of result.embedding) norm += v * v;
+    norm = Math.sqrt(norm);
+    if (Math.abs(norm - 1.0) > 0.01)
+      throw new Error(`expected unit vector (norm~1), got norm=${norm}`);
+
+    // Verify deterministic: same text gives same embedding
+    const result2 = await ctx.call("embed", { text: "hello world" });
+    if (result.embedding[0] !== result2.embedding[0] || result.embedding[100] !== result2.embedding[100])
+      throw new Error("stub embedding is not deterministic");
+
+    ok("embed returns 1536-dim normalized stub vector (deterministic)");
+  } catch (e) {
+    fail("embed node", e);
+  }
+}
+
+async function testVectorSearch(ctx: Ctx) {
+  console.log("\n── Vector search ──");
+
+  try {
+    // Search by text — uses stub embeddings
+    const results = await ctx.call("vector:search", { text: "shell command", k: 3 });
+    if (!Array.isArray(results))
+      throw new Error(`expected array, got ${typeof results}`);
+    if (results.length === 0)
+      throw new Error("expected at least 1 result");
+    if (results.length > 3)
+      throw new Error(`expected <= 3 results (k=3), got ${results.length}`);
+    // Each result should have quad and similarity
+    const first = results[0];
+    if (!first.quad || typeof first.similarity !== "number")
+      throw new Error(`result missing quad or similarity: ${JSON.stringify(first)}`);
+    // Results should be sorted by similarity descending
+    for (let i = 1; i < results.length; i++) {
+      if (results[i].similarity > results[i - 1].similarity)
+        throw new Error("results not sorted by similarity descending");
+    }
+    ok("vector:search returns top-k results sorted by similarity");
+  } catch (e) {
+    fail("vector:search", e);
+  }
+}
+
 async function testCallWithoutSource(ctx: Ctx) {
   console.log("\n── Edge cases ──");
 
@@ -425,6 +590,10 @@ async function main() {
   await testAgentLoop(ctx);
   await testReactiveCompilation(ctx);
   await testSpawnLifecycle(ctx);
+  await testSnapshotExportImport(ctx);
+  await testSnapshotBackup(ctx);
+  await testEmbedNode(ctx);
+  await testVectorSearch(ctx);
   await testApiServer(ctx);
   await testWebUi(ctx);
   await testCallWithoutSource(ctx);

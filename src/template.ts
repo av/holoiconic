@@ -269,7 +269,62 @@ await ctx.assert('list_nodes', 'tool_schema', JSON.stringify({
   }
 }));
 
-console.log('[agent:tools] registered 5 tools');
+// Snapshot export tool
+await ctx.assert('snapshot:export', 'type', 'Tool');
+await ctx.assert('snapshot:export', 'tool_schema', JSON.stringify({
+  name: 'snapshot_export',
+  description: 'Export all quads from the graph as JSON. Optionally write to a file path.',
+  input_schema: {
+    type: 'object',
+    properties: {
+      path: { type: 'string', description: 'File path to write JSON to (optional — if omitted, returns JSON string)' }
+    }
+  }
+}));
+
+// Snapshot import tool
+await ctx.assert('snapshot:import', 'type', 'Tool');
+await ctx.assert('snapshot:import', 'tool_schema', JSON.stringify({
+  name: 'snapshot_import',
+  description: 'Import quads from a JSON string or file path into the graph.',
+  input_schema: {
+    type: 'object',
+    properties: {
+      data: { type: 'string', description: 'JSON string containing array of quads (optional if path provided)' },
+      path: { type: 'string', description: 'File path to read JSON from (optional if data provided)' }
+    }
+  }
+}));
+
+// Snapshot backup tool
+await ctx.assert('snapshot:backup', 'type', 'Tool');
+await ctx.assert('snapshot:backup', 'tool_schema', JSON.stringify({
+  name: 'snapshot_backup',
+  description: 'Create a file-level backup of the SQLite database.',
+  input_schema: {
+    type: 'object',
+    properties: {
+      path: { type: 'string', description: 'Destination file path (optional — defaults to timestamped name)' }
+    }
+  }
+}));
+
+// Vector search tool
+await ctx.assert('vector:search', 'type', 'Tool');
+await ctx.assert('vector:search', 'tool_schema', JSON.stringify({
+  name: 'vector_search',
+  description: 'Semantic search over quads using vector embeddings. Provide text or a pre-computed embedding.',
+  input_schema: {
+    type: 'object',
+    properties: {
+      text: { type: 'string', description: 'Text to search for (will be embedded automatically)' },
+      embedding: { type: 'array', items: { type: 'number' }, description: 'Pre-computed embedding vector (optional if text provided)' },
+      k: { type: 'number', description: 'Number of results to return (default: 10)' }
+    }
+  }
+}));
+
+console.log('[agent:tools] registered 9 tools');
 `,
 
   // ── agent:loop ─────────────────────────────────────────────────
@@ -376,6 +431,14 @@ for (let i = 0; i < maxIterations; i++) {
       } else if (toolName === 'list_nodes') {
         const nodes = await ctx.query({ p: 'type', o: 'Function' });
         result = nodes.map(n => n.s).join('\\n');
+      } else if (toolName === 'snapshot_export') {
+        result = await ctx.call('snapshot:export', toolInput);
+      } else if (toolName === 'snapshot_import') {
+        result = JSON.stringify(await ctx.call('snapshot:import', toolInput));
+      } else if (toolName === 'snapshot_backup') {
+        result = JSON.stringify(await ctx.call('snapshot:backup', toolInput));
+      } else if (toolName === 'vector_search') {
+        result = JSON.stringify(await ctx.call('vector:search', toolInput));
       } else {
         // Try calling it as a generic node
         result = JSON.stringify(await ctx.call(toolName, toolInput));
@@ -671,6 +734,175 @@ if (signal) {
   });
   server.stop(true);
   console.log('[web:ui] stopped');
+}
+`,
+
+  // ── snapshot:export ──────────────────────────────────────────────
+  // Exports all quads from the graph as JSON.
+  "snapshot:export": `
+const allQuads = await ctx.query({});
+const data = allQuads.map(q => ({
+  s: q.s,
+  p: q.p,
+  o: q.o,
+  g: q.g,
+  attrs: q.attrs || undefined,
+}));
+const json = JSON.stringify(data, null, 2);
+
+const path = args && args.path;
+if (path) {
+  await Bun.write(path, json);
+  console.log('[snapshot:export] wrote ' + data.length + ' quads to ' + path);
+  return { count: data.length, path };
+}
+return json;
+`,
+
+  // ── snapshot:import ──────────────────────────────────────────────
+  // Imports quads from a JSON string or file path.
+  "snapshot:import": `
+let jsonStr;
+if (args && args.path) {
+  const file = Bun.file(args.path);
+  jsonStr = await file.text();
+} else if (args && args.data) {
+  jsonStr = args.data;
+} else {
+  throw new Error('[snapshot:import] args.data or args.path is required');
+}
+
+const quads = JSON.parse(jsonStr);
+if (!Array.isArray(quads)) throw new Error('[snapshot:import] expected JSON array');
+
+let count = 0;
+for (const q of quads) {
+  await ctx.assert(q.s, q.p, q.o, q.g || '_');
+  count++;
+}
+
+console.log('[snapshot:import] imported ' + count + ' quads');
+return { count };
+`,
+
+  // ── snapshot:backup ────────────────────────────────────────────
+  // File-level backup of the SQLite database.
+  "snapshot:backup": `
+const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
+const dest = (args && args.path) || ('holoiconic-backup-' + timestamp + '.db');
+
+// The database file path — default is holoiconic.db
+const srcPath = (args && args.srcPath) || 'holoiconic.db';
+
+const srcFile = Bun.file(srcPath);
+const exists = await srcFile.exists();
+if (!exists) {
+  throw new Error('[snapshot:backup] source database not found: ' + srcPath);
+}
+
+await Bun.write(dest, srcFile);
+console.log('[snapshot:backup] backed up to ' + dest);
+return { path: dest };
+`,
+
+  // ── embed ─────────────────────────────────────────────────────
+  // Generates an embedding vector for text. Uses OpenAI API or a stub.
+  "embed": `
+const text = args && args.text;
+if (!text) throw new Error('[embed] args.text is required');
+
+const apiKey = typeof Bun !== 'undefined' ? Bun.env.OPENAI_API_KEY : (typeof process !== 'undefined' ? process.env.OPENAI_API_KEY : undefined);
+
+if (!apiKey) {
+  // Stub: deterministic-ish random vector based on text hash
+  const dim = 1536;
+  const vec = new Array(dim);
+  let hash = 0;
+  for (let i = 0; i < text.length; i++) {
+    hash = ((hash << 5) - hash + text.charCodeAt(i)) | 0;
+  }
+  for (let i = 0; i < dim; i++) {
+    hash = ((hash << 5) - hash + i) | 0;
+    vec[i] = ((hash & 0xffff) / 0xffff) * 2 - 1;
+  }
+  // Normalize
+  let norm = 0;
+  for (let i = 0; i < dim; i++) norm += vec[i] * vec[i];
+  norm = Math.sqrt(norm);
+  for (let i = 0; i < dim; i++) vec[i] /= norm;
+  return { embedding: vec, model: 'stub', dimensions: dim };
+}
+
+const resp = await fetch('https://api.openai.com/v1/embeddings', {
+  method: 'POST',
+  headers: {
+    'Content-Type': 'application/json',
+    'Authorization': 'Bearer ' + apiKey,
+  },
+  body: JSON.stringify({
+    model: 'text-embedding-3-small',
+    input: text,
+  }),
+});
+
+if (!resp.ok) {
+  const errText = await resp.text();
+  throw new Error('[embed] API error (' + resp.status + '): ' + errText);
+}
+
+const result = await resp.json();
+const embedding = result.data[0].embedding;
+return { embedding, model: 'text-embedding-3-small', dimensions: embedding.length };
+`,
+
+  // ── vector:search ──────────────────────────────────────────────
+  // Semantic search over quads using vector embeddings.
+  "vector:search": `
+const k = (args && args.k) || 10;
+let embedding = args && args.embedding;
+
+if (!embedding && args && args.text) {
+  const result = await ctx.call('embed', { text: args.text });
+  embedding = result.embedding;
+} else if (!embedding) {
+  throw new Error('[vector:search] args.text or args.embedding is required');
+}
+
+// Try vector_top_k — requires vector index support
+try {
+  const vecStr = '[' + embedding.join(',') + ']';
+  const rs = await ctx.query({});  // We'll filter manually if vector search isn't available
+
+  // Try the native vector search first
+  // Note: This requires the libsql_vector_idx index to be present
+  // If it fails, fall back to brute-force cosine similarity
+  throw new Error('fallback'); // Skip native for now — libSQL vector support varies
+} catch {
+  // Fallback: brute-force cosine similarity over all quads
+  // This works without vector index support
+  const allQuads = await ctx.query({});
+
+  // For now, compute similarity based on text content of the object field
+  const results = [];
+  for (const q of allQuads) {
+    // Get embedding for this quad's content
+    const qText = q.s + ' ' + q.p + ' ' + q.o;
+    const qResult = await ctx.call('embed', { text: qText });
+    const qEmb = qResult.embedding;
+
+    // Cosine similarity
+    let dot = 0, normA = 0, normB = 0;
+    for (let i = 0; i < embedding.length && i < qEmb.length; i++) {
+      dot += embedding[i] * qEmb[i];
+      normA += embedding[i] * embedding[i];
+      normB += qEmb[i] * qEmb[i];
+    }
+    const similarity = dot / (Math.sqrt(normA) * Math.sqrt(normB));
+    results.push({ quad: { s: q.s, p: q.p, o: q.o, g: q.g }, similarity });
+  }
+
+  results.sort((a, b) => b.similarity - a.similarity);
+  return results.slice(0, k);
 }
 `,
 
