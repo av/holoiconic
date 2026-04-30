@@ -6,7 +6,7 @@ import { seedTemplate } from "./template.ts";
 // ~30 lines of plumbing, no policy. Everything else lives in the graph.
 
 async function boot() {
-  // 1. Connect to local libSQL
+  // 1. Connect to libSQL — Turso Cloud if TURSO_URL is set, else local file
   const db = createDatabase("holoiconic.db");
 
   // 2. Init schema (idempotent)

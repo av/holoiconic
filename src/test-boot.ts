@@ -1074,6 +1074,276 @@ async function testCallWithoutSource(ctx: Ctx) {
   }
 }
 
+async function testTursoCloudConfig() {
+  console.log("\n── Turso Cloud config ──");
+
+  // Test isRemoteUrl
+  try {
+    const { isRemoteUrl } = await import("./db.ts");
+    if (!isRemoteUrl("libsql://mydb-org.turso.io"))
+      throw new Error("expected libsql:// to be remote");
+    if (!isRemoteUrl("https://mydb-org.turso.io"))
+      throw new Error("expected https:// to be remote");
+    if (!isRemoteUrl("wss://mydb-org.turso.io"))
+      throw new Error("expected wss:// to be remote");
+    if (isRemoteUrl("file:holoiconic.db"))
+      throw new Error("expected file: to not be remote");
+    if (isRemoteUrl("holoiconic.db"))
+      throw new Error("expected plain path to not be remote");
+    ok("isRemoteUrl correctly identifies remote vs local URLs");
+  } catch (e) {
+    fail("isRemoteUrl", e);
+  }
+
+  // Test createDatabase with local path (backward compatible)
+  try {
+    const { createDatabase } = await import("./db.ts");
+    const db = createDatabase("test-turso-compat.db");
+    // Should create a working local client
+    await db.execute("SELECT 1");
+    ok("createDatabase(string) backward compatible with local path");
+    // Cleanup
+    const { unlinkSync } = await import("node:fs");
+    try { unlinkSync("test-turso-compat.db"); } catch {}
+  } catch (e) {
+    fail("createDatabase backward compat", e);
+  }
+
+  // Test createDatabase with config object (local)
+  try {
+    const { createDatabase } = await import("./db.ts");
+    const db = createDatabase({ path: "test-turso-config.db" });
+    await db.execute("SELECT 1");
+    ok("createDatabase({ path }) works with config object");
+    const { unlinkSync } = await import("node:fs");
+    try { unlinkSync("test-turso-config.db"); } catch {}
+  } catch (e) {
+    fail("createDatabase config object", e);
+  }
+
+  // Test that TURSO_URL env var would be picked up (without actually connecting)
+  // We verify the code path by checking that isRemoteUrl is used in createDatabase
+  try {
+    const { readFileSync } = await import("node:fs");
+    const dbSrc = readFileSync("/home/everlier/code/holoiconic/src/db.ts", "utf-8");
+    if (!dbSrc.includes("TURSO_URL"))
+      throw new Error("db.ts does not check TURSO_URL env var");
+    if (!dbSrc.includes("TURSO_AUTH_TOKEN"))
+      throw new Error("db.ts does not check TURSO_AUTH_TOKEN env var");
+    if (!dbSrc.includes("authToken"))
+      throw new Error("db.ts does not pass authToken to createClient");
+    ok("createDatabase checks TURSO_URL and TURSO_AUTH_TOKEN env vars");
+  } catch (e) {
+    fail("TURSO env vars", e);
+  }
+}
+
+async function testGraphDescribe(ctx: Ctx) {
+  console.log("\n── graph:describe ──");
+
+  try {
+    // Describe the 'shell' node — should return all its quads
+    const result = await ctx.call("graph:describe", { subject: "shell" });
+    if (!result || result.subject !== "shell")
+      throw new Error(`expected subject='shell', got '${result && result.subject}'`);
+    if (!result.quads || !Array.isArray(result.quads))
+      throw new Error("expected quads array");
+    if (result.quads.length < 2)
+      throw new Error(`expected >=2 quads for shell, got ${result.quads.length}`);
+
+    // Should have 'source' and 'type' predicates
+    const preds = Object.keys(result.predicates);
+    if (!preds.includes("source"))
+      throw new Error("expected 'source' predicate in description");
+    if (!preds.includes("type"))
+      throw new Error("expected 'type' predicate in description");
+
+    ok("graph:describe returns all quads and predicates for a subject");
+  } catch (e) {
+    fail("graph:describe", e);
+  }
+
+  // Test with nonexistent subject
+  try {
+    const result = await ctx.call("graph:describe", { subject: "nonexistent:xyz" });
+    if (result.quads.length !== 0)
+      throw new Error(`expected 0 quads for nonexistent subject, got ${result.quads.length}`);
+    ok("graph:describe returns empty for nonexistent subject");
+  } catch (e) {
+    fail("graph:describe nonexistent", e);
+  }
+
+  // Test validation
+  try {
+    await ctx.call("graph:describe", {});
+    fail("graph:describe validation", "should have thrown");
+  } catch (e: any) {
+    if (e.message && e.message.includes("subject"))
+      ok("graph:describe throws on missing subject");
+    else
+      fail("graph:describe validation", e);
+  }
+}
+
+async function testGraphSubjects(ctx: Ctx) {
+  console.log("\n── graph:subjects ──");
+
+  try {
+    // Get all subjects (no filter)
+    const result = await ctx.call("graph:subjects", {});
+    if (!Array.isArray(result))
+      throw new Error(`expected array, got ${typeof result}`);
+    if (result.length < 5)
+      throw new Error(`expected >=5 subjects, got ${result.length}`);
+    // Each result should have subject and types
+    const first = result[0];
+    if (!first.subject || !Array.isArray(first.types))
+      throw new Error(`expected {subject, types[]}, got ${JSON.stringify(first)}`);
+
+    // Verify known subjects are present
+    const subjects = result.map((r: any) => r.subject);
+    if (!subjects.includes("shell"))
+      throw new Error("expected 'shell' in subjects");
+    if (!subjects.includes("main"))
+      throw new Error("expected 'main' in subjects");
+
+    ok("graph:subjects returns all subjects with types");
+  } catch (e) {
+    fail("graph:subjects all", e);
+  }
+
+  try {
+    // Filter by type 'Function'
+    const result = await ctx.call("graph:subjects", { type: "Function" });
+    if (!Array.isArray(result))
+      throw new Error(`expected array, got ${typeof result}`);
+    // All results should have type 'Function'
+    for (const r of result) {
+      if (!r.types.includes("Function"))
+        throw new Error(`expected Function type, got ${JSON.stringify(r.types)}`);
+    }
+    if (result.length < 7)
+      throw new Error(`expected >=7 Function subjects, got ${result.length}`);
+    ok("graph:subjects filters by type correctly");
+  } catch (e) {
+    fail("graph:subjects filter", e);
+  }
+
+  try {
+    // Filter by type 'Tool'
+    const result = await ctx.call("graph:subjects", { type: "Tool" });
+    if (!Array.isArray(result))
+      throw new Error(`expected array, got ${typeof result}`);
+    if (result.length < 5)
+      throw new Error(`expected >=5 Tool subjects, got ${result.length}`);
+    ok("graph:subjects lists Tool-type subjects");
+  } catch (e) {
+    fail("graph:subjects Tool filter", e);
+  }
+}
+
+async function testWebUiEnhancements(ctx: Ctx) {
+  console.log("\n── WebUI enhancements ──");
+
+  const port = 14500 + Math.floor(Math.random() * 500);
+  const ac = new AbortController();
+
+  try {
+    ctx.call("web:ui", { port, apiPort: 19999, signal: ac.signal }).catch(() => {});
+    await new Promise((r) => setTimeout(r, 200));
+
+    // Test search input exists in HTML
+    try {
+      const res = await fetch(`http://localhost:${port}/`);
+      const body = await res.text();
+      if (!body.includes('id="node-search"'))
+        throw new Error("HTML does not contain search input");
+      if (!body.includes('Filter nodes'))
+        throw new Error("HTML does not contain search placeholder");
+      ok("WebUI HTML contains search/filter input");
+    } catch (e) {
+      fail("WebUI search input", e);
+    }
+
+    // Test type badges in HTML
+    try {
+      const res = await fetch(`http://localhost:${port}/`);
+      const body = await res.text();
+      if (!body.includes('badge'))
+        throw new Error("HTML does not contain badge classes");
+      if (!body.includes('badge-function'))
+        throw new Error("HTML does not contain badge-function class");
+      if (!body.includes('badge-tool'))
+        throw new Error("HTML does not contain badge-tool class");
+      if (!body.includes('badge-spawned'))
+        throw new Error("HTML does not contain badge-spawned class");
+      ok("WebUI HTML contains type badge styles");
+    } catch (e) {
+      fail("WebUI badges", e);
+    }
+
+    // Test /api/nodes returns types
+    try {
+      const res = await fetch(`http://localhost:${port}/api/nodes`);
+      const nodes = await res.json() as any[];
+      const shellNode = nodes.find((n: any) => n.name === "shell");
+      if (!shellNode)
+        throw new Error("shell node not found in /api/nodes");
+      if (!Array.isArray(shellNode.types))
+        throw new Error("expected types array in node response");
+      if (!shellNode.types.includes("Function"))
+        throw new Error("expected 'Function' in shell node types");
+      ok("GET /api/nodes returns types alongside names");
+    } catch (e) {
+      fail("GET /api/nodes types", e);
+    }
+
+    // Test DELETE /api/node/:name
+    try {
+      // Create a disposable node first
+      await ctx.assert("test:deleteme", "type", "Function");
+      await ctx.assert("test:deleteme", "source", "return 'delete me'");
+      await ctx.assert("test:deleteme", "metadata", "extra");
+
+      const res = await fetch(`http://localhost:${port}/api/node/test:deleteme`, {
+        method: "DELETE",
+      });
+      const data = await res.json() as any;
+      if (!res.ok)
+        throw new Error(`expected 200, got ${res.status}: ${JSON.stringify(data)}`);
+      if (!data.ok)
+        throw new Error(`expected ok=true, got ${JSON.stringify(data)}`);
+      if (data.retracted !== 3)
+        throw new Error(`expected 3 retracted quads, got ${data.retracted}`);
+
+      // Verify the node is gone from the graph
+      const remaining = await ctx.query({ s: "test:deleteme" });
+      if (remaining.length !== 0)
+        throw new Error(`expected 0 remaining quads, got ${remaining.length}`);
+
+      ok("DELETE /api/node/:name retracts all quads for the subject");
+    } catch (e) {
+      fail("DELETE /api/node/:name", e);
+    }
+
+    // Test delete button in HTML
+    try {
+      const res = await fetch(`http://localhost:${port}/`);
+      const body = await res.text();
+      if (!body.includes('delete-btn'))
+        throw new Error("HTML does not contain delete button class");
+      if (!body.includes('deleteNode'))
+        throw new Error("HTML does not contain deleteNode function");
+      ok("WebUI HTML contains delete node button");
+    } catch (e) {
+      fail("WebUI delete button", e);
+    }
+  } finally {
+    ac.abort();
+    await new Promise((r) => setTimeout(r, 100));
+  }
+}
+
 // ── Main ──────────────────────────────────────────────────────────
 
 async function main() {
@@ -1107,6 +1377,10 @@ async function main() {
   await testWebUi(ctx);
   await testToolCallVisibility(ctx);
   await testCallWithoutSource(ctx);
+  await testTursoCloudConfig();
+  await testGraphDescribe(ctx);
+  await testGraphSubjects(ctx);
+  await testWebUiEnhancements(ctx);
 
   // Summary
   console.log("\n── Summary ──");

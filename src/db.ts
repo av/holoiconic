@@ -1,9 +1,60 @@
 import { createClient, type Client } from "@libsql/client";
 
-export function createDatabase(path?: string): Client {
-  return createClient({
-    url: path ? `file:${path}` : "file:holoiconic.db",
-  });
+export type DatabaseConfig = {
+  /** Turso Cloud URL (e.g. libsql://db-org.turso.io) — overrides path */
+  url?: string;
+  /** Turso Cloud auth token */
+  authToken?: string;
+  /** Local file path (ignored if url is a remote URL) */
+  path?: string;
+};
+
+/**
+ * Creates a libSQL client. Priority:
+ * 1. Explicit config.url + config.authToken (Turso Cloud)
+ * 2. TURSO_URL + TURSO_AUTH_TOKEN env vars (Turso Cloud)
+ * 3. config.path as a local file
+ * 4. "file:holoiconic.db" default
+ */
+export function createDatabase(pathOrConfig?: string | DatabaseConfig): Client {
+  // Normalize to config object
+  const config: DatabaseConfig =
+    typeof pathOrConfig === "string"
+      ? { path: pathOrConfig }
+      : pathOrConfig ?? {};
+
+  // Check for Turso Cloud: explicit config first, then env vars
+  const tursoUrl =
+    config.url ||
+    (typeof Bun !== "undefined" ? Bun.env.TURSO_URL : undefined) ||
+    (typeof process !== "undefined" ? process.env.TURSO_URL : undefined);
+
+  const tursoToken =
+    config.authToken ||
+    (typeof Bun !== "undefined" ? Bun.env.TURSO_AUTH_TOKEN : undefined) ||
+    (typeof process !== "undefined" ? process.env.TURSO_AUTH_TOKEN : undefined);
+
+  if (tursoUrl && isRemoteUrl(tursoUrl)) {
+    console.log(`[db] connecting to Turso Cloud: ${tursoUrl}`);
+    return createClient({
+      url: tursoUrl,
+      authToken: tursoToken,
+    });
+  }
+
+  // Local file mode
+  const localPath = config.path || tursoUrl || "holoiconic.db";
+  const fileUrl = localPath.startsWith("file:") ? localPath : `file:${localPath}`;
+  return createClient({ url: fileUrl });
+}
+
+/** Returns true if the URL points to a remote Turso/libSQL server */
+export function isRemoteUrl(url: string): boolean {
+  return (
+    url.startsWith("libsql://") ||
+    url.startsWith("https://") ||
+    url.startsWith("wss://")
+  );
 }
 
 export async function initSchema(db: Client): Promise<void> {

@@ -352,7 +352,34 @@ await ctx.assert('vector:search', 'tool_schema', JSON.stringify({
   }
 }));
 
-console.log('[agent:tools] registered 9 tools');
+// Describe tool — inspect all quads about a subject
+await ctx.assert('graph_describe', 'type', 'Tool');
+await ctx.assert('graph_describe', 'tool_schema', JSON.stringify({
+  name: 'graph_describe',
+  description: 'Describe a subject: return ALL quads about it (all predicates and values). Useful for inspecting what a node IS.',
+  input_schema: {
+    type: 'object',
+    properties: {
+      subject: { type: 'string', description: 'The subject to describe (e.g. a node name)' }
+    },
+    required: ['subject']
+  }
+}));
+
+// Subjects tool — list all unique subjects
+await ctx.assert('graph_subjects', 'type', 'Tool');
+await ctx.assert('graph_subjects', 'tool_schema', JSON.stringify({
+  name: 'graph_subjects',
+  description: 'List all unique subjects in the graph. Optionally filter by type (Function, Tool, Spawned, etc.).',
+  input_schema: {
+    type: 'object',
+    properties: {
+      type: { type: 'string', description: 'Filter by type (e.g. Function, Tool, Spawned). Optional.' }
+    }
+  }
+}));
+
+console.log('[agent:tools] registered 11 tools');
 `,
 
   // ── agent:loop ─────────────────────────────────────────────────
@@ -476,6 +503,10 @@ for (let i = 0; i < maxIterations; i++) {
         result = JSON.stringify(await ctx.call('snapshot:backup', toolInput));
       } else if (toolName === 'vector_search') {
         result = JSON.stringify(await ctx.call('vector:search', toolInput));
+      } else if (toolName === 'graph_describe') {
+        result = JSON.stringify(await ctx.call('graph:describe', toolInput));
+      } else if (toolName === 'graph_subjects') {
+        result = JSON.stringify(await ctx.call('graph:subjects', toolInput));
       } else {
         // Try calling it as a generic node
         result = JSON.stringify(await ctx.call(toolName, toolInput));
@@ -729,9 +760,18 @@ const html = \`<!DOCTYPE html>
   #send:hover { background: #2ea043; }
   #send:disabled { opacity: 0.5; cursor: not-allowed; }
   #node-list { flex: 1; overflow-y: auto; padding: 8px; }
-  .node-item { padding: 6px 10px; cursor: pointer; border-radius: 4px; font-size: 13px; font-family: monospace; }
+  #node-search { width: 100%; background: #161b22; border: 1px solid #30363d; color: #c9d1d9; padding: 6px 10px; font-size: 12px; font-family: monospace; border-radius: 4px; margin-bottom: 4px; }
+  #node-search:focus { outline: none; border-color: #58a6ff; }
+  #node-search-wrap { padding: 8px 8px 0 8px; }
+  .node-item { padding: 6px 10px; cursor: pointer; border-radius: 4px; font-size: 13px; font-family: monospace; display: flex; align-items: center; gap: 6px; }
   .node-item:hover { background: #161b22; }
   .node-item.selected { background: #1f2937; color: #58a6ff; }
+  .node-item .node-name-text { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .badge { font-size: 9px; padding: 1px 5px; border-radius: 3px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.3px; flex-shrink: 0; }
+  .badge-function { background: #1f6feb33; color: #58a6ff; }
+  .badge-tool { background: #23863633; color: #3fb950; }
+  .badge-spawned { background: #da363333; color: #f85149; }
+  .badge-other { background: #30363d; color: #8b949e; }
   #node-detail { border-top: 1px solid #21262d; display: flex; flex-direction: column; }
   #node-detail-header { padding: 8px 12px; display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid #21262d; }
   #node-detail-header .node-name { font-weight: 600; font-size: 13px; color: #58a6ff; }
@@ -742,6 +782,8 @@ const html = \`<!DOCTYPE html>
   #node-detail-header button.save-btn:hover { background: #2ea043; }
   #node-detail-header button.cancel-btn { background: #da3633; color: #fff; }
   #node-detail-header button.cancel-btn:hover { background: #f85149; }
+  #node-detail-header button.delete-btn { background: #da3633; color: #fff; }
+  #node-detail-header button.delete-btn:hover { background: #f85149; }
   #node-source { height: 300px; overflow-y: auto; padding: 12px; font-size: 12px; font-family: monospace; white-space: pre-wrap; background: #0d1117; color: #8b949e; }
   #node-source-edit { height: 300px; width: 100%; padding: 12px; font-size: 12px; font-family: monospace; background: #161b22; color: #c9d1d9; border: 1px solid #58a6ff; resize: none; display: none; }
   #create-node-form { padding: 12px; border-top: 1px solid #21262d; display: none; }
@@ -777,6 +819,7 @@ const html = \`<!DOCTYPE html>
       <button class="create-btn" id="create-submit">Create</button>
     </div>
   </div>
+  <div id="node-search-wrap"><input id="node-search" type="text" placeholder="Filter nodes..." autocomplete="off" /></div>
   <div id="node-list"></div>
   <div id="node-detail">
     <div id="node-detail-header">
@@ -799,10 +842,12 @@ const nodeSourceEdit = document.getElementById('node-source-edit');
 const detailNodeName = document.getElementById('detail-node-name');
 const detailButtons = document.getElementById('detail-buttons');
 const createNodeForm = document.getElementById('create-node-form');
+const nodeSearchInput = document.getElementById('node-search');
 
 let selectedNode = null;
 let originalSource = null;
 let editMode = false;
+let allNodesCache = [];
 
 // Persistent session ID for multi-turn conversations
 const sessionId = 'webui:' + Date.now() + '-' + Math.random().toString(36).slice(2, 8);
@@ -971,6 +1016,31 @@ function renderDetailButtons() {
       setEditMode(true);
     };
     detailButtons.appendChild(editBtn);
+    const deleteBtn = document.createElement('button');
+    deleteBtn.className = 'delete-btn';
+    deleteBtn.textContent = 'Delete';
+    deleteBtn.onclick = deleteNode;
+    detailButtons.appendChild(deleteBtn);
+  }
+}
+
+async function deleteNode() {
+  if (!selectedNode) return;
+  if (!confirm('Delete node "' + selectedNode + '"? This retracts ALL quads for this subject.')) return;
+  try {
+    const res = await fetch(BASE + '/api/node/' + encodeURIComponent(selectedNode), {
+      method: 'DELETE',
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || 'Delete failed');
+    notify('Node "' + selectedNode + '" deleted (' + data.retracted + ' quads)', 'success');
+    selectedNode = null;
+    detailNodeName.textContent = '';
+    nodeSource.textContent = 'Click a node to view source';
+    detailButtons.innerHTML = '';
+    loadNodes();
+  } catch (e) {
+    notify('Error deleting: ' + e.message, 'error');
   }
 }
 
@@ -994,20 +1064,48 @@ async function saveSource() {
   }
 }
 
+function getBadgeClass(types) {
+  if (!types || types.length === 0) return 'badge-other';
+  if (types.includes('Tool')) return 'badge-tool';
+  if (types.includes('Spawned')) return 'badge-spawned';
+  if (types.includes('Function')) return 'badge-function';
+  return 'badge-other';
+}
+
+function renderNodeList(filter) {
+  const f = (filter || '').toLowerCase();
+  nodeList.innerHTML = '';
+  for (const n of allNodesCache) {
+    if (f && !n.name.toLowerCase().includes(f)) continue;
+    const el = document.createElement('div');
+    el.className = 'node-item' + (n.name === selectedNode ? ' selected' : '');
+    const nameSpan = document.createElement('span');
+    nameSpan.className = 'node-name-text';
+    nameSpan.textContent = n.name;
+    el.appendChild(nameSpan);
+    if (n.types && n.types.length > 0) {
+      for (const t of n.types) {
+        const badge = document.createElement('span');
+        badge.className = 'badge ' + getBadgeClass([t]);
+        badge.textContent = t;
+        el.appendChild(badge);
+      }
+    }
+    el.onclick = () => showSource(n.name, el);
+    nodeList.appendChild(el);
+  }
+}
+
 async function loadNodes() {
   try {
     const res = await fetch(BASE + '/api/nodes');
     const nodes = await res.json();
-    nodeList.innerHTML = '';
-    for (const n of nodes) {
-      const el = document.createElement('div');
-      el.className = 'node-item' + (n.name === selectedNode ? ' selected' : '');
-      el.textContent = n.name;
-      el.onclick = () => showSource(n.name, el);
-      nodeList.appendChild(el);
-    }
+    allNodesCache = nodes;
+    renderNodeList(nodeSearchInput.value);
   } catch {}
 }
+
+nodeSearchInput.oninput = () => renderNodeList(nodeSearchInput.value);
 
 async function showSource(name, el) {
   document.querySelectorAll('.node-item').forEach(e => e.classList.remove('selected'));
@@ -1074,7 +1172,7 @@ const server = Bun.serve({
     const url = new URL(req.url);
     const corsHeaders = {
       'Access-Control-Allow-Origin': '*',
-      'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
+      'Access-Control-Allow-Methods': 'GET, POST, DELETE, OPTIONS',
       'Access-Control-Allow-Headers': 'Content-Type',
     };
 
@@ -1112,9 +1210,16 @@ const server = Bun.serve({
           return Response.json({ error: err.message || String(err) }, { status: 500, headers: corsHeaders });
         }
       }
-      // GET: list nodes
-      const nodes = await ctx.query({ p: 'type', o: 'Function' });
-      const result = nodes.map(n => ({ name: n.s })).sort((a, b) => a.name.localeCompare(b.name));
+      // GET: list nodes — returns names and their types
+      const fnNodes = await ctx.query({ p: 'type', o: 'Function' });
+      const names = fnNodes.map(n => n.s);
+      const result = [];
+      for (const name of names) {
+        const typeQuads = await ctx.query({ s: name, p: 'type' });
+        const types = typeQuads.map(q => q.o);
+        result.push({ name, types });
+      }
+      result.sort((a, b) => a.name.localeCompare(b.name));
       return Response.json(result, { headers: corsHeaders });
     }
 
@@ -1141,6 +1246,21 @@ const server = Bun.serve({
         await ctx.assert(name, 'source', newSource);
 
         return Response.json({ ok: true, name }, { headers: corsHeaders });
+      } catch (err) {
+        return Response.json({ error: err.message || String(err) }, { status: 500, headers: corsHeaders });
+      }
+    }
+
+    // API: delete a node (DELETE /api/node/:name)
+    if (url.pathname.startsWith('/api/node/') && !url.pathname.includes('/source') && req.method === 'DELETE') {
+      try {
+        const name = decodeURIComponent(url.pathname.slice('/api/node/'.length));
+        // Retract ALL quads where this subject appears
+        const quads = await ctx.query({ s: name });
+        for (const q of quads) {
+          await ctx.retract(q.s, q.p, q.o, q.g);
+        }
+        return Response.json({ ok: true, name, retracted: quads.length }, { headers: corsHeaders });
       } catch (err) {
         return Response.json({ error: err.message || String(err) }, { status: 500, headers: corsHeaders });
       }
@@ -1389,6 +1509,58 @@ try {
   results.sort((a, b) => b.similarity - a.similarity);
   return results.slice(0, k);
 }
+`,
+
+  // ── graph:describe ──────────────────────────────────────────────
+  // Returns ALL quads about a given subject — all predicates and objects.
+  // Useful for inspecting what a node IS: its type, source, metadata, tool schema, etc.
+  "graph:describe": `
+const subject = args && args.subject;
+if (!subject) throw new Error('[graph:describe] args.subject is required');
+
+const quads = await ctx.query({ s: subject });
+const description = {};
+for (const q of quads) {
+  if (!description[q.p]) {
+    description[q.p] = [];
+  }
+  description[q.p].push({ value: q.o, graph: q.g });
+}
+
+return { subject, quads: quads.map(q => ({ s: q.s, p: q.p, o: q.o, g: q.g })), predicates: description };
+`,
+
+  // ── graph:subjects ─────────────────────────────────────────────
+  // Returns all unique subjects in the graph. Optionally filtered by type.
+  "graph:subjects": `
+const typeFilter = args && args.type;
+
+let quads;
+if (typeFilter) {
+  quads = await ctx.query({ p: 'type', o: typeFilter });
+} else {
+  quads = await ctx.query({});
+}
+
+const subjects = new Set();
+for (const q of quads) {
+  subjects.add(typeFilter ? q.s : q.s);
+}
+
+const result = [...subjects].sort();
+
+// Enrich with types if we did not filter by type
+if (!typeFilter) {
+  const enriched = [];
+  for (const s of result) {
+    const typeQuads = await ctx.query({ s, p: 'type' });
+    const types = typeQuads.map(q => q.o);
+    enriched.push({ subject: s, types });
+  }
+  return enriched;
+}
+
+return result.map(s => ({ subject: s, types: [typeFilter] }));
 `,
 
   // ── set ─────────────────────────────────────────────────────────
