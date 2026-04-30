@@ -25,7 +25,26 @@ ctx.call = async function cachedCall(name, callArgs) {
     fn = new AsyncFunction('ctx', 'args', rs[0].o);
     cache.set(name, fn);
   }
-  return nodeStorage.run(name, () => fn(ctx, callArgs));
+  // Metrics tracking — skip for metrics node itself to avoid infinite recursion
+  if (name === 'metrics' || name === 'metrics:report') {
+    return nodeStorage.run(name, () => fn(ctx, callArgs));
+  }
+  const startTime = Date.now();
+  let error = null;
+  try {
+    const result = await nodeStorage.run(name, () => fn(ctx, callArgs));
+    return result;
+  } catch (err) {
+    error = err.message || String(err);
+    throw err;
+  } finally {
+    const durationMs = Date.now() - startTime;
+    try {
+      await originalCall('metrics', { record: { name, durationMs, error } });
+    } catch (metricsErr) {
+      // Silently skip — metrics node may not exist yet during boot
+    }
+  }
 };
 
 // Watch for source changes — snapshot old source before invalidating cache
@@ -474,7 +493,20 @@ await ctx.assert('cron_list', 'tool_schema', JSON.stringify({
   }
 }));
 
-console.log('[agent:tools] registered 17 tools');
+// Metrics report tool
+await ctx.assert('metrics_report', 'type', 'Tool');
+await ctx.assert('metrics_report', 'tool_schema', JSON.stringify({
+  name: 'metrics_report',
+  description: 'Show metrics for all nodes: call counts, total duration, average latency, and error counts. Sorted by call count descending.',
+  input_schema: {
+    type: 'object',
+    properties: {
+      raw: { type: 'boolean', description: 'If true, return structured data alongside the formatted report' }
+    }
+  }
+}));
+
+console.log('[agent:tools] registered 18 tools');
 `,
 
   // ── agent:loop ─────────────────────────────────────────────────
@@ -616,6 +648,9 @@ for (let i = 0; i < maxIterations; i++) {
         result = JSON.stringify(cronResult);
       } else if (toolName === 'cron_list') {
         result = JSON.stringify(await ctx.call('cron:list', toolInput));
+      } else if (toolName === 'metrics_report') {
+        result = await ctx.call('metrics:report', toolInput);
+        if (typeof result !== 'string') result = JSON.stringify(result);
       } else {
         // Try calling it as a generic node
         result = JSON.stringify(await ctx.call(toolName, toolInput));
@@ -1935,6 +1970,100 @@ for (const cq of cronQuads) {
 return { jobs, count: jobs.length };
 `,
 
+  // ── metrics ──────────────────────────────────────────────────────
+  // Tracks call counts, total duration, and errors per node.
+  // Stores metrics as quads in the 'metrics' graph.
+  // Interface: ctx.call('metrics', { record: { name, durationMs, error? } })
+  "metrics": `
+const record = args && args.record;
+if (!record) throw new Error('[metrics] args.record is required');
+const name = record.name;
+const durationMs = record.durationMs;
+const error = record.error;
+if (!name) throw new Error('[metrics] record.name is required');
+if (typeof durationMs !== 'number') throw new Error('[metrics] record.durationMs (number) is required');
+
+// Read current values
+const callsQuads = await ctx.query({ s: name, p: 'metric:calls', g: 'metrics' });
+const durationQuads = await ctx.query({ s: name, p: 'metric:duration_ms', g: 'metrics' });
+const errorsQuads = await ctx.query({ s: name, p: 'metric:errors', g: 'metrics' });
+
+const prevCalls = callsQuads.length > 0 ? parseInt(callsQuads[0].o) : 0;
+const prevDuration = durationQuads.length > 0 ? parseFloat(durationQuads[0].o) : 0;
+const prevErrors = errorsQuads.length > 0 ? parseInt(errorsQuads[0].o) : 0;
+
+// Retract old values
+for (const q of callsQuads) await ctx.retract(q.s, q.p, q.o, q.g);
+for (const q of durationQuads) await ctx.retract(q.s, q.p, q.o, q.g);
+if (error) {
+  for (const q of errorsQuads) await ctx.retract(q.s, q.p, q.o, q.g);
+}
+
+// Assert new values
+await ctx.assert(name, 'metric:calls', String(prevCalls + 1), 'metrics');
+await ctx.assert(name, 'metric:duration_ms', String(prevDuration + durationMs), 'metrics');
+if (error) {
+  await ctx.assert(name, 'metric:errors', String(prevErrors + 1), 'metrics');
+}
+
+return { name, calls: prevCalls + 1, duration_ms: prevDuration + durationMs, errors: error ? prevErrors + 1 : prevErrors };
+`,
+
+  // ── metrics:report ─────────────────────────────────────────────
+  // Returns a formatted report of all nodes' metrics sorted by call count.
+  "metrics:report": `
+const callsQuads = await ctx.query({ p: 'metric:calls', g: 'metrics' });
+const nodes = {};
+
+for (const q of callsQuads) {
+  nodes[q.s] = { name: q.s, calls: parseInt(q.o), duration_ms: 0, errors: 0 };
+}
+
+// Enrich with duration
+const durationQuads = await ctx.query({ p: 'metric:duration_ms', g: 'metrics' });
+for (const q of durationQuads) {
+  if (nodes[q.s]) nodes[q.s].duration_ms = parseFloat(q.o);
+}
+
+// Enrich with errors
+const errorsQuads = await ctx.query({ p: 'metric:errors', g: 'metrics' });
+for (const q of errorsQuads) {
+  if (nodes[q.s]) nodes[q.s].errors = parseInt(q.o);
+}
+
+const sorted = Object.values(nodes).sort((a, b) => b.calls - a.calls);
+
+// Calculate averages
+for (const n of sorted) {
+  n.avg_ms = n.calls > 0 ? Math.round((n.duration_ms / n.calls) * 100) / 100 : 0;
+}
+
+// Format report
+const lines = ['=== Metrics Report ===', ''];
+lines.push('Node'.padEnd(30) + 'Calls'.padStart(8) + 'Total ms'.padStart(12) + 'Avg ms'.padStart(10) + 'Errors'.padStart(8));
+lines.push('-'.repeat(68));
+
+for (const n of sorted) {
+  lines.push(
+    n.name.padEnd(30) +
+    String(n.calls).padStart(8) +
+    String(Math.round(n.duration_ms)).padStart(12) +
+    String(n.avg_ms).padStart(10) +
+    String(n.errors).padStart(8)
+  );
+}
+
+lines.push('');
+lines.push('Total nodes: ' + sorted.length);
+
+const report = lines.join('\\n');
+
+if (args && args.raw) {
+  return { nodes: sorted, report };
+}
+return report;
+`,
+
   // ── set ─────────────────────────────────────────────────────────
   // Convenience: retracts all quads matching (s, p, *, g) then asserts (s, p, o, g).
   // Useful for single-valued predicates like 'source', 'status', etc.
@@ -2187,6 +2316,10 @@ for await (const line of rl) {
         }
       }
 
+    } else if (trimmed === '.metrics') {
+      const report = await ctx.call('metrics:report');
+      console.log(report);
+
     } else if (trimmed.startsWith('.eval ')) {
       const code = trimmed.slice(6);
       const AsyncFn = Object.getPrototypeOf(async function () {}).constructor;
@@ -2214,6 +2347,7 @@ for await (const line of rl) {
       console.log('  .restore <name> <seq>         — restore a node to a specific version');
       console.log('  .cron <name> <interval_ms>    — run a node on a timer');
       console.log('  .crons                        — list cron jobs');
+      console.log('  .metrics                      — show metrics report');
       console.log('  .eval <code>                  — eval code with ctx');
       console.log('  .session                      — show current session ID');
       console.log('  .help                         — this help');

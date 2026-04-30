@@ -1849,6 +1849,237 @@ async function testReplVersionCronCommands(ctx: Ctx) {
   }
 }
 
+async function testMetrics(ctx: Ctx) {
+  console.log("\n── Metrics tracking ──");
+
+  // Test basic metrics recording
+  try {
+    const result = await ctx.call("metrics", {
+      record: { name: "test:metricsTarget", durationMs: 42 },
+    });
+    if (!result || result.name !== "test:metricsTarget")
+      throw new Error(`expected name='test:metricsTarget', got '${result && result.name}'`);
+    if (result.calls !== 1)
+      throw new Error(`expected calls=1, got ${result.calls}`);
+    if (result.duration_ms !== 42)
+      throw new Error(`expected duration_ms=42, got ${result.duration_ms}`);
+    if (result.errors !== 0)
+      throw new Error(`expected errors=0, got ${result.errors}`);
+
+    // Verify quads were stored in 'metrics' graph
+    const callsQuads = await ctx.query({
+      s: "test:metricsTarget",
+      p: "metric:calls",
+      g: "metrics",
+    });
+    if (callsQuads.length !== 1)
+      throw new Error(`expected 1 calls quad, got ${callsQuads.length}`);
+    if (callsQuads[0].o !== "1")
+      throw new Error(`expected calls='1', got '${callsQuads[0].o}'`);
+
+    ok("metrics records call count, duration, and stores as quads");
+  } catch (e) {
+    fail("metrics basic recording", e);
+  }
+
+  // Test cumulative metrics
+  try {
+    await ctx.call("metrics", {
+      record: { name: "test:metricsTarget", durationMs: 58 },
+    });
+    const result = await ctx.call("metrics", {
+      record: { name: "test:metricsTarget", durationMs: 100, error: "boom" },
+    });
+    if (result.calls !== 3)
+      throw new Error(`expected calls=3, got ${result.calls}`);
+    if (result.duration_ms !== 200)
+      throw new Error(`expected duration_ms=200 (42+58+100), got ${result.duration_ms}`);
+    if (result.errors !== 1)
+      throw new Error(`expected errors=1, got ${result.errors}`);
+
+    // Verify only one calls quad (set semantics)
+    const callsQuads = await ctx.query({
+      s: "test:metricsTarget",
+      p: "metric:calls",
+      g: "metrics",
+    });
+    if (callsQuads.length !== 1)
+      throw new Error(`expected 1 calls quad after updates, got ${callsQuads.length}`);
+
+    ok("metrics accumulates calls, duration, and errors correctly");
+  } catch (e) {
+    fail("metrics cumulative", e);
+  }
+
+  // Test metrics validation
+  try {
+    await ctx.call("metrics", {});
+    fail("metrics validation", "should have thrown for missing record");
+  } catch (e: any) {
+    if (e.message && e.message.includes("record"))
+      ok("metrics throws on missing record");
+    else fail("metrics validation", e);
+  }
+
+  try {
+    await ctx.call("metrics", { record: { durationMs: 10 } });
+    fail("metrics validation name", "should have thrown for missing name");
+  } catch (e: any) {
+    if (e.message && e.message.includes("name"))
+      ok("metrics throws on missing record.name");
+    else fail("metrics validation name", e);
+  }
+}
+
+async function testMetricsReport(ctx: Ctx) {
+  console.log("\n── Metrics report ──");
+
+  try {
+    // Record some metrics for distinct nodes
+    await ctx.call("metrics", {
+      record: { name: "test:reportA", durationMs: 100 },
+    });
+    await ctx.call("metrics", {
+      record: { name: "test:reportA", durationMs: 200 },
+    });
+    await ctx.call("metrics", {
+      record: { name: "test:reportB", durationMs: 50, error: "fail" },
+    });
+
+    // Get report as string
+    const report = await ctx.call("metrics:report");
+    if (typeof report !== "string")
+      throw new Error(`expected string report, got ${typeof report}`);
+    if (!report.includes("Metrics Report"))
+      throw new Error("report missing header");
+    if (!report.includes("test:reportA"))
+      throw new Error("report missing test:reportA");
+    if (!report.includes("test:reportB"))
+      throw new Error("report missing test:reportB");
+
+    ok("metrics:report returns formatted string report");
+  } catch (e) {
+    fail("metrics:report string", e);
+  }
+
+  try {
+    // Get raw report
+    const result = await ctx.call("metrics:report", { raw: true });
+    if (!result || !Array.isArray(result.nodes))
+      throw new Error(`expected result.nodes array, got ${typeof result}`);
+    if (!result.report || typeof result.report !== "string")
+      throw new Error("expected result.report string");
+
+    // Verify sorting by call count descending
+    for (let i = 1; i < result.nodes.length; i++) {
+      if (result.nodes[i].calls > result.nodes[i - 1].calls)
+        throw new Error("nodes not sorted by calls descending");
+    }
+
+    // Verify avg_ms is calculated
+    const nodeA = result.nodes.find((n: any) => n.name === "test:reportA");
+    if (!nodeA)
+      throw new Error("test:reportA not found in raw report");
+    if (nodeA.calls !== 2)
+      throw new Error(`expected test:reportA calls=2, got ${nodeA.calls}`);
+    if (nodeA.avg_ms !== 150)
+      throw new Error(`expected test:reportA avg_ms=150, got ${nodeA.avg_ms}`);
+
+    ok("metrics:report raw mode returns structured data sorted by calls");
+  } catch (e) {
+    fail("metrics:report raw", e);
+  }
+}
+
+async function testMetricsCompilerIntegration(ctx: Ctx) {
+  console.log("\n── Metrics compiler integration ──");
+
+  try {
+    // Call a node and verify metrics were recorded automatically by sys:compiler
+    // Use a fresh test node to get clean metrics
+    await ctx.assert("test:metricsAuto", "type", "Function");
+    await ctx.assert("test:metricsAuto", "source", "return 'measured'");
+
+    // Call it
+    const result = await ctx.call("test:metricsAuto");
+    if (result !== "measured")
+      throw new Error(`expected 'measured', got '${result}'`);
+
+    // Wait briefly for the async metrics recording
+    await new Promise((r) => setTimeout(r, 100));
+
+    // Check that metrics were recorded
+    const callsQuads = await ctx.query({
+      s: "test:metricsAuto",
+      p: "metric:calls",
+      g: "metrics",
+    });
+    if (callsQuads.length === 0)
+      throw new Error("no metrics recorded for test:metricsAuto");
+    const calls = parseInt(callsQuads[0].o);
+    if (calls < 1)
+      throw new Error(`expected calls >= 1, got ${calls}`);
+
+    ok("sys:compiler automatically records metrics for node calls");
+  } catch (e) {
+    fail("metrics compiler integration", e);
+  }
+
+  try {
+    // Verify metrics are NOT recorded for the metrics node itself (no infinite recursion)
+    const metricsCallsQuads = await ctx.query({
+      s: "metrics",
+      p: "metric:calls",
+      g: "metrics",
+    });
+    if (metricsCallsQuads.length > 0)
+      throw new Error("metrics should not track calls to itself");
+
+    ok("metrics node is excluded from tracking (no infinite recursion)");
+  } catch (e) {
+    fail("metrics self-exclusion", e);
+  }
+}
+
+async function testMetricsToolRegistration(ctx: Ctx) {
+  console.log("\n── Metrics tool registration ──");
+
+  try {
+    const toolQuads = await ctx.query({ s: "metrics_report", p: "type", o: "Tool" });
+    if (toolQuads.length === 0)
+      throw new Error("metrics_report not registered as Tool");
+    const schemaQuads = await ctx.query({ s: "metrics_report", p: "tool_schema" });
+    if (schemaQuads.length === 0)
+      throw new Error("metrics_report has no tool_schema");
+    const parsed = JSON.parse(schemaQuads[0].o);
+    if (parsed.name !== "metrics_report")
+      throw new Error(`expected name='metrics_report', got '${parsed.name}'`);
+
+    ok("metrics_report registered as agent tool with schema");
+  } catch (e) {
+    fail("metrics_report tool registration", e);
+  }
+}
+
+async function testReplMetricsCommand(ctx: Ctx) {
+  console.log("\n── REPL metrics command ──");
+
+  try {
+    const rs = await ctx.query({ s: "repl", p: "source" });
+    if (rs.length === 0) throw new Error("repl source not found");
+    const src = rs[0].o;
+
+    if (!src.includes(".metrics"))
+      throw new Error("REPL source missing .metrics command");
+    if (!src.includes("metrics:report"))
+      throw new Error("REPL .metrics does not call metrics:report");
+
+    ok("REPL source contains .metrics command");
+  } catch (e) {
+    fail("REPL metrics command", e);
+  }
+}
+
 // ── Main ──────────────────────────────────────────────────────────
 
 async function main() {
@@ -1895,6 +2126,11 @@ async function main() {
   await testCron(ctx);
   await testVersionToolRegistration(ctx);
   await testReplVersionCronCommands(ctx);
+  await testMetrics(ctx);
+  await testMetricsReport(ctx);
+  await testMetricsCompilerIntegration(ctx);
+  await testMetricsToolRegistration(ctx);
+  await testReplMetricsCommand(ctx);
 
   // Summary
   console.log("\n── Summary ──");
