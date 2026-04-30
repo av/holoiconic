@@ -4,7 +4,8 @@
   "type": "module",
   "private": true,
   "scripts": {
-    "start": "bun run src/boot.ts"
+    "start": "bun run src/boot.ts",
+    "test": "bun run src/test-boot.ts"
   },
   "devDependencies": {
     "@types/bun": "latest"
