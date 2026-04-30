@@ -652,8 +652,9 @@ for (let i = 0; i < maxIterations; i++) {
         result = await ctx.call('metrics:report', toolInput);
         if (typeof result !== 'string') result = JSON.stringify(result);
       } else {
-        // Try calling it as a generic node
-        result = JSON.stringify(await ctx.call(toolName, toolInput));
+        // Try calling it as a generic node (tool names use underscores, node names use colons)
+        const nodeName = toolName.replace(/_/g, ':');
+        result = JSON.stringify(await ctx.call(nodeName, toolInput));
       }
     } catch (err) {
       result = 'Error: ' + (err.message || String(err));

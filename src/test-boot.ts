@@ -1577,6 +1577,58 @@ async function testToolRegistration(ctx: Ctx) {
   }
 }
 
+async function testGenericToolFallback(ctx: Ctx) {
+  console.log("\n── Generic tool dispatch fallback ──");
+
+  try {
+    // Create a simple test node with a colon-namespaced name
+    await ctx.assert("test:fallback", "type", "Function");
+    await ctx.assert("test:fallback", "source", "return { echo: (args && args.msg) || 'default' }");
+
+    // Register it as a tool (using underscore-named convention)
+    await ctx.assert("test_fallback", "type", "Tool");
+    await ctx.assert("test_fallback", "tool_schema", JSON.stringify({
+      name: "test_fallback",
+      description: "A test tool for generic fallback dispatch",
+      input_schema: {
+        type: "object",
+        properties: {
+          msg: { type: "string", description: "Message to echo" }
+        }
+      }
+    }));
+
+    // Simulate what agent:loop does in the generic fallback:
+    // It receives toolName = "test_fallback" and must translate to "test:fallback"
+    const toolName = "test_fallback";
+    const nodeName = toolName.replace(/_/g, ":");
+    if (nodeName !== "test:fallback")
+      throw new Error(`expected 'test:fallback', got '${nodeName}'`);
+
+    const result = await ctx.call(nodeName, { msg: "hello" });
+    if (!result || result.echo !== "hello")
+      throw new Error(`expected echo='hello', got ${JSON.stringify(result)}`);
+
+    ok("generic fallback translates underscores to colons and calls node");
+  } catch (e) {
+    fail("generic tool fallback translation", e);
+  }
+
+  try {
+    // Verify the fallback path in agent:loop source code contains the fix
+    const loopSource = await ctx.query({ s: "agent:loop", p: "source" });
+    if (loopSource.length === 0) throw new Error("agent:loop source not found");
+    const src = loopSource[0].o;
+
+    if (!src.includes("toolName.replace(/_/g, ':')"))
+      throw new Error("agent:loop fallback does not translate underscores to colons");
+
+    ok("agent:loop source contains underscore-to-colon translation in fallback");
+  } catch (e) {
+    fail("agent:loop fallback source check", e);
+  }
+}
+
 async function testVersioning(ctx: Ctx) {
   console.log("\n── Versioning ──");
 
@@ -2122,6 +2174,7 @@ async function main() {
   await testDepsApiEndpoint(ctx);
   await testReplDepsInspect(ctx);
   await testToolRegistration(ctx);
+  await testGenericToolFallback(ctx);
   await testVersioning(ctx);
   await testCron(ctx);
   await testVersionToolRegistration(ctx);
