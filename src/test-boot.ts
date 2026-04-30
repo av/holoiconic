@@ -1344,6 +1344,237 @@ async function testWebUiEnhancements(ctx: Ctx) {
   }
 }
 
+async function testGraphDeps(ctx: Ctx) {
+  console.log("\n── graph:deps ──");
+
+  try {
+    // Test deps of 'main' — it calls sys:compiler, spawn, agent:tools
+    const result = await ctx.call("graph:deps", { node: "main" });
+    if (!result || result.node !== "main")
+      throw new Error(`expected node='main', got '${result && result.node}'`);
+    if (!Array.isArray(result.calls))
+      throw new Error("expected calls array");
+    // main calls sys:compiler, spawn, agent:tools
+    if (!result.calls.includes("sys:compiler"))
+      throw new Error("expected 'sys:compiler' in main's calls, got: " + result.calls.join(", "));
+    if (!result.calls.includes("spawn"))
+      throw new Error("expected 'spawn' in main's calls, got: " + result.calls.join(", "));
+    if (!result.calls.includes("agent:tools"))
+      throw new Error("expected 'agent:tools' in main's calls, got: " + result.calls.join(", "));
+    ok("graph:deps returns calls for main node");
+  } catch (e) {
+    fail("graph:deps main calls", e);
+  }
+
+  try {
+    // Test calledBy: 'spawn' should be called by 'main'
+    const result = await ctx.call("graph:deps", { node: "spawn" });
+    if (!Array.isArray(result.calledBy))
+      throw new Error("expected calledBy array");
+    if (!result.calledBy.includes("main"))
+      throw new Error("expected 'main' in spawn's calledBy, got: " + result.calledBy.join(", "));
+    ok("graph:deps returns calledBy for spawn node");
+  } catch (e) {
+    fail("graph:deps calledBy", e);
+  }
+
+  try {
+    // Test node with no deps
+    await ctx.assert("test:nodeps", "type", "Function");
+    await ctx.assert("test:nodeps", "source", "return 42");
+    const result = await ctx.call("graph:deps", { node: "test:nodeps" });
+    if (result.calls.length !== 0)
+      throw new Error(`expected 0 calls, got ${result.calls.length}`);
+    ok("graph:deps returns empty calls for node with no deps");
+  } catch (e) {
+    fail("graph:deps no deps", e);
+  }
+
+  try {
+    // Test validation
+    await ctx.call("graph:deps", {});
+    fail("graph:deps validation", "should have thrown");
+  } catch (e: any) {
+    if (e.message && e.message.includes("node"))
+      ok("graph:deps throws on missing node arg");
+    else
+      fail("graph:deps validation", e);
+  }
+}
+
+async function testInspectNode(ctx: Ctx) {
+  console.log("\n── inspect node ──");
+
+  try {
+    // Inspect 'shell' — a Function node that is also a Tool
+    const result = await ctx.call("inspect", { node: "shell" });
+    if (!result || result.node !== "shell")
+      throw new Error(`expected node='shell', got '${result && result.node}'`);
+    if (!result.exists)
+      throw new Error("expected exists=true");
+    if (!result.isFunction)
+      throw new Error("expected isFunction=true");
+    if (!result.isTool)
+      throw new Error("expected isTool=true");
+    if (!result.source || !result.source.includes("Bun.spawn"))
+      throw new Error("expected source containing 'Bun.spawn'");
+    if (result.sourceLength < 10)
+      throw new Error(`expected sourceLength >= 10, got ${result.sourceLength}`);
+    if (!Array.isArray(result.dependencies))
+      throw new Error("expected dependencies array");
+    if (!Array.isArray(result.dependents))
+      throw new Error("expected dependents array");
+    if (!Array.isArray(result.predicates))
+      throw new Error("expected predicates array");
+    if (result.quadCount < 2)
+      throw new Error(`expected quadCount >= 2, got ${result.quadCount}`);
+    ok("inspect returns comprehensive info for shell node");
+  } catch (e) {
+    fail("inspect shell", e);
+  }
+
+  try {
+    // Inspect a node that has a tool_schema
+    const result = await ctx.call("inspect", { node: "shell" });
+    if (!result.toolSchema)
+      throw new Error("expected toolSchema for shell");
+    if (result.toolSchema.name !== "shell")
+      throw new Error(`expected toolSchema.name='shell', got '${result.toolSchema.name}'`);
+    ok("inspect includes toolSchema when available");
+  } catch (e) {
+    fail("inspect toolSchema", e);
+  }
+
+  try {
+    // Inspect a nonexistent node
+    const result = await ctx.call("inspect", { node: "nonexistent:xyz" });
+    if (result.exists)
+      throw new Error("expected exists=false for nonexistent node");
+    if (result.quadCount !== 0)
+      throw new Error(`expected quadCount=0, got ${result.quadCount}`);
+    ok("inspect returns exists=false for nonexistent node");
+  } catch (e) {
+    fail("inspect nonexistent", e);
+  }
+
+  try {
+    // Inspect validation
+    await ctx.call("inspect", {});
+    fail("inspect validation", "should have thrown");
+  } catch (e: any) {
+    if (e.message && e.message.includes("node"))
+      ok("inspect throws on missing node arg");
+    else
+      fail("inspect validation", e);
+  }
+}
+
+async function testDepsApiEndpoint(ctx: Ctx) {
+  console.log("\n── deps API endpoint ──");
+
+  const port = 14800 + Math.floor(Math.random() * 200);
+  const ac = new AbortController();
+
+  try {
+    ctx.call("web:ui", { port, apiPort: 19999, signal: ac.signal }).catch(() => {});
+    await new Promise((r) => setTimeout(r, 200));
+
+    // Test GET /api/node/:name/deps
+    try {
+      const res = await fetch(`http://localhost:${port}/api/node/main/deps`);
+      const data = await res.json() as any;
+      if (!res.ok)
+        throw new Error(`expected 200, got ${res.status}: ${JSON.stringify(data)}`);
+      if (data.node !== "main")
+        throw new Error(`expected node='main', got '${data.node}'`);
+      if (!Array.isArray(data.calls))
+        throw new Error("expected calls array");
+      if (!data.calls.includes("sys:compiler"))
+        throw new Error("expected sys:compiler in calls");
+      if (!Array.isArray(data.calledBy))
+        throw new Error("expected calledBy array");
+      ok("GET /api/node/:name/deps returns dependency info");
+    } catch (e) {
+      fail("GET /api/node/:name/deps", e);
+    }
+
+    // Test with URL-encoded node name
+    try {
+      const res = await fetch(`http://localhost:${port}/api/node/${encodeURIComponent("agent:loop")}/deps`);
+      const data = await res.json() as any;
+      if (!res.ok)
+        throw new Error(`expected 200, got ${res.status}`);
+      if (data.node !== "agent:loop")
+        throw new Error(`expected node='agent:loop', got '${data.node}'`);
+      ok("GET /api/node/:name/deps works with URL-encoded names");
+    } catch (e) {
+      fail("GET /api/node/:name/deps URL encoding", e);
+    }
+  } finally {
+    ac.abort();
+    await new Promise((r) => setTimeout(r, 100));
+  }
+}
+
+async function testReplDepsInspect(ctx: Ctx) {
+  console.log("\n── REPL deps/inspect commands ──");
+
+  try {
+    const rs = await ctx.query({ s: "repl", p: "source" });
+    if (rs.length === 0) throw new Error("repl source not found");
+    const src = rs[0].o;
+
+    if (!src.includes(".deps "))
+      throw new Error("REPL source missing .deps command");
+    if (!src.includes(".inspect "))
+      throw new Error("REPL source missing .inspect command");
+    if (!src.includes("graph:deps"))
+      throw new Error("REPL .deps does not call graph:deps");
+    if (!src.includes("'inspect'"))
+      throw new Error("REPL .inspect does not call inspect node");
+
+    ok("REPL source contains .deps and .inspect commands");
+  } catch (e) {
+    fail("REPL deps/inspect commands", e);
+  }
+}
+
+async function testToolRegistration(ctx: Ctx) {
+  console.log("\n── New tool registration ──");
+
+  try {
+    // Verify graph_deps tool is registered
+    const depsToolQuads = await ctx.query({ s: "graph_deps", p: "type", o: "Tool" });
+    if (depsToolQuads.length === 0)
+      throw new Error("graph_deps not registered as Tool");
+    const depsSchema = await ctx.query({ s: "graph_deps", p: "tool_schema" });
+    if (depsSchema.length === 0)
+      throw new Error("graph_deps has no tool_schema");
+    const parsed = JSON.parse(depsSchema[0].o);
+    if (parsed.name !== "graph_deps")
+      throw new Error(`expected name='graph_deps', got '${parsed.name}'`);
+    ok("graph_deps registered as tool with schema");
+  } catch (e) {
+    fail("graph_deps tool registration", e);
+  }
+
+  try {
+    // Verify inspect tool is registered
+    const inspectToolQuads = await ctx.query({ s: "inspect", p: "type", o: "Tool" });
+    if (inspectToolQuads.length === 0)
+      throw new Error("inspect not registered as Tool");
+    const inspectSchema = await ctx.query({ s: "inspect", p: "tool_schema" });
+    if (inspectSchema.length === 0)
+      throw new Error("inspect has no tool_schema");
+    const parsed = JSON.parse(inspectSchema[0].o);
+    if (parsed.name !== "inspect")
+      throw new Error(`expected name='inspect', got '${parsed.name}'`);
+    ok("inspect registered as tool with schema");
+  } catch (e) {
+    fail("inspect tool registration", e);
+  }
+}
+
 // ── Main ──────────────────────────────────────────────────────────
 
 async function main() {
@@ -1381,6 +1612,11 @@ async function main() {
   await testGraphDescribe(ctx);
   await testGraphSubjects(ctx);
   await testWebUiEnhancements(ctx);
+  await testGraphDeps(ctx);
+  await testInspectNode(ctx);
+  await testDepsApiEndpoint(ctx);
+  await testReplDepsInspect(ctx);
+  await testToolRegistration(ctx);
 
   // Summary
   console.log("\n── Summary ──");

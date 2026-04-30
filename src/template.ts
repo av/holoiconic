@@ -379,7 +379,35 @@ await ctx.assert('graph_subjects', 'tool_schema', JSON.stringify({
   }
 }));
 
-console.log('[agent:tools] registered 11 tools');
+// Deps tool — analyze node dependencies
+await ctx.assert('graph_deps', 'type', 'Tool');
+await ctx.assert('graph_deps', 'tool_schema', JSON.stringify({
+  name: 'graph_deps',
+  description: 'Analyze a node\\'s dependency graph: what it calls and what calls it. Uses regex to scan ctx.call references in source code.',
+  input_schema: {
+    type: 'object',
+    properties: {
+      node: { type: 'string', description: 'The node name to analyze dependencies for' }
+    },
+    required: ['node']
+  }
+}));
+
+// Inspect tool — comprehensive node inspection
+await ctx.assert('inspect', 'type', 'Tool');
+await ctx.assert('inspect', 'tool_schema', JSON.stringify({
+  name: 'inspect',
+  description: 'Comprehensive inspection of a node: source, type, dependencies, spawn status, tool schema, etc. Combines graph:describe and graph:deps.',
+  input_schema: {
+    type: 'object',
+    properties: {
+      node: { type: 'string', description: 'The node name to inspect' }
+    },
+    required: ['node']
+  }
+}));
+
+console.log('[agent:tools] registered 13 tools');
 `,
 
   // ── agent:loop ─────────────────────────────────────────────────
@@ -507,6 +535,10 @@ for (let i = 0; i < maxIterations; i++) {
         result = JSON.stringify(await ctx.call('graph:describe', toolInput));
       } else if (toolName === 'graph_subjects') {
         result = JSON.stringify(await ctx.call('graph:subjects', toolInput));
+      } else if (toolName === 'graph_deps') {
+        result = JSON.stringify(await ctx.call('graph:deps', toolInput));
+      } else if (toolName === 'inspect') {
+        result = JSON.stringify(await ctx.call('inspect', toolInput));
       } else {
         // Try calling it as a generic node
         result = JSON.stringify(await ctx.call(toolName, toolInput));
@@ -1266,8 +1298,20 @@ const server = Bun.serve({
       }
     }
 
+    // API: get node deps (GET /api/node/:name/deps)
+    if (url.pathname.match(/^\\/api\\/node\\/.+\\/deps$/) && req.method === 'GET') {
+      try {
+        const pathParts = url.pathname.slice('/api/node/'.length);
+        const name = decodeURIComponent(pathParts.slice(0, pathParts.lastIndexOf('/deps')));
+        const result = await ctx.call('graph:deps', { node: name });
+        return Response.json(result, { headers: corsHeaders });
+      } catch (err) {
+        return Response.json({ error: err.message || String(err) }, { status: 500, headers: corsHeaders });
+      }
+    }
+
     // API: get node source (GET /api/node/:name)
-    if (url.pathname.startsWith('/api/node/') && req.method === 'GET') {
+    if (url.pathname.startsWith('/api/node/') && !url.pathname.includes('/deps') && req.method === 'GET') {
       const name = decodeURIComponent(url.pathname.slice('/api/node/'.length));
       const sourceQuads = await ctx.query({ s: name, p: 'source' });
       const source = sourceQuads.length > 0 ? sourceQuads[0].o : null;
@@ -1563,6 +1607,105 @@ if (!typeFilter) {
 return result.map(s => ({ subject: s, types: [typeFilter] }));
 `,
 
+  // ── graph:deps ──────────────────────────────────────────────────
+  // Analyzes a node's source code to find ctx.call('...') references.
+  // Returns { node, calls, calledBy } for dependency tracking.
+  "graph:deps": `
+const node = args && args.node;
+if (!node) throw new Error('[graph:deps] args.node is required');
+
+// Get the source of the requested node
+const sourceQuads = await ctx.query({ s: node, p: 'source' });
+const source = sourceQuads.length > 0 ? sourceQuads[0].o : '';
+
+// Extract all ctx.call('name') and ctx.call("name") patterns from the source
+const calls = [];
+const callRegex = /ctx\\.call\\(\\s*['"]([^'"]+)['"]/g;
+let match;
+while ((match = callRegex.exec(source)) !== null) {
+  if (!calls.includes(match[1])) {
+    calls.push(match[1]);
+  }
+}
+
+// For calledBy: scan all function nodes' sources for references to this node
+const allFnQuads = await ctx.query({ p: 'type', o: 'Function' });
+const calledBy = [];
+for (const fnQuad of allFnQuads) {
+  if (fnQuad.s === node) continue; // skip self
+  const fnSourceQuads = await ctx.query({ s: fnQuad.s, p: 'source' });
+  if (fnSourceQuads.length === 0) continue;
+  const fnSource = fnSourceQuads[0].o;
+  // Check if this node's name appears in a ctx.call reference
+  const escapedName = node.replace(/[.*+?^\${}()|[\\]\\\\]/g, '\\\\$&');
+  const refRegex = new RegExp("ctx\\\\.call\\\\(\\\\s*['\\\"]" + escapedName + "['\\\"]", "g");
+  if (refRegex.test(fnSource)) {
+    calledBy.push(fnQuad.s);
+  }
+}
+
+return { node, calls, calledBy };
+`,
+
+  // ── inspect ────────────────────────────────────────────────────
+  // Comprehensive inspection of a node: source, type, deps, spawn status,
+  // tool schema, and more. Combines graph:describe and graph:deps.
+  "inspect": `
+const node = args && args.node;
+if (!node) throw new Error('[inspect] args.node is required');
+
+// Get graph:describe info
+const description = await ctx.call('graph:describe', { subject: node });
+
+// Get graph:deps info
+const deps = await ctx.call('graph:deps', { node });
+
+// Extract specific fields for convenience
+const source = description.predicates.source
+  ? description.predicates.source[0].value
+  : null;
+const types = description.predicates.type
+  ? description.predicates.type.map(t => t.value)
+  : [];
+const isSpawned = types.includes('Spawned');
+const isFunction = types.includes('Function');
+const isTool = types.includes('Tool');
+
+// Get tool schema if it exists
+let toolSchema = null;
+if (description.predicates.tool_schema) {
+  try {
+    toolSchema = JSON.parse(description.predicates.tool_schema[0].value);
+  } catch {}
+}
+
+// Check for lifecycle/status quads
+const status = description.predicates.status
+  ? description.predicates.status.map(s => s.value)
+  : [];
+const lifecycle = description.predicates.lifecycle
+  ? description.predicates.lifecycle.map(l => l.value)
+  : [];
+
+return {
+  node,
+  exists: description.quads.length > 0,
+  types,
+  isFunction,
+  isSpawned,
+  isTool,
+  source: source ? source.slice(0, 2000) + (source.length > 2000 ? '...' : '') : null,
+  sourceLength: source ? source.length : 0,
+  toolSchema,
+  dependencies: deps.calls,
+  dependents: deps.calledBy,
+  status,
+  lifecycle,
+  quadCount: description.quads.length,
+  predicates: Object.keys(description.predicates),
+};
+`,
+
   // ── set ─────────────────────────────────────────────────────────
   // Convenience: retracts all quads matching (s, p, *, g) then asserts (s, p, o, g).
   // Useful for single-valued predicates like 'source', 'status', etc.
@@ -1742,6 +1885,24 @@ for await (const line of rl) {
         console.log('imported ' + result.count + ' quads from ' + path);
       }
 
+    } else if (trimmed.startsWith('.deps ')) {
+      const name = trimmed.slice(6).trim();
+      if (!name) { console.log('usage: .deps <name>'); }
+      else {
+        const result = await ctx.call('graph:deps', { node: name });
+        console.log('node: ' + result.node);
+        console.log('calls: ' + (result.calls.length > 0 ? result.calls.join(', ') : '(none)'));
+        console.log('calledBy: ' + (result.calledBy.length > 0 ? result.calledBy.join(', ') : '(none)'));
+      }
+
+    } else if (trimmed.startsWith('.inspect ')) {
+      const name = trimmed.slice(9).trim();
+      if (!name) { console.log('usage: .inspect <name>'); }
+      else {
+        const result = await ctx.call('inspect', { node: name });
+        console.log(JSON.stringify(result, null, 2));
+      }
+
     } else if (trimmed.startsWith('.eval ')) {
       const code = trimmed.slice(6);
       const AsyncFn = Object.getPrototypeOf(async function () {}).constructor;
@@ -1763,6 +1924,8 @@ for await (const line of rl) {
       console.log('  .sessions                     — list sessions');
       console.log('  .export [path]                — export snapshot');
       console.log('  .import <path>                — import snapshot');
+      console.log('  .deps <name>                  — show node dependencies');
+      console.log('  .inspect <name>               — comprehensive node info');
       console.log('  .eval <code>                  — eval code with ctx');
       console.log('  .session                      — show current session ID');
       console.log('  .help                         — this help');
