@@ -24,7 +24,14 @@ async function boot() {
   }
 
   // 5. Run main — this boots compiler, supervisor, and REPL
-  await ctx.call("main");
+  // Wrap in try/catch so kernel catches and logs errors from the boot chain
+  try {
+    await ctx.call("main");
+  } catch (err: any) {
+    console.error("[boot] main crashed:", err.message || err);
+    if (err.stack) console.error(err.stack);
+    process.exit(1);
+  }
 }
 
 boot().catch((err) => {

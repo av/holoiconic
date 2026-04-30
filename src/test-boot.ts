@@ -886,6 +886,179 @@ async function testToolCallVisibility(ctx: Ctx) {
   }
 }
 
+async function testSetNode(ctx: Ctx) {
+  console.log("\n── Set convenience node ──");
+
+  try {
+    // Set a single-valued predicate
+    await ctx.assert("test:setnode", "type", "Function");
+    await ctx.assert("test:setnode", "status", "init");
+
+    // Call set to update status — should retract old and assert new
+    const result = await ctx.call("set", { s: "test:setnode", p: "status", o: "running" });
+    if (!result || result.o !== "running")
+      throw new Error(`expected o='running', got '${result && result.o}'`);
+
+    // Verify only one status quad exists
+    const statusQuads = await ctx.query({ s: "test:setnode", p: "status" });
+    if (statusQuads.length !== 1)
+      throw new Error(`expected 1 status quad, got ${statusQuads.length}`);
+    if (statusQuads[0].o !== "running")
+      throw new Error(`expected 'running', got '${statusQuads[0].o}'`);
+
+    ok("set: replaces single-valued predicate");
+  } catch (e) {
+    fail("set node basic", e);
+  }
+
+  try {
+    // Set again to verify it replaces the previous value
+    await ctx.call("set", { s: "test:setnode", p: "status", o: "stopped" });
+    const statusQuads = await ctx.query({ s: "test:setnode", p: "status" });
+    if (statusQuads.length !== 1)
+      throw new Error(`expected 1 quad after second set, got ${statusQuads.length}`);
+    if (statusQuads[0].o !== "stopped")
+      throw new Error(`expected 'stopped', got '${statusQuads[0].o}'`);
+    ok("set: second call replaces previous value");
+  } catch (e) {
+    fail("set node replace", e);
+  }
+
+  try {
+    // Set with multiple existing values (retract all)
+    await ctx.assert("test:multival", "tag", "a");
+    await ctx.assert("test:multival", "tag", "b");
+    await ctx.assert("test:multival", "tag", "c");
+    const before = await ctx.query({ s: "test:multival", p: "tag" });
+    if (before.length !== 3)
+      throw new Error(`expected 3 tags before set, got ${before.length}`);
+
+    await ctx.call("set", { s: "test:multival", p: "tag", o: "only" });
+    const after = await ctx.query({ s: "test:multival", p: "tag" });
+    if (after.length !== 1)
+      throw new Error(`expected 1 tag after set, got ${after.length}`);
+    if (after[0].o !== "only")
+      throw new Error(`expected 'only', got '${after[0].o}'`);
+    ok("set: retracts all existing values before asserting");
+  } catch (e) {
+    fail("set node multi-retract", e);
+  }
+
+  try {
+    // Set validation: missing required fields
+    await ctx.call("set", { s: "test:setnode", p: "status" });
+    fail("set validation", "should have thrown for missing o");
+  } catch (e: any) {
+    if (e.message && e.message.includes("required")) {
+      ok("set: throws on missing required fields");
+    } else {
+      fail("set validation", e);
+    }
+  }
+}
+
+async function testSupervisorRetry(ctx: Ctx) {
+  console.log("\n── Supervisor retry/backoff ──");
+
+  try {
+    // Create a node that crashes on first call but succeeds after
+    // We use a quad to track how many times the node was called
+    await ctx.assert("test:crasher", "call_count", "0");
+
+    await ctx.assert("test:crasher", "source", `
+const countQuads = await ctx.query({ s: 'test:crasher', p: 'call_count' });
+const count = parseInt(countQuads[0].o);
+const newCount = count + 1;
+// Update the count using retract+assert
+await ctx.retract('test:crasher', 'call_count', String(count));
+await ctx.assert('test:crasher', 'call_count', String(newCount));
+
+if (newCount <= 2) {
+  throw new Error('deliberate crash #' + newCount);
+}
+
+// On 3rd call, succeed and stay alive
+await ctx.assert('test:crasher', 'status', 'recovered');
+const signal = args && args.signal;
+if (signal) {
+  await new Promise(r => signal.addEventListener('abort', r, { once: true }));
+}
+`);
+    await ctx.assert("test:crasher", "type", "Function");
+
+    // Spawn it via supervisor
+    await ctx.call("spawn", { node: "test:crasher" });
+
+    // Wait for retries (500ms + 1000ms + some margin)
+    await new Promise((r) => setTimeout(r, 2500));
+
+    // Check it was retried and eventually recovered
+    const statusQuads = await ctx.query({ s: "test:crasher", p: "status", o: "recovered" });
+    if (statusQuads.length === 0)
+      throw new Error("test:crasher did not recover after retries");
+
+    const countQuads = await ctx.query({ s: "test:crasher", p: "call_count" });
+    const finalCount = parseInt(countQuads[0].o);
+    if (finalCount < 3)
+      throw new Error(`expected at least 3 calls, got ${finalCount}`);
+
+    ok("supervisor retries crashed node with exponential backoff");
+  } catch (e) {
+    fail("supervisor retry", e);
+  }
+}
+
+async function testReplCommands(ctx: Ctx) {
+  console.log("\n── REPL commands ──");
+
+  // We can't test the full readline loop, but we can test that the
+  // REPL's help text contains the new commands by checking the source.
+  try {
+    const rs = await ctx.query({ s: "repl", p: "source" });
+    if (rs.length === 0) throw new Error("repl source not found");
+    const src = rs[0].o;
+
+    const expectedCommands = [".source", ".edit", ".create", ".spawn", ".sessions", ".export", ".import", ".eval"];
+    const missing = expectedCommands.filter(cmd => !src.includes(cmd));
+    if (missing.length > 0)
+      throw new Error("REPL source missing commands: " + missing.join(", "));
+
+    ok("REPL source contains all new commands: " + expectedCommands.join(", "));
+  } catch (e) {
+    fail("REPL commands in source", e);
+  }
+}
+
+async function testMainErrorHandling(ctx: Ctx) {
+  console.log("\n── Main error handling ──");
+
+  try {
+    const rs = await ctx.query({ s: "main", p: "source" });
+    if (rs.length === 0) throw new Error("main source not found");
+    const src = rs[0].o;
+
+    if (!src.includes("try {") || !src.includes("catch (err)"))
+      throw new Error("main source does not contain try/catch block");
+    if (!src.includes("fatal error during boot"))
+      throw new Error("main source does not log fatal errors");
+
+    ok("main node has error handling (try/catch with logging)");
+  } catch (e) {
+    fail("main error handling", e);
+  }
+
+  // Verify boot.ts also wraps main call
+  try {
+    const { readFileSync } = await import("node:fs");
+    const bootSrc = readFileSync("/home/everlier/code/holoiconic/src/boot.ts", "utf-8");
+    if (!bootSrc.includes("main crashed"))
+      throw new Error("boot.ts does not catch main crashes");
+    ok("boot.ts catches and logs main crashes");
+  } catch (e) {
+    fail("boot.ts error handling", e);
+  }
+}
+
 async function testCallWithoutSource(ctx: Ctx) {
   console.log("\n── Edge cases ──");
 
@@ -926,6 +1099,10 @@ async function main() {
   await testEmbedNode(ctx);
   await testVectorSearch(ctx);
   await testEmbeddingPersistence(ctx);
+  await testSetNode(ctx);
+  await testSupervisorRetry(ctx);
+  await testReplCommands(ctx);
+  await testMainErrorHandling(ctx);
   await testApiServer(ctx);
   await testWebUi(ctx);
   await testToolCallVisibility(ctx);

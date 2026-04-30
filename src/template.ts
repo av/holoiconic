@@ -37,9 +37,34 @@ console.log('[sys:compiler] installed — ctx.call now cached and reactive');
 
   // ── sys:supervisor ──────────────────────────────────────────────
   // Watches for spawned nodes and manages lifecycle.
+  // Includes retry/backoff for crashed nodes (max 3 retries, exponential backoff).
   "sys:supervisor": `
 const controllers = new Map();
+const retryCounts = new Map();
 const signal = args && args.signal;
+const MAX_RETRIES = 3;
+
+function startNode(name, ac) {
+  controllers.set(name, ac);
+  ctx.call(name, { signal: ac.signal }).catch(async (err) => {
+    if (err.name === 'AbortError') return;
+    const retries = (retryCounts.get(name) || 0);
+    console.error('[sys:supervisor] node crashed:', name, '-', err.message || err);
+    if (retries < MAX_RETRIES) {
+      const delay = Math.pow(2, retries) * 500;
+      retryCounts.set(name, retries + 1);
+      console.log('[sys:supervisor] retrying ' + name + ' in ' + delay + 'ms (attempt ' + (retries + 1) + '/' + MAX_RETRIES + ')');
+      await new Promise(r => setTimeout(r, delay));
+      // Only retry if not aborted
+      if (!ac.signal.aborted) {
+        const newAc = new AbortController();
+        startNode(name, newAc);
+      }
+    } else {
+      console.error('[sys:supervisor] node ' + name + ' exceeded max retries (' + MAX_RETRIES + '), giving up');
+    }
+  });
+}
 
 // Watch for new spawned nodes
 ctx.on({ p: 'type', o: 'Spawned' }, async (change) => {
@@ -63,16 +88,17 @@ ctx.on({ p: 'source' }, async (change) => {
     ac.abort();
     await ctx.retract(name, 'lifecycle', 'cleanup');
 
+    // Reset retry count on manual source change
+    retryCounts.set(name, 0);
     const newAc = new AbortController();
-    controllers.set(name, newAc);
-    ctx.call(name, { signal: newAc.signal }).catch(err => {
-      if (err.name !== 'AbortError') console.error('[sys:supervisor] node error:', name, err);
-    });
+    startNode(name, newAc);
   }
 });
 
 // Expose controller registration for spawn node
 ctx._supervisorControllers = controllers;
+// Expose startNode for spawn node to use
+ctx._supervisorStartNode = startNode;
 
 // Keep alive until aborted
 if (signal) {
@@ -99,16 +125,18 @@ const ac = new AbortController();
 // Register with supervisor
 await ctx.assert(node, 'type', 'Spawned');
 
-// Store controller in supervisor's map if available
-if (ctx._supervisorControllers) {
-  ctx._supervisorControllers.set(node, ac);
+// Use supervisor's startNode if available (enables retry/backoff)
+if (ctx._supervisorStartNode) {
+  ctx._supervisorStartNode(node, ac);
+} else {
+  // Fallback: store controller and start manually
+  if (ctx._supervisorControllers) {
+    ctx._supervisorControllers.set(node, ac);
+  }
+  ctx.call(node, { signal: ac.signal }).catch(err => {
+    if (err.name !== 'AbortError') console.error('[spawn] node error:', node, err);
+  });
 }
-
-const spawnArgs = { ...(args.args || {}), signal: ac.signal };
-// Fire and forget — spawned nodes are long-lived
-ctx.call(node, spawnArgs).catch(err => {
-  if (err.name !== 'AbortError') console.error('[spawn] node error:', node, err);
-});
 
 return ac;
 `,
@@ -1363,6 +1391,29 @@ try {
 }
 `,
 
+  // ── set ─────────────────────────────────────────────────────────
+  // Convenience: retracts all quads matching (s, p, *, g) then asserts (s, p, o, g).
+  // Useful for single-valued predicates like 'source', 'status', etc.
+  "set": `
+const s = args && args.s;
+const p = args && args.p;
+const o = args && args.o;
+const g = (args && args.g) || '_';
+if (!s || !p || o === undefined || o === null) {
+  throw new Error('[set] args.s, args.p, and args.o are required');
+}
+
+// Retract all existing values for this (s, p, *, g) pattern
+const existing = await ctx.query({ s, p, g });
+for (const eq of existing) {
+  await ctx.retract(eq.s, eq.p, eq.o, eq.g);
+}
+
+// Assert the new value
+const quad = await ctx.assert(s, p, o, g);
+return quad;
+`,
+
   // ── repl ────────────────────────────────────────────────────────
   // Interactive REPL — routes messages through agent:loop or direct dot-commands.
   // Maintains a single session across the REPL lifecycle for multi-turn conversations.
@@ -1435,6 +1486,97 @@ for await (const line of rl) {
     } else if (trimmed === '.session') {
       console.log('session: ' + sessionId);
 
+    } else if (trimmed.startsWith('.source ')) {
+      const name = trimmed.slice(8).trim();
+      const rs = await ctx.query({ s: name, p: 'source' });
+      if (rs.length === 0) { console.log('no source found for: ' + name); }
+      else { console.log(rs[0].o); }
+
+    } else if (trimmed.startsWith('.edit ')) {
+      const name = trimmed.slice(5).trim();
+      const rs = await ctx.query({ s: name, p: 'source' });
+      if (rs.length === 0) {
+        console.log('no source found for: ' + name);
+      } else {
+        const oldSource = rs[0].o;
+        console.log('--- current source for ' + name + ' ---');
+        console.log(oldSource);
+        console.log('--- enter new source (end with a blank line) ---');
+        const lines = [];
+        for await (const editLine of rl) {
+          if (editLine.trim() === '') break;
+          lines.push(editLine);
+        }
+        if (lines.length === 0) {
+          console.log('(empty input, no changes)');
+        } else {
+          const newSource = lines.join('\\n');
+          await ctx.retract(name, 'source', oldSource);
+          await ctx.assert(name, 'source', newSource);
+          console.log('source updated for: ' + name);
+        }
+      }
+
+    } else if (trimmed.startsWith('.create ')) {
+      const name = trimmed.slice(8).trim();
+      const existing = await ctx.query({ s: name, p: 'type', o: 'Function' });
+      if (existing.length > 0) {
+        console.log('node already exists: ' + name);
+      } else {
+        console.log('enter source for ' + name + ' (end with a blank line):');
+        const lines = [];
+        for await (const editLine of rl) {
+          if (editLine.trim() === '') break;
+          lines.push(editLine);
+        }
+        if (lines.length === 0) {
+          console.log('(empty input, node not created)');
+        } else {
+          const source = lines.join('\\n');
+          await ctx.assert(name, 'type', 'Function');
+          await ctx.assert(name, 'source', source);
+          console.log('created node: ' + name);
+        }
+      }
+
+    } else if (trimmed.startsWith('.spawn ')) {
+      const name = trimmed.slice(7).trim();
+      await ctx.call('spawn', { node: name });
+      console.log('spawned: ' + name);
+
+    } else if (trimmed === '.sessions') {
+      const msgQuads = await ctx.query({ p: 'message' });
+      const sessions = new Set();
+      for (const q of msgQuads) sessions.add(q.g);
+      if (sessions.size === 0) { console.log('(no sessions)'); }
+      else {
+        for (const s of sessions) console.log(' ', s);
+      }
+
+    } else if (trimmed.startsWith('.export')) {
+      const path = trimmed.slice(7).trim() || undefined;
+      const result = await ctx.call('snapshot:export', path ? { path } : {});
+      if (path) {
+        console.log('exported ' + result.count + ' quads to ' + result.path);
+      } else {
+        console.log(result);
+      }
+
+    } else if (trimmed.startsWith('.import ')) {
+      const path = trimmed.slice(8).trim();
+      if (!path) { console.log('usage: .import <path>'); }
+      else {
+        const result = await ctx.call('snapshot:import', { path });
+        console.log('imported ' + result.count + ' quads from ' + path);
+      }
+
+    } else if (trimmed.startsWith('.eval ')) {
+      const code = trimmed.slice(6);
+      const AsyncFn = Object.getPrototypeOf(async function () {}).constructor;
+      const fn = new AsyncFn('ctx', code);
+      const result = await fn(ctx);
+      if (result !== undefined) console.log(result);
+
     } else if (trimmed === '.help') {
       console.log('commands:');
       console.log('  .query {"s":"...","p":"..."}  — query quads by pattern');
@@ -1442,6 +1584,14 @@ for await (const line of rl) {
       console.log('  .retract s p o                — retract a quad');
       console.log('  .call name [argsJSON]          — call a node');
       console.log('  .nodes                        — list all Function nodes');
+      console.log('  .source <name>                — view a node source');
+      console.log('  .edit <name>                  — edit a node source inline');
+      console.log('  .create <name>                — create a new node interactively');
+      console.log('  .spawn <name>                 — spawn a node');
+      console.log('  .sessions                     — list sessions');
+      console.log('  .export [path]                — export snapshot');
+      console.log('  .import <path>                — import snapshot');
+      console.log('  .eval <code>                  — eval code with ctx');
       console.log('  .session                      — show current session ID');
       console.log('  .help                         — this help');
 
@@ -1465,30 +1615,37 @@ console.log('[repl] exited');
 
   // ── main ────────────────────────────────────────────────────────
   // Entry point: boots compiler, supervisor, API, WebUI, then REPL.
+  // Wraps the boot chain in error handling so crashes are logged, not silent.
   "main": `
-console.log('[main] booting holoiconic...');
+try {
+  console.log('[main] booting holoiconic...');
 
-// 1. Install the reactive compiler (replaces ctx.call)
-await ctx.call('sys:compiler');
+  // 1. Install the reactive compiler (replaces ctx.call)
+  await ctx.call('sys:compiler');
 
-// 2. Spawn the supervisor (long-lived, manages other spawned nodes)
-await ctx.call('spawn', { node: 'sys:supervisor' });
+  // 2. Spawn the supervisor (long-lived, manages other spawned nodes)
+  await ctx.call('spawn', { node: 'sys:supervisor' });
 
-// Small delay to let supervisor initialize
-await new Promise(r => setTimeout(r, 50));
+  // Small delay to let supervisor initialize
+  await new Promise(r => setTimeout(r, 50));
 
-// 3. Register agent tools
-await ctx.call('agent:tools');
+  // 3. Register agent tools
+  await ctx.call('agent:tools');
 
-// 4. Start the API server
-await ctx.call('spawn', { node: 'api:server' });
+  // 4. Start the API server
+  await ctx.call('spawn', { node: 'api:server' });
 
-// 5. Start the WebUI
-await ctx.call('spawn', { node: 'web:ui' });
+  // 5. Start the WebUI
+  await ctx.call('spawn', { node: 'web:ui' });
 
-// 6. Start the REPL
-console.log('[main] holoiconic ready — REPL, API (3001), WebUI (3002)');
-await ctx.call('spawn', { node: 'repl' });
+  // 6. Start the REPL
+  console.log('[main] holoiconic ready — REPL, API (3001), WebUI (3002)');
+  await ctx.call('spawn', { node: 'repl' });
+} catch (err) {
+  console.error('[main] fatal error during boot:', err.message || err);
+  if (err.stack) console.error(err.stack);
+  throw err;
+}
 `,
 
 };
