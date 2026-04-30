@@ -329,6 +329,8 @@ console.log('[agent:tools] registered 9 tools');
 
   // ── agent:loop ─────────────────────────────────────────────────
   // Core agentic loop — maintains conversation, dispatches tool calls.
+  // Returns { session, response, tool_calls } where tool_calls captures every
+  // tool invocation for visibility in the WebUI.
   "agent:loop": `
 const prompt = args && args.prompt;
 if (!prompt) throw new Error('[agent:loop] args.prompt is required');
@@ -380,6 +382,9 @@ for (const tq of toolQuads) {
   }
 }
 
+// Track all tool calls for visibility
+const allToolCalls = [];
+
 // Agentic loop — keep calling LLM until we get a text response (no tool_use)
 let messages = [...history];
 const maxIterations = 20;
@@ -405,7 +410,7 @@ for (let i = 0; i < maxIterations; i++) {
     // Pure text response — extract and return it
     const textBlocks = (response.content || []).filter(b => b.type === 'text');
     const text = textBlocks.map(b => b.text).join('\\n');
-    return { session: sessionId, response: text };
+    return { session: sessionId, response: text, tool_calls: allToolCalls };
   }
 
   // Execute each tool call
@@ -451,10 +456,19 @@ for (let i = 0; i < maxIterations; i++) {
       result = 'Error: ' + (err.message || String(err));
     }
 
+    const resultStr = typeof result === 'string' ? result : JSON.stringify(result);
+
+    // Record tool call for visibility
+    allToolCalls.push({
+      name: toolName,
+      input: toolInput,
+      result: resultStr,
+    });
+
     toolResults.push({
       type: 'tool_result',
       tool_use_id: toolBlock.id,
-      content: typeof result === 'string' ? result : JSON.stringify(result),
+      content: resultStr,
     });
   }
 
@@ -464,7 +478,7 @@ for (let i = 0; i < maxIterations; i++) {
   messages.push(toolResultMsg);
 }
 
-return { session: sessionId, response: '[agent:loop] max iterations reached' };
+return { session: sessionId, response: '[agent:loop] max iterations reached', tool_calls: allToolCalls };
 `,
 
   // ── api:server ──────────────────────────────────────────────────
@@ -528,6 +542,7 @@ const server = Bun.serve({
         });
 
         const responseText = result.response || '';
+        const toolCalls = result.tool_calls || [];
         const id = genId();
 
         // Streaming mode: return SSE
@@ -537,6 +552,22 @@ const server = Bun.serve({
 
           const stream = new ReadableStream({
             async start(controller) {
+              // If there are tool calls, send them as a metadata event first
+              if (toolCalls.length > 0) {
+                const metaChunk = {
+                  id,
+                  object: 'chat.completion.chunk',
+                  created: Math.floor(Date.now() / 1000),
+                  model: body.model || 'holoiconic',
+                  choices: [{
+                    index: 0,
+                    delta: { tool_calls: toolCalls },
+                    finish_reason: null,
+                  }],
+                };
+                controller.enqueue(encoder.encode('data: ' + JSON.stringify(metaChunk) + '\\n\\n'));
+              }
+
               for (let i = 0; i < words.length; i++) {
                 const chunk = {
                   id,
@@ -599,6 +630,7 @@ const server = Bun.serve({
           ],
           usage: { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 },
           session: sessionId,
+          tool_calls: toolCalls,
         };
 
         return Response.json(completion, { headers: corsHeaders });
@@ -629,7 +661,7 @@ if (signal) {
 `,
 
   // ── web:ui ─────────────────────────────────────────────────────
-  // Minimal chat + graph explorer WebUI on port 3002.
+  // Chat + graph explorer WebUI with node editing, creation, and tool call visibility.
   "web:ui": `
 const signal = args && args.signal;
 const port = (args && args.port) || 3002;
@@ -645,13 +677,23 @@ const html = \`<!DOCTYPE html>
   * { margin: 0; padding: 0; box-sizing: border-box; }
   body { background: #0d1117; color: #c9d1d9; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', monospace; display: flex; height: 100vh; }
   #chat-panel { flex: 1; display: flex; flex-direction: column; border-right: 1px solid #21262d; }
-  #graph-panel { width: 360px; display: flex; flex-direction: column; }
-  .panel-header { padding: 12px 16px; border-bottom: 1px solid #21262d; font-weight: 600; font-size: 14px; color: #58a6ff; }
+  #graph-panel { width: 400px; display: flex; flex-direction: column; }
+  .panel-header { padding: 12px 16px; border-bottom: 1px solid #21262d; font-weight: 600; font-size: 14px; color: #58a6ff; display: flex; justify-content: space-between; align-items: center; }
+  .panel-header button { background: #238636; color: #fff; border: none; padding: 4px 10px; border-radius: 4px; cursor: pointer; font-size: 12px; }
+  .panel-header button:hover { background: #2ea043; }
   #messages { flex: 1; overflow-y: auto; padding: 16px; }
   .msg { margin-bottom: 12px; padding: 8px 12px; border-radius: 6px; white-space: pre-wrap; word-wrap: break-word; font-size: 14px; line-height: 1.5; }
   .msg.user { background: #1f2937; color: #e5e7eb; }
   .msg.assistant { background: #161b22; color: #c9d1d9; border-left: 3px solid #58a6ff; }
   .msg .role { font-size: 11px; text-transform: uppercase; color: #8b949e; margin-bottom: 4px; }
+  .tool-calls { margin-top: 8px; }
+  .tool-call { background: #1c1f26; border: 1px solid #30363d; border-radius: 4px; margin-bottom: 6px; font-size: 12px; }
+  .tool-call-header { padding: 6px 10px; cursor: pointer; color: #d2a8ff; display: flex; justify-content: space-between; align-items: center; }
+  .tool-call-header:hover { background: #21262d; }
+  .tool-call-body { display: none; padding: 6px 10px; border-top: 1px solid #30363d; color: #8b949e; font-family: monospace; white-space: pre-wrap; max-height: 200px; overflow-y: auto; }
+  .tool-call-body.open { display: block; }
+  .tool-call-label { font-weight: 600; color: #d2a8ff; }
+  .tool-call-toggle { font-size: 10px; color: #8b949e; }
   #input-row { display: flex; padding: 12px 16px; border-top: 1px solid #21262d; gap: 8px; }
   #input { flex: 1; background: #161b22; border: 1px solid #30363d; color: #c9d1d9; padding: 8px 12px; border-radius: 6px; font-size: 14px; font-family: inherit; }
   #input:focus { outline: none; border-color: #58a6ff; }
@@ -662,7 +704,30 @@ const html = \`<!DOCTYPE html>
   .node-item { padding: 6px 10px; cursor: pointer; border-radius: 4px; font-size: 13px; font-family: monospace; }
   .node-item:hover { background: #161b22; }
   .node-item.selected { background: #1f2937; color: #58a6ff; }
-  #node-source { height: 300px; overflow-y: auto; padding: 12px; border-top: 1px solid #21262d; font-size: 12px; font-family: monospace; white-space: pre-wrap; background: #0d1117; color: #8b949e; }
+  #node-detail { border-top: 1px solid #21262d; display: flex; flex-direction: column; }
+  #node-detail-header { padding: 8px 12px; display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid #21262d; }
+  #node-detail-header .node-name { font-weight: 600; font-size: 13px; color: #58a6ff; }
+  #node-detail-header .btn-group { display: flex; gap: 4px; }
+  #node-detail-header button { background: #30363d; color: #c9d1d9; border: none; padding: 3px 8px; border-radius: 4px; cursor: pointer; font-size: 11px; }
+  #node-detail-header button:hover { background: #484f58; }
+  #node-detail-header button.save-btn { background: #238636; color: #fff; }
+  #node-detail-header button.save-btn:hover { background: #2ea043; }
+  #node-detail-header button.cancel-btn { background: #da3633; color: #fff; }
+  #node-detail-header button.cancel-btn:hover { background: #f85149; }
+  #node-source { height: 300px; overflow-y: auto; padding: 12px; font-size: 12px; font-family: monospace; white-space: pre-wrap; background: #0d1117; color: #8b949e; }
+  #node-source-edit { height: 300px; width: 100%; padding: 12px; font-size: 12px; font-family: monospace; background: #161b22; color: #c9d1d9; border: 1px solid #58a6ff; resize: none; display: none; }
+  #create-node-form { padding: 12px; border-top: 1px solid #21262d; display: none; }
+  #create-node-form input, #create-node-form textarea { width: 100%; background: #161b22; border: 1px solid #30363d; color: #c9d1d9; padding: 6px 10px; border-radius: 4px; font-size: 12px; font-family: monospace; margin-bottom: 8px; }
+  #create-node-form input:focus, #create-node-form textarea:focus { outline: none; border-color: #58a6ff; }
+  #create-node-form textarea { height: 120px; resize: vertical; }
+  #create-node-form .form-buttons { display: flex; gap: 4px; justify-content: flex-end; }
+  #create-node-form button { padding: 4px 10px; border: none; border-radius: 4px; cursor: pointer; font-size: 12px; }
+  #create-node-form .create-btn { background: #238636; color: #fff; }
+  #create-node-form .create-cancel-btn { background: #30363d; color: #c9d1d9; }
+  .notification { position: fixed; top: 16px; right: 16px; padding: 10px 16px; border-radius: 6px; font-size: 13px; z-index: 1000; animation: fadeOut 3s forwards; }
+  .notification.success { background: #238636; color: #fff; }
+  .notification.error { background: #da3633; color: #fff; }
+  @keyframes fadeOut { 0%,70% { opacity: 1; } 100% { opacity: 0; } }
 </style>
 </head>
 <body>
@@ -675,21 +740,83 @@ const html = \`<!DOCTYPE html>
   </div>
 </div>
 <div id="graph-panel">
-  <div class="panel-header">graph nodes</div>
+  <div class="panel-header"><span>graph nodes</span><button id="create-node-btn">+ New Node</button></div>
+  <div id="create-node-form">
+    <input id="new-node-name" type="text" placeholder="Node name (e.g. my:function)" />
+    <textarea id="new-node-source" placeholder="Node source code (async function body receiving ctx, args)"></textarea>
+    <div class="form-buttons">
+      <button class="create-cancel-btn" id="create-cancel">Cancel</button>
+      <button class="create-btn" id="create-submit">Create</button>
+    </div>
+  </div>
   <div id="node-list"></div>
-  <div id="node-source">Click a node to view source</div>
+  <div id="node-detail">
+    <div id="node-detail-header">
+      <span class="node-name" id="detail-node-name"></span>
+      <div class="btn-group" id="detail-buttons"></div>
+    </div>
+    <div id="node-source">Click a node to view source</div>
+    <textarea id="node-source-edit"></textarea>
+  </div>
 </div>
 <script>
 const API = 'http://localhost:' + \${apiPort} + '/v1/chat/completions';
+const BASE = 'http://localhost:' + \${port};
 const msgDiv = document.getElementById('messages');
 const input = document.getElementById('input');
 const sendBtn = document.getElementById('send');
 const nodeList = document.getElementById('node-list');
 const nodeSource = document.getElementById('node-source');
+const nodeSourceEdit = document.getElementById('node-source-edit');
+const detailNodeName = document.getElementById('detail-node-name');
+const detailButtons = document.getElementById('detail-buttons');
+const createNodeForm = document.getElementById('create-node-form');
+
+let selectedNode = null;
+let originalSource = null;
+let editMode = false;
 
 // Persistent session ID for multi-turn conversations
 const sessionId = 'webui:' + Date.now() + '-' + Math.random().toString(36).slice(2, 8);
 const chatHistory = [];
+
+function notify(msg, type) {
+  const el = document.createElement('div');
+  el.className = 'notification ' + type;
+  el.textContent = msg;
+  document.body.appendChild(el);
+  setTimeout(() => el.remove(), 3200);
+}
+
+function escHtml(s) {
+  const d = document.createElement('div');
+  d.textContent = s;
+  return d.innerHTML;
+}
+
+function renderToolCalls(toolCalls, container) {
+  if (!toolCalls || toolCalls.length === 0) return;
+  const wrap = document.createElement('div');
+  wrap.className = 'tool-calls';
+  for (const tc of toolCalls) {
+    const tcDiv = document.createElement('div');
+    tcDiv.className = 'tool-call';
+    const header = document.createElement('div');
+    header.className = 'tool-call-header';
+    header.innerHTML = '<span class="tool-call-label">' + escHtml(tc.name) + '</span><span class="tool-call-toggle">click to expand</span>';
+    const body = document.createElement('div');
+    body.className = 'tool-call-body';
+    body.textContent = 'Input: ' + JSON.stringify(tc.input, null, 2) + '\\n\\nResult: ' + (tc.result || '(no result)');
+    header.onclick = () => {
+      body.classList.toggle('open');
+      header.querySelector('.tool-call-toggle').textContent = body.classList.contains('open') ? 'collapse' : 'click to expand';
+    };
+    tcDiv.appendChild(header);
+    tcDiv.appendChild(body);
+    wrap.appendChild(tcDiv);
+  }
+  container.appendChild(wrap);
+}
 
 async function send() {
   const text = input.value.trim();
@@ -699,7 +826,6 @@ async function send() {
   addMsg('user', text);
   chatHistory.push({ role: 'user', content: text });
 
-  // Create a placeholder message div for streaming
   const d = document.createElement('div');
   d.className = 'msg assistant';
   d.innerHTML = '<div class="role">assistant</div>';
@@ -708,6 +834,7 @@ async function send() {
   msgDiv.appendChild(d);
 
   let fullText = '';
+  let toolCalls = [];
 
   try {
     const res = await fetch(API, {
@@ -749,6 +876,9 @@ async function send() {
         try {
           const chunk = JSON.parse(payload);
           const delta = chunk.choices && chunk.choices[0] && chunk.choices[0].delta;
+          if (delta && delta.tool_calls) {
+            toolCalls = delta.tool_calls;
+          }
           if (delta && delta.content) {
             fullText += delta.content;
             contentSpan.textContent = fullText;
@@ -757,6 +887,9 @@ async function send() {
         } catch {}
       }
     }
+
+    // Render tool calls if any
+    renderToolCalls(toolCalls, d);
 
     chatHistory.push({ role: 'assistant', content: fullText });
   } catch (e) {
@@ -775,23 +908,72 @@ function addMsg(role, content) {
   msgDiv.scrollTop = msgDiv.scrollHeight;
 }
 
-function escHtml(s) {
-  const d = document.createElement('div');
-  d.textContent = s;
-  return d.innerHTML;
-}
-
 sendBtn.onclick = send;
 input.onkeydown = (e) => { if (e.key === 'Enter') send(); };
 
+function setEditMode(on) {
+  editMode = on;
+  nodeSource.style.display = on ? 'none' : 'block';
+  nodeSourceEdit.style.display = on ? 'block' : 'none';
+  renderDetailButtons();
+}
+
+function renderDetailButtons() {
+  detailButtons.innerHTML = '';
+  if (!selectedNode) return;
+  if (editMode) {
+    const saveBtn = document.createElement('button');
+    saveBtn.className = 'save-btn';
+    saveBtn.textContent = 'Save';
+    saveBtn.onclick = saveSource;
+    const cancelBtn = document.createElement('button');
+    cancelBtn.className = 'cancel-btn';
+    cancelBtn.textContent = 'Cancel';
+    cancelBtn.onclick = () => {
+      setEditMode(false);
+      nodeSource.textContent = originalSource || '(no source)';
+    };
+    detailButtons.appendChild(cancelBtn);
+    detailButtons.appendChild(saveBtn);
+  } else {
+    const editBtn = document.createElement('button');
+    editBtn.textContent = 'Edit';
+    editBtn.onclick = () => {
+      nodeSourceEdit.value = originalSource || '';
+      setEditMode(true);
+    };
+    detailButtons.appendChild(editBtn);
+  }
+}
+
+async function saveSource() {
+  const newSource = nodeSourceEdit.value;
+  try {
+    const res = await fetch(BASE + '/api/node/' + encodeURIComponent(selectedNode) + '/source', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ source: newSource }),
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || 'Save failed');
+    originalSource = newSource;
+    nodeSource.textContent = newSource;
+    setEditMode(false);
+    notify('Node "' + selectedNode + '" saved', 'success');
+    loadNodes();
+  } catch (e) {
+    notify('Error saving: ' + e.message, 'error');
+  }
+}
+
 async function loadNodes() {
   try {
-    const res = await fetch('http://localhost:' + \${port} + '/api/nodes');
+    const res = await fetch(BASE + '/api/nodes');
     const nodes = await res.json();
     nodeList.innerHTML = '';
     for (const n of nodes) {
       const el = document.createElement('div');
-      el.className = 'node-item';
+      el.className = 'node-item' + (n.name === selectedNode ? ' selected' : '');
       el.textContent = n.name;
       el.onclick = () => showSource(n.name, el);
       nodeList.appendChild(el);
@@ -801,13 +983,57 @@ async function loadNodes() {
 
 async function showSource(name, el) {
   document.querySelectorAll('.node-item').forEach(e => e.classList.remove('selected'));
-  el.classList.add('selected');
+  if (el) el.classList.add('selected');
+  selectedNode = name;
+  setEditMode(false);
+  detailNodeName.textContent = name;
   try {
-    const res = await fetch('http://localhost:' + \${port} + '/api/node/' + encodeURIComponent(name));
+    const res = await fetch(BASE + '/api/node/' + encodeURIComponent(name));
     const data = await res.json();
+    originalSource = data.source;
     nodeSource.textContent = data.source || '(no source)';
-  } catch { nodeSource.textContent = '(error loading)'; }
+    renderDetailButtons();
+  } catch {
+    nodeSource.textContent = '(error loading)';
+    originalSource = null;
+    renderDetailButtons();
+  }
 }
+
+// Create Node
+document.getElementById('create-node-btn').onclick = () => {
+  createNodeForm.style.display = createNodeForm.style.display === 'none' ? 'block' : 'block';
+  createNodeForm.style.display = 'block';
+};
+document.getElementById('create-cancel').onclick = () => {
+  createNodeForm.style.display = 'none';
+  document.getElementById('new-node-name').value = '';
+  document.getElementById('new-node-source').value = '';
+};
+document.getElementById('create-submit').onclick = async () => {
+  const name = document.getElementById('new-node-name').value.trim();
+  const source = document.getElementById('new-node-source').value;
+  if (!name) { notify('Node name is required', 'error'); return; }
+  if (!source) { notify('Node source is required', 'error'); return; }
+  try {
+    const res = await fetch(BASE + '/api/nodes', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name, source }),
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || 'Create failed');
+    createNodeForm.style.display = 'none';
+    document.getElementById('new-node-name').value = '';
+    document.getElementById('new-node-source').value = '';
+    notify('Node "' + name + '" created', 'success');
+    loadNodes();
+    // Auto-select the new node
+    setTimeout(() => showSource(name, null), 200);
+  } catch (e) {
+    notify('Error creating: ' + e.message, 'error');
+  }
+};
 
 loadNodes();
 </script>
@@ -824,20 +1050,76 @@ const server = Bun.serve({
       'Access-Control-Allow-Headers': 'Content-Type',
     };
 
+    if (req.method === 'OPTIONS') {
+      return new Response(null, { status: 204, headers: corsHeaders });
+    }
+
     // Serve the SPA
     if (url.pathname === '/' || url.pathname === '/index.html') {
       return new Response(html, { headers: { 'Content-Type': 'text/html; charset=utf-8', ...corsHeaders } });
     }
 
-    // API: list nodes
+    // API: list nodes (GET) or create node (POST)
     if (url.pathname === '/api/nodes') {
+      if (req.method === 'POST') {
+        try {
+          const body = await req.json();
+          const name = body.name;
+          const source = body.source;
+          if (!name || typeof name !== 'string') {
+            return Response.json({ error: 'name (string) is required' }, { status: 400, headers: corsHeaders });
+          }
+          if (!source || typeof source !== 'string') {
+            return Response.json({ error: 'source (string) is required' }, { status: 400, headers: corsHeaders });
+          }
+          // Check if node already exists
+          const existing = await ctx.query({ s: name, p: 'type', o: 'Function' });
+          if (existing.length > 0) {
+            return Response.json({ error: 'Node already exists: ' + name }, { status: 409, headers: corsHeaders });
+          }
+          await ctx.assert(name, 'type', 'Function');
+          await ctx.assert(name, 'source', source);
+          return Response.json({ ok: true, name }, { status: 201, headers: corsHeaders });
+        } catch (err) {
+          return Response.json({ error: err.message || String(err) }, { status: 500, headers: corsHeaders });
+        }
+      }
+      // GET: list nodes
       const nodes = await ctx.query({ p: 'type', o: 'Function' });
       const result = nodes.map(n => ({ name: n.s })).sort((a, b) => a.name.localeCompare(b.name));
       return Response.json(result, { headers: corsHeaders });
     }
 
-    // API: get node source
-    if (url.pathname.startsWith('/api/node/')) {
+    // API: update node source (POST /api/node/:name/source)
+    if (url.pathname.match(/^\\/api\\/node\\/.+\\/source$/) && req.method === 'POST') {
+      try {
+        // Extract node name: everything between /api/node/ and /source
+        const pathParts = url.pathname.slice('/api/node/'.length);
+        const name = decodeURIComponent(pathParts.slice(0, pathParts.lastIndexOf('/source')));
+        const body = await req.json();
+        const newSource = body.source;
+        if (typeof newSource !== 'string') {
+          return Response.json({ error: 'source (string) is required' }, { status: 400, headers: corsHeaders });
+        }
+
+        // Find the old source quad
+        const oldSourceQuads = await ctx.query({ s: name, p: 'source' });
+        if (oldSourceQuads.length > 0) {
+          // Retract old source
+          await ctx.retract(name, 'source', oldSourceQuads[0].o);
+        }
+
+        // Assert the new source
+        await ctx.assert(name, 'source', newSource);
+
+        return Response.json({ ok: true, name }, { headers: corsHeaders });
+      } catch (err) {
+        return Response.json({ error: err.message || String(err) }, { status: 500, headers: corsHeaders });
+      }
+    }
+
+    // API: get node source (GET /api/node/:name)
+    if (url.pathname.startsWith('/api/node/') && req.method === 'GET') {
       const name = decodeURIComponent(url.pathname.slice('/api/node/'.length));
       const sourceQuads = await ctx.query({ s: name, p: 'source' });
       const source = sourceQuads.length > 0 ? sourceQuads[0].o : null;

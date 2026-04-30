@@ -506,6 +506,122 @@ async function testWebUi(ctx: Ctx) {
     } catch (e) {
       fail("GET /api/node/:name", e);
     }
+
+    // Test POST /api/node/:name/source — update node source
+    try {
+      // Create a test node first
+      await ctx.assert("test:editable", "type", "Function");
+      await ctx.assert("test:editable", "source", "return 'v1'");
+
+      const res = await fetch(`http://localhost:${port}/api/node/test:editable/source`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ source: "return 'v2'" }),
+      });
+      const data = await res.json() as any;
+      if (!res.ok)
+        throw new Error(`expected 200, got ${res.status}: ${JSON.stringify(data)}`);
+      if (!data.ok)
+        throw new Error(`expected ok=true, got ${JSON.stringify(data)}`);
+
+      // Verify the source was updated in the graph
+      const sourceQuads = await ctx.query({ s: "test:editable", p: "source" });
+      if (sourceQuads.length !== 1)
+        throw new Error(`expected 1 source quad, got ${sourceQuads.length}`);
+      if (sourceQuads[0].o !== "return 'v2'")
+        throw new Error(`expected source='return \\'v2\\'', got '${sourceQuads[0].o}'`);
+
+      // Verify reactive recompilation works — calling the node should use new source
+      const result = await ctx.call("test:editable");
+      if (result !== "v2")
+        throw new Error(`expected 'v2' from recompiled node, got '${result}'`);
+
+      ok("POST /api/node/:name/source updates source and triggers recompilation");
+    } catch (e) {
+      fail("POST /api/node/:name/source", e);
+    }
+
+    // Test POST /api/node/:name/source — validation error
+    try {
+      const res = await fetch(`http://localhost:${port}/api/node/test:editable/source`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({}),
+      });
+      if (res.status !== 400)
+        throw new Error(`expected 400 for missing source, got ${res.status}`);
+      ok("POST /api/node/:name/source rejects missing source with 400");
+    } catch (e) {
+      fail("POST /api/node/:name/source validation", e);
+    }
+
+    // Test POST /api/nodes — create a new node
+    try {
+      const res = await fetch(`http://localhost:${port}/api/nodes`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name: "test:created", source: "return 'created'" }),
+      });
+      const data = await res.json() as any;
+      if (res.status !== 201)
+        throw new Error(`expected 201, got ${res.status}: ${JSON.stringify(data)}`);
+      if (!data.ok)
+        throw new Error(`expected ok=true, got ${JSON.stringify(data)}`);
+
+      // Verify the node exists in the graph
+      const typeQuads = await ctx.query({ s: "test:created", p: "type", o: "Function" });
+      if (typeQuads.length !== 1)
+        throw new Error(`expected 1 type quad, got ${typeQuads.length}`);
+      const sourceQuads = await ctx.query({ s: "test:created", p: "source" });
+      if (sourceQuads.length !== 1)
+        throw new Error(`expected 1 source quad, got ${sourceQuads.length}`);
+
+      // Verify the node can be called
+      const result = await ctx.call("test:created");
+      if (result !== "created")
+        throw new Error(`expected 'created', got '${result}'`);
+
+      ok("POST /api/nodes creates new node with type and source");
+    } catch (e) {
+      fail("POST /api/nodes create", e);
+    }
+
+    // Test POST /api/nodes — duplicate node returns 409
+    try {
+      const res = await fetch(`http://localhost:${port}/api/nodes`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name: "test:created", source: "return 'duplicate'" }),
+      });
+      if (res.status !== 409)
+        throw new Error(`expected 409 for duplicate, got ${res.status}`);
+      ok("POST /api/nodes rejects duplicate node with 409");
+    } catch (e) {
+      fail("POST /api/nodes duplicate", e);
+    }
+
+    // Test POST /api/nodes — validation errors
+    try {
+      const res1 = await fetch(`http://localhost:${port}/api/nodes`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ source: "return 1" }),
+      });
+      if (res1.status !== 400)
+        throw new Error(`expected 400 for missing name, got ${res1.status}`);
+
+      const res2 = await fetch(`http://localhost:${port}/api/nodes`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name: "test:bad" }),
+      });
+      if (res2.status !== 400)
+        throw new Error(`expected 400 for missing source, got ${res2.status}`);
+
+      ok("POST /api/nodes rejects invalid input with 400");
+    } catch (e) {
+      fail("POST /api/nodes validation", e);
+    }
   } finally {
     ac.abort();
     await new Promise((r) => setTimeout(r, 100));
@@ -677,6 +793,50 @@ async function testVectorSearch(ctx: Ctx) {
   }
 }
 
+async function testToolCallVisibility(ctx: Ctx) {
+  console.log("\n── Tool call visibility ──");
+
+  // Test that agent:loop returns tool_calls array (even when empty in stub mode)
+  try {
+    const result = await ctx.call("agent:loop", { prompt: "what tools exist" });
+    if (!result.hasOwnProperty("tool_calls"))
+      throw new Error("expected tool_calls field in agent:loop result");
+    if (!Array.isArray(result.tool_calls))
+      throw new Error(`expected tool_calls to be array, got ${typeof result.tool_calls}`);
+    ok("agent:loop returns tool_calls array in response");
+  } catch (e) {
+    fail("agent:loop tool_calls", e);
+  }
+
+  // Test that api:server passes tool_calls through in non-streaming response
+  const port = 13800 + Math.floor(Math.random() * 100);
+  const ac = new AbortController();
+  try {
+    ctx.call("api:server", { port, signal: ac.signal }).catch(() => {});
+    await new Promise((r) => setTimeout(r, 200));
+
+    const chatRes = await fetch(`http://localhost:${port}/v1/chat/completions`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        model: "holoiconic",
+        messages: [{ role: "user", content: "test tool visibility" }],
+      }),
+    });
+    const chatData = await chatRes.json() as any;
+    if (!chatData.hasOwnProperty("tool_calls"))
+      throw new Error("expected tool_calls in API response");
+    if (!Array.isArray(chatData.tool_calls))
+      throw new Error(`expected tool_calls array, got ${typeof chatData.tool_calls}`);
+    ok("API response includes tool_calls array");
+  } catch (e) {
+    fail("API tool_calls", e);
+  } finally {
+    ac.abort();
+    await new Promise((r) => setTimeout(r, 100));
+  }
+}
+
 async function testCallWithoutSource(ctx: Ctx) {
   console.log("\n── Edge cases ──");
 
@@ -718,6 +878,7 @@ async function main() {
   await testVectorSearch(ctx);
   await testApiServer(ctx);
   await testWebUi(ctx);
+  await testToolCallVisibility(ctx);
   await testCallWithoutSource(ctx);
 
   // Summary
