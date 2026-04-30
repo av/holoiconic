@@ -136,19 +136,272 @@ return stdout;
 `,
 
   // ── llm ─────────────────────────────────────────────────────────
-  // Stub — returns placeholder until LLM is configured.
+  // Real Anthropic API integration via fetch.
   "llm": `
+const apiKey = typeof Bun !== 'undefined' ? Bun.env.ANTHROPIC_API_KEY : process.env.ANTHROPIC_API_KEY;
+if (!apiKey) {
+  // Fallback stub when no API key is configured
+  const messages = args && args.messages;
+  const model = (args && args.model) || 'default';
+  return {
+    id: 'stub',
+    type: 'message',
+    role: 'assistant',
+    content: [{ type: 'text', text: '[llm] No ANTHROPIC_API_KEY set. Model: ' + model }],
+    stop_reason: 'end_turn',
+    model: model,
+    usage: { input_tokens: 0, output_tokens: 0 },
+  };
+}
+
 const messages = args && args.messages;
-const model = (args && args.model) || 'default';
-console.log('[llm] stub called with model:', model, 'messages:', messages && messages.length);
-return {
-  role: 'assistant',
-  content: '[llm stub] LLM not yet configured. Model: ' + model,
+if (!messages || !Array.isArray(messages)) {
+  throw new Error('[llm] args.messages (array) is required');
+}
+
+const model = (args && args.model) || 'claude-sonnet-4-20250514';
+const maxTokens = (args && args.max_tokens) || 4096;
+const temperature = args && args.temperature;
+
+const body = {
+  model,
+  max_tokens: maxTokens,
+  messages,
 };
+if (args && args.system) body.system = args.system;
+if (args && args.tools && args.tools.length > 0) body.tools = args.tools;
+if (temperature !== undefined) body.temperature = temperature;
+
+const resp = await fetch('https://api.anthropic.com/v1/messages', {
+  method: 'POST',
+  headers: {
+    'Content-Type': 'application/json',
+    'x-api-key': apiKey,
+    'anthropic-version': '2023-06-01',
+  },
+  body: JSON.stringify(body),
+});
+
+if (!resp.ok) {
+  const errText = await resp.text();
+  throw new Error('[llm] API error (' + resp.status + '): ' + errText);
+}
+
+const result = await resp.json();
+return result;
+`,
+
+  // ── agent:tools ─────────────────────────────────────────────────
+  // Registers core tools as Tool-typed quads for the agentic loop.
+  "agent:tools": `
+// Shell tool
+await ctx.assert('shell', 'type', 'Tool');
+await ctx.assert('shell', 'tool_schema', JSON.stringify({
+  name: 'shell',
+  description: 'Execute a shell command and return stdout. Use for running programs, file operations, etc.',
+  input_schema: {
+    type: 'object',
+    properties: {
+      cmd: { type: 'string', description: 'The shell command to execute' }
+    },
+    required: ['cmd']
+  }
+}));
+
+// Query tool — lets the agent query the graph
+await ctx.assert('graph_query', 'type', 'Tool');
+await ctx.assert('graph_query', 'tool_schema', JSON.stringify({
+  name: 'graph_query',
+  description: 'Query the RDF quad graph. Returns quads matching the given pattern. Omit fields to use them as wildcards.',
+  input_schema: {
+    type: 'object',
+    properties: {
+      s: { type: 'string', description: 'Subject filter (optional)' },
+      p: { type: 'string', description: 'Predicate filter (optional)' },
+      o: { type: 'string', description: 'Object/value filter (optional)' },
+      g: { type: 'string', description: 'Graph filter (optional)' }
+    }
+  }
+}));
+
+// Assert tool — lets the agent assert quads
+await ctx.assert('graph_assert', 'type', 'Tool');
+await ctx.assert('graph_assert', 'tool_schema', JSON.stringify({
+  name: 'graph_assert',
+  description: 'Assert (insert) a quad into the RDF graph. If the quad already exists, this is a no-op.',
+  input_schema: {
+    type: 'object',
+    properties: {
+      s: { type: 'string', description: 'Subject' },
+      p: { type: 'string', description: 'Predicate' },
+      o: { type: 'string', description: 'Object/value' },
+      g: { type: 'string', description: 'Graph (defaults to _)' }
+    },
+    required: ['s', 'p', 'o']
+  }
+}));
+
+// Retract tool — lets the agent retract quads
+await ctx.assert('graph_retract', 'type', 'Tool');
+await ctx.assert('graph_retract', 'tool_schema', JSON.stringify({
+  name: 'graph_retract',
+  description: 'Retract (delete) a quad from the RDF graph. If the quad does not exist, this is a no-op.',
+  input_schema: {
+    type: 'object',
+    properties: {
+      s: { type: 'string', description: 'Subject' },
+      p: { type: 'string', description: 'Predicate' },
+      o: { type: 'string', description: 'Object/value' },
+      g: { type: 'string', description: 'Graph (defaults to _)' }
+    },
+    required: ['s', 'p', 'o']
+  }
+}));
+
+// Nodes tool — list all function nodes
+await ctx.assert('list_nodes', 'type', 'Tool');
+await ctx.assert('list_nodes', 'tool_schema', JSON.stringify({
+  name: 'list_nodes',
+  description: 'List all function nodes registered in the graph. Returns their names.',
+  input_schema: {
+    type: 'object',
+    properties: {}
+  }
+}));
+
+console.log('[agent:tools] registered 5 tools');
+`,
+
+  // ── agent:loop ─────────────────────────────────────────────────
+  // Core agentic loop — maintains conversation, dispatches tool calls.
+  "agent:loop": `
+const prompt = args && args.prompt;
+if (!prompt) throw new Error('[agent:loop] args.prompt is required');
+
+const sessionId = (args && args.session) || ('session:' + Date.now());
+
+// System prompt
+const systemPrompt = \`You are an AI assistant running inside holoiconic, a self-modifying agentic runtime.
+Everything in this system exists as RDF quads (subject, predicate, object, graph) in a reactive graph database.
+Code, state, tools, and even this agentic loop are all quads in the same graph.
+
+You have access to tools that let you:
+- Execute shell commands
+- Query the graph for quads
+- Assert (insert) new quads
+- Retract (delete) quads
+- List all function nodes
+
+The graph is reactive: when quads change, watchers fire automatically.
+Function nodes have (name, 'source', code) and (name, 'type', 'Function') quads.
+You can create new nodes by asserting source and type quads.
+
+Be concise and helpful. When using tools, explain what you are doing.\`;
+
+// Load conversation history from graph
+const historyQuads = await ctx.query({ p: 'message', g: sessionId });
+const history = historyQuads
+  .sort((a, b) => a.id - b.id)
+  .map(q => JSON.parse(q.o));
+
+// Add the new user message
+const userMsg = { role: 'user', content: prompt };
+await ctx.assert(sessionId, 'message', JSON.stringify(userMsg), sessionId);
+history.push(userMsg);
+
+// Collect available tools
+const toolQuads = await ctx.query({ p: 'type', o: 'Tool' });
+const tools = [];
+for (const tq of toolQuads) {
+  const schemaQuads = await ctx.query({ s: tq.s, p: 'tool_schema' });
+  if (schemaQuads.length > 0) {
+    try {
+      tools.push(JSON.parse(schemaQuads[0].o));
+    } catch {}
+  }
+}
+
+// Agentic loop — keep calling LLM until we get a text response (no tool_use)
+let messages = [...history];
+const maxIterations = 20;
+
+for (let i = 0; i < maxIterations; i++) {
+  const llmArgs = {
+    messages,
+    system: systemPrompt,
+    tools: tools.length > 0 ? tools : undefined,
+  };
+
+  const response = await ctx.call('llm', llmArgs);
+
+  // Store the assistant message in the graph
+  const assistantMsg = { role: 'assistant', content: response.content };
+  await ctx.assert(sessionId, 'message', JSON.stringify(assistantMsg), sessionId);
+  messages.push(assistantMsg);
+
+  // Check if response contains tool_use
+  const toolUseBlocks = (response.content || []).filter(b => b.type === 'tool_use');
+
+  if (toolUseBlocks.length === 0) {
+    // Pure text response — extract and return it
+    const textBlocks = (response.content || []).filter(b => b.type === 'text');
+    const text = textBlocks.map(b => b.text).join('\\n');
+    return { session: sessionId, response: text };
+  }
+
+  // Execute each tool call
+  const toolResults = [];
+  for (const toolBlock of toolUseBlocks) {
+    const toolName = toolBlock.name;
+    const toolInput = toolBlock.input;
+    let result;
+
+    try {
+      if (toolName === 'shell') {
+        result = await ctx.call('shell', { cmd: toolInput.cmd });
+      } else if (toolName === 'graph_query') {
+        const pattern = {};
+        if (toolInput.s) pattern.s = toolInput.s;
+        if (toolInput.p) pattern.p = toolInput.p;
+        if (toolInput.o) pattern.o = toolInput.o;
+        if (toolInput.g) pattern.g = toolInput.g;
+        const quads = await ctx.query(pattern);
+        result = JSON.stringify(quads, null, 2);
+      } else if (toolName === 'graph_assert') {
+        const quad = await ctx.assert(toolInput.s, toolInput.p, toolInput.o, toolInput.g || '_');
+        result = 'Asserted: ' + JSON.stringify(quad);
+      } else if (toolName === 'graph_retract') {
+        await ctx.retract(toolInput.s, toolInput.p, toolInput.o, toolInput.g || '_');
+        result = 'Retracted successfully';
+      } else if (toolName === 'list_nodes') {
+        const nodes = await ctx.query({ p: 'type', o: 'Function' });
+        result = nodes.map(n => n.s).join('\\n');
+      } else {
+        // Try calling it as a generic node
+        result = JSON.stringify(await ctx.call(toolName, toolInput));
+      }
+    } catch (err) {
+      result = 'Error: ' + (err.message || String(err));
+    }
+
+    toolResults.push({
+      type: 'tool_result',
+      tool_use_id: toolBlock.id,
+      content: typeof result === 'string' ? result : JSON.stringify(result),
+    });
+  }
+
+  // Add tool results as a user message and loop
+  const toolResultMsg = { role: 'user', content: toolResults };
+  await ctx.assert(sessionId, 'message', JSON.stringify(toolResultMsg), sessionId);
+  messages.push(toolResultMsg);
+}
+
+return { session: sessionId, response: '[agent:loop] max iterations reached' };
 `,
 
   // ── repl ────────────────────────────────────────────────────────
-  // Basic REPL for interactive use.
+  // Interactive REPL — routes messages through agent:loop or direct dot-commands.
   "repl": `
 const signal = args && args.signal;
 const readline = await import('node:readline');
@@ -220,8 +473,13 @@ for await (const line of rl) {
       console.log('  .nodes                        — list all Function nodes');
       console.log('  .help                         — this help');
 
-    } else {
+    } else if (trimmed.startsWith('.')) {
       console.log('unknown command. type .help');
+
+    } else {
+      // Route through agent:loop
+      const result = await ctx.call('agent:loop', { prompt: trimmed });
+      console.log(result.response);
     }
   } catch (err) {
     console.error('error:', err.message || err);
@@ -247,7 +505,10 @@ await ctx.call('spawn', { node: 'sys:supervisor' });
 // Small delay to let supervisor initialize
 await new Promise(r => setTimeout(r, 50));
 
-// 3. Start the REPL
+// 3. Register agent tools
+await ctx.call('agent:tools');
+
+// 4. Start the REPL
 console.log('[main] holoiconic ready');
 await ctx.call('spawn', { node: 'repl' });
 `,

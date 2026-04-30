@@ -97,8 +97,8 @@ async function testShellNode(ctx: Ctx) {
   }
 }
 
-async function testLlmStub(ctx: Ctx) {
-  console.log("\n── LLM stub ──");
+async function testLlmNode(ctx: Ctx) {
+  console.log("\n── LLM node ──");
 
   try {
     const result = await ctx.call("llm", {
@@ -107,9 +107,60 @@ async function testLlmStub(ctx: Ctx) {
     });
     if (!result || result.role !== "assistant")
       throw new Error(`unexpected result: ${JSON.stringify(result)}`);
-    ok("llm stub returns assistant message");
+    if (!Array.isArray(result.content))
+      throw new Error(`expected content array, got: ${typeof result.content}`);
+    ok("llm returns Anthropic-format assistant message");
   } catch (e) {
-    fail("llm stub", e);
+    fail("llm node", e);
+  }
+}
+
+async function testAgentTools(ctx: Ctx) {
+  console.log("\n── Agent tools ──");
+
+  try {
+    await ctx.call("agent:tools");
+
+    // Verify tool quads were registered
+    const toolQuads = await ctx.query({ p: "type", o: "Tool" });
+    const toolNames = toolQuads.map(q => q.s).sort();
+    if (toolNames.length < 5)
+      throw new Error(`expected >=5 tools, got ${toolNames.length}: ${toolNames}`);
+    ok("agent:tools registered 5+ tools");
+
+    // Verify shell tool has schema
+    const shellSchema = await ctx.query({ s: "shell", p: "tool_schema" });
+    if (shellSchema.length === 0)
+      throw new Error("shell tool has no schema");
+    const schema = JSON.parse(shellSchema[0].o);
+    if (schema.name !== "shell")
+      throw new Error(`expected shell schema name, got: ${schema.name}`);
+    ok("shell tool has valid schema");
+  } catch (e) {
+    fail("agent:tools", e);
+  }
+}
+
+async function testAgentLoop(ctx: Ctx) {
+  console.log("\n── Agent loop (stub mode) ──");
+
+  try {
+    // Without an API key, the LLM returns a stub response
+    // The agent:loop should handle the stub gracefully
+    const result = await ctx.call("agent:loop", { prompt: "hello" });
+    if (!result || !result.session)
+      throw new Error(`expected result with session, got: ${JSON.stringify(result)}`);
+    if (!result.response)
+      throw new Error(`expected result with response, got: ${JSON.stringify(result)}`);
+    ok("agent:loop returns session + response (stub mode)");
+
+    // Verify conversation was stored in graph
+    const msgs = await ctx.query({ p: "message", g: result.session });
+    if (msgs.length < 2)
+      throw new Error(`expected >=2 messages in session, got ${msgs.length}`);
+    ok("agent:loop stores conversation history in graph");
+  } catch (e) {
+    fail("agent:loop", e);
   }
 }
 
@@ -246,7 +297,9 @@ async function main() {
 
   await testBootChain(ctx);
   await testShellNode(ctx);
-  await testLlmStub(ctx);
+  await testLlmNode(ctx);
+  await testAgentTools(ctx);
+  await testAgentLoop(ctx);
   await testReactiveCompilation(ctx);
   await testSpawnLifecycle(ctx);
   await testCallWithoutSource(ctx);
