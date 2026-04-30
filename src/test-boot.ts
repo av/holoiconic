@@ -164,6 +164,55 @@ async function testAgentLoop(ctx: Ctx) {
   }
 }
 
+async function testSessionContinuity(ctx: Ctx) {
+  console.log("\n── Session continuity ──");
+
+  try {
+    // Send two messages with the same session ID
+    const sessionId = "test:continuity:" + Date.now();
+
+    const result1 = await ctx.call("agent:loop", { prompt: "first message", session: sessionId });
+    if (result1.session !== sessionId)
+      throw new Error(`expected session='${sessionId}', got '${result1.session}'`);
+
+    const result2 = await ctx.call("agent:loop", { prompt: "second message", session: sessionId });
+    if (result2.session !== sessionId)
+      throw new Error(`expected same session, got '${result2.session}'`);
+
+    // Verify conversation history has all messages (at least 4: user1, assistant1, user2, assistant2)
+    const msgs = await ctx.query({ p: "message", g: sessionId });
+    if (msgs.length < 4)
+      throw new Error(`expected >=4 messages in session, got ${msgs.length}`);
+
+    // Verify messages are properly ordered (user, assistant, user, assistant)
+    const sorted = msgs.sort((a: any, b: any) => a.id - b.id);
+    const parsed = sorted.map((q: any) => { const w = JSON.parse(q.o); return w.msg || w; });
+    if (parsed[0].role !== "user" || parsed[0].content !== "first message")
+      throw new Error(`first message wrong: ${JSON.stringify(parsed[0])}`);
+    if (parsed[1].role !== "assistant")
+      throw new Error(`second message should be assistant, got: ${parsed[1].role}`);
+    if (parsed[2].role !== "user" || parsed[2].content !== "second message")
+      throw new Error(`third message wrong: ${JSON.stringify(parsed[2])}`);
+    if (parsed[3].role !== "assistant")
+      throw new Error(`fourth message should be assistant, got: ${parsed[3].role}`);
+
+    ok("session continuity: same session ID preserves multi-turn history");
+  } catch (e) {
+    fail("session continuity", e);
+  }
+
+  try {
+    // Without a session ID, each call gets a unique session
+    const result1 = await ctx.call("agent:loop", { prompt: "no session 1" });
+    const result2 = await ctx.call("agent:loop", { prompt: "no session 2" });
+    if (result1.session === result2.session)
+      throw new Error("expected different sessions without explicit ID");
+    ok("no session ID: each call gets unique session");
+  } catch (e) {
+    fail("unique sessions", e);
+  }
+}
+
 async function testReactiveCompilation(ctx: Ctx) {
   console.log("\n── Reactive compilation ──");
 
@@ -294,7 +343,7 @@ async function testApiServer(ctx: Ctx) {
       fail("GET /v1/models", e);
     }
 
-    // Test /v1/chat/completions
+    // Test /v1/chat/completions (non-streaming)
     try {
       const chatRes = await fetch(`http://localhost:${port}/v1/chat/completions`, {
         method: "POST",
@@ -316,6 +365,78 @@ async function testApiServer(ctx: Ctx) {
       ok("POST /v1/chat/completions returns OpenAI-format response");
     } catch (e) {
       fail("POST /v1/chat/completions", e);
+    }
+
+    // Test session passthrough
+    try {
+      const sessionId = "test-session:" + Date.now();
+      const chatRes = await fetch(`http://localhost:${port}/v1/chat/completions`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          model: "holoiconic",
+          messages: [{ role: "user", content: "test session" }],
+          session: sessionId,
+        }),
+      });
+      const chatData = await chatRes.json() as any;
+      if (chatData.session !== sessionId)
+        throw new Error(`expected session='${sessionId}', got '${chatData.session}'`);
+      ok("POST /v1/chat/completions passes session through");
+    } catch (e) {
+      fail("session passthrough", e);
+    }
+
+    // Test streaming mode (stream: true)
+    try {
+      const streamRes = await fetch(`http://localhost:${port}/v1/chat/completions`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          model: "holoiconic",
+          messages: [{ role: "user", content: "stream test" }],
+          stream: true,
+        }),
+      });
+
+      const contentType = streamRes.headers.get("content-type") || "";
+      if (!contentType.includes("text/event-stream"))
+        throw new Error(`expected text/event-stream, got '${contentType}'`);
+
+      const body = await streamRes.text();
+      const lines = body.split("\n").filter(l => l.startsWith("data: "));
+
+      if (lines.length < 2)
+        throw new Error(`expected >=2 SSE data lines, got ${lines.length}`);
+
+      // Last data line should be [DONE]
+      const lastData = lines[lines.length - 1].slice(6).trim();
+      if (lastData !== "[DONE]")
+        throw new Error(`expected last line to be [DONE], got '${lastData}'`);
+
+      // First data line should be a valid chunk
+      const firstChunk = JSON.parse(lines[0].slice(6));
+      if (firstChunk.object !== "chat.completion.chunk")
+        throw new Error(`expected object='chat.completion.chunk', got '${firstChunk.object}'`);
+      if (!firstChunk.choices || !firstChunk.choices[0].delta)
+        throw new Error("expected delta in chunk choices");
+
+      // Reassemble full text from all chunks (except [DONE])
+      let assembled = "";
+      for (const line of lines) {
+        const payload = line.slice(6).trim();
+        if (payload === "[DONE]") continue;
+        const chunk = JSON.parse(payload);
+        if (chunk.choices && chunk.choices[0].delta && chunk.choices[0].delta.content) {
+          assembled += chunk.choices[0].delta.content;
+        }
+      }
+      if (assembled.length === 0)
+        throw new Error("assembled streaming text is empty");
+
+      ok("POST /v1/chat/completions streaming returns valid SSE chunks");
+    } catch (e) {
+      fail("streaming SSE", e);
     }
 
     // Test 404 for unknown paths
@@ -588,6 +709,7 @@ async function main() {
   await testLlmNode(ctx);
   await testAgentTools(ctx);
   await testAgentLoop(ctx);
+  await testSessionContinuity(ctx);
   await testReactiveCompilation(ctx);
   await testSpawnLifecycle(ctx);
   await testSnapshotExportImport(ctx);

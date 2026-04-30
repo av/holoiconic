@@ -354,14 +354,18 @@ You can create new nodes by asserting source and type quads.
 Be concise and helpful. When using tools, explain what you are doing.\`;
 
 // Load conversation history from graph
+// Messages are stored as {seq, msg} to ensure uniqueness even with identical content
 const historyQuads = await ctx.query({ p: 'message', g: sessionId });
 const history = historyQuads
   .sort((a, b) => a.id - b.id)
-  .map(q => JSON.parse(q.o));
+  .map(q => { const w = JSON.parse(q.o); return w.msg || w; });
+
+// Determine next sequence number
+let seq = historyQuads.length;
 
 // Add the new user message
 const userMsg = { role: 'user', content: prompt };
-await ctx.assert(sessionId, 'message', JSON.stringify(userMsg), sessionId);
+await ctx.assert(sessionId, 'message', JSON.stringify({ seq: seq++, msg: userMsg }), sessionId);
 history.push(userMsg);
 
 // Collect available tools
@@ -391,7 +395,7 @@ for (let i = 0; i < maxIterations; i++) {
 
   // Store the assistant message in the graph
   const assistantMsg = { role: 'assistant', content: response.content };
-  await ctx.assert(sessionId, 'message', JSON.stringify(assistantMsg), sessionId);
+  await ctx.assert(sessionId, 'message', JSON.stringify({ seq: seq++, msg: assistantMsg }), sessionId);
   messages.push(assistantMsg);
 
   // Check if response contains tool_use
@@ -456,7 +460,7 @@ for (let i = 0; i < maxIterations; i++) {
 
   // Add tool results as a user message and loop
   const toolResultMsg = { role: 'user', content: toolResults };
-  await ctx.assert(sessionId, 'message', JSON.stringify(toolResultMsg), sessionId);
+  await ctx.assert(sessionId, 'message', JSON.stringify({ seq: seq++, msg: toolResultMsg }), sessionId);
   messages.push(toolResultMsg);
 }
 
@@ -465,6 +469,7 @@ return { session: sessionId, response: '[agent:loop] max iterations reached' };
 
   // ── api:server ──────────────────────────────────────────────────
   // OpenAI-compatible chat completions API on port 3001.
+  // Supports session persistence and SSE streaming.
   "api:server": `
 const signal = args && args.signal;
 const port = (args && args.port) || 3001;
@@ -512,8 +517,10 @@ const server = Bun.serve({
           return Response.json({ error: { message: 'No user message found', type: 'invalid_request_error' } }, { status: 400, headers: corsHeaders });
         }
 
+        // Use session from request body (non-standard extension) or generate one
+        const sessionId = body.session || ('api:' + Date.now());
+
         // Route through the agentic loop
-        const sessionId = 'api:' + Date.now();
         const result = await ctx.call('agent:loop', {
           prompt,
           session: sessionId,
@@ -523,6 +530,61 @@ const server = Bun.serve({
         const responseText = result.response || '';
         const id = genId();
 
+        // Streaming mode: return SSE
+        if (body.stream) {
+          const words = responseText.split(/(?<=\\s)/);
+          const encoder = new TextEncoder();
+
+          const stream = new ReadableStream({
+            async start(controller) {
+              for (let i = 0; i < words.length; i++) {
+                const chunk = {
+                  id,
+                  object: 'chat.completion.chunk',
+                  created: Math.floor(Date.now() / 1000),
+                  model: body.model || 'holoiconic',
+                  choices: [{
+                    index: 0,
+                    delta: { content: words[i] },
+                    finish_reason: null,
+                  }],
+                };
+                controller.enqueue(encoder.encode('data: ' + JSON.stringify(chunk) + '\\n\\n'));
+                // Small delay between chunks to simulate streaming
+                if (i < words.length - 1) {
+                  await new Promise(r => setTimeout(r, 15));
+                }
+              }
+
+              // Final chunk with finish_reason
+              const finalChunk = {
+                id,
+                object: 'chat.completion.chunk',
+                created: Math.floor(Date.now() / 1000),
+                model: body.model || 'holoiconic',
+                choices: [{
+                  index: 0,
+                  delta: {},
+                  finish_reason: 'stop',
+                }],
+              };
+              controller.enqueue(encoder.encode('data: ' + JSON.stringify(finalChunk) + '\\n\\n'));
+              controller.enqueue(encoder.encode('data: [DONE]\\n\\n'));
+              controller.close();
+            },
+          });
+
+          return new Response(stream, {
+            headers: {
+              ...corsHeaders,
+              'Content-Type': 'text/event-stream',
+              'Cache-Control': 'no-cache',
+              'Connection': 'keep-alive',
+            },
+          });
+        }
+
+        // Non-streaming: return full completion
         const completion = {
           id,
           object: 'chat.completion',
@@ -536,6 +598,7 @@ const server = Bun.serve({
             },
           ],
           usage: { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 },
+          session: sessionId,
         };
 
         return Response.json(completion, { headers: corsHeaders });
@@ -624,22 +687,81 @@ const sendBtn = document.getElementById('send');
 const nodeList = document.getElementById('node-list');
 const nodeSource = document.getElementById('node-source');
 
+// Persistent session ID for multi-turn conversations
+const sessionId = 'webui:' + Date.now() + '-' + Math.random().toString(36).slice(2, 8);
+const chatHistory = [];
+
 async function send() {
   const text = input.value.trim();
   if (!text) return;
   input.value = '';
   sendBtn.disabled = true;
   addMsg('user', text);
+  chatHistory.push({ role: 'user', content: text });
+
+  // Create a placeholder message div for streaming
+  const d = document.createElement('div');
+  d.className = 'msg assistant';
+  d.innerHTML = '<div class="role">assistant</div>';
+  const contentSpan = document.createElement('span');
+  d.appendChild(contentSpan);
+  msgDiv.appendChild(d);
+
+  let fullText = '';
+
   try {
     const res = await fetch(API, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ model: 'holoiconic', messages: [{ role: 'user', content: text }] }),
+      body: JSON.stringify({
+        model: 'holoiconic',
+        messages: chatHistory,
+        session: sessionId,
+        stream: true,
+      }),
     });
-    const data = await res.json();
-    if (data.error) { addMsg('assistant', 'Error: ' + data.error.message); }
-    else { addMsg('assistant', data.choices[0].message.content); }
-  } catch (e) { addMsg('assistant', 'Error: ' + e.message); }
+
+    if (!res.ok) {
+      const err = await res.json();
+      contentSpan.textContent = 'Error: ' + (err.error ? err.error.message : res.statusText);
+      sendBtn.disabled = false;
+      input.focus();
+      return;
+    }
+
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = '';
+
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+
+      buffer += decoder.decode(value, { stream: true });
+      const lines = buffer.split('\\n');
+      buffer = lines.pop();
+
+      for (const line of lines) {
+        const trimmed = line.trim();
+        if (!trimmed || !trimmed.startsWith('data: ')) continue;
+        const payload = trimmed.slice(6);
+        if (payload === '[DONE]') continue;
+        try {
+          const chunk = JSON.parse(payload);
+          const delta = chunk.choices && chunk.choices[0] && chunk.choices[0].delta;
+          if (delta && delta.content) {
+            fullText += delta.content;
+            contentSpan.textContent = fullText;
+            msgDiv.scrollTop = msgDiv.scrollHeight;
+          }
+        } catch {}
+      }
+    }
+
+    chatHistory.push({ role: 'assistant', content: fullText });
+  } catch (e) {
+    contentSpan.textContent = 'Error: ' + e.message;
+  }
   sendBtn.disabled = false;
   input.focus();
   loadNodes();
@@ -908,9 +1030,14 @@ try {
 
   // ── repl ────────────────────────────────────────────────────────
   // Interactive REPL — routes messages through agent:loop or direct dot-commands.
+  // Maintains a single session across the REPL lifecycle for multi-turn conversations.
   "repl": `
 const signal = args && args.signal;
 const readline = await import('node:readline');
+
+// Create a persistent session ID for this REPL instance
+const sessionId = 'repl:' + Date.now();
+console.log('[repl] session: ' + sessionId);
 
 const rl = readline.createInterface({
   input: process.stdin,
@@ -970,6 +1097,9 @@ for await (const line of rl) {
       const results = await ctx.query({ p: 'type', o: 'Function' });
       for (const q of results) console.log(' ', q.s);
 
+    } else if (trimmed === '.session') {
+      console.log('session: ' + sessionId);
+
     } else if (trimmed === '.help') {
       console.log('commands:');
       console.log('  .query {"s":"...","p":"..."}  — query quads by pattern');
@@ -977,14 +1107,15 @@ for await (const line of rl) {
       console.log('  .retract s p o                — retract a quad');
       console.log('  .call name [argsJSON]          — call a node');
       console.log('  .nodes                        — list all Function nodes');
+      console.log('  .session                      — show current session ID');
       console.log('  .help                         — this help');
 
     } else if (trimmed.startsWith('.')) {
       console.log('unknown command. type .help');
 
     } else {
-      // Route through agent:loop
-      const result = await ctx.call('agent:loop', { prompt: trimmed });
+      // Route through agent:loop with persistent session
+      const result = await ctx.call('agent:loop', { prompt: trimmed, session: sessionId });
       console.log(result.response);
     }
   } catch (err) {
