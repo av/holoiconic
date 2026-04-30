@@ -268,6 +268,129 @@ if (signal) {
   }
 }
 
+async function testApiServer(ctx: Ctx) {
+  console.log("\n── API server ──");
+
+  const port = 13001 + Math.floor(Math.random() * 1000);
+
+  // Spawn the API server on a random test port
+  const ac = new AbortController();
+  try {
+    ctx.call("api:server", { port, signal: ac.signal }).catch(() => {});
+    await new Promise((r) => setTimeout(r, 200));
+
+    // Test /v1/models
+    try {
+      const modelsRes = await fetch(`http://localhost:${port}/v1/models`);
+      const modelsData = await modelsRes.json() as any;
+      if (modelsData.object !== "list")
+        throw new Error(`expected object='list', got '${modelsData.object}'`);
+      if (!Array.isArray(modelsData.data) || modelsData.data.length === 0)
+        throw new Error("expected non-empty data array");
+      if (modelsData.data[0].id !== "holoiconic")
+        throw new Error(`expected model id='holoiconic', got '${modelsData.data[0].id}'`);
+      ok("GET /v1/models returns model list");
+    } catch (e) {
+      fail("GET /v1/models", e);
+    }
+
+    // Test /v1/chat/completions
+    try {
+      const chatRes = await fetch(`http://localhost:${port}/v1/chat/completions`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          model: "holoiconic",
+          messages: [{ role: "user", content: "hello" }],
+        }),
+      });
+      const chatData = await chatRes.json() as any;
+      if (chatData.object !== "chat.completion")
+        throw new Error(`expected object='chat.completion', got '${chatData.object}'`);
+      if (!chatData.choices || chatData.choices.length === 0)
+        throw new Error("expected non-empty choices array");
+      if (chatData.choices[0].message.role !== "assistant")
+        throw new Error(`expected role='assistant', got '${chatData.choices[0].message.role}'`);
+      if (chatData.choices[0].finish_reason !== "stop")
+        throw new Error(`expected finish_reason='stop', got '${chatData.choices[0].finish_reason}'`);
+      ok("POST /v1/chat/completions returns OpenAI-format response");
+    } catch (e) {
+      fail("POST /v1/chat/completions", e);
+    }
+
+    // Test 404 for unknown paths
+    try {
+      const notFoundRes = await fetch(`http://localhost:${port}/v1/unknown`);
+      if (notFoundRes.status !== 404)
+        throw new Error(`expected 404, got ${notFoundRes.status}`);
+      ok("unknown paths return 404");
+    } catch (e) {
+      fail("404 handling", e);
+    }
+  } finally {
+    ac.abort();
+    await new Promise((r) => setTimeout(r, 100));
+  }
+}
+
+async function testWebUi(ctx: Ctx) {
+  console.log("\n── WebUI ──");
+
+  const port = 14000 + Math.floor(Math.random() * 1000);
+  const ac = new AbortController();
+
+  try {
+    ctx.call("web:ui", { port, apiPort: 19999, signal: ac.signal }).catch(() => {});
+    await new Promise((r) => setTimeout(r, 200));
+
+    // Test GET / serves HTML
+    try {
+      const res = await fetch(`http://localhost:${port}/`);
+      const contentType = res.headers.get("content-type") || "";
+      if (!contentType.includes("text/html"))
+        throw new Error(`expected text/html content-type, got '${contentType}'`);
+      const body = await res.text();
+      if (!body.includes("holoiconic"))
+        throw new Error("HTML body does not contain 'holoiconic'");
+      if (!body.includes("<script>"))
+        throw new Error("HTML body does not contain <script>");
+      ok("GET / serves HTML chat interface");
+    } catch (e) {
+      fail("GET / HTML", e);
+    }
+
+    // Test /api/nodes returns JSON array of nodes
+    try {
+      const res = await fetch(`http://localhost:${port}/api/nodes`);
+      const nodes = await res.json() as any[];
+      if (!Array.isArray(nodes))
+        throw new Error("expected array of nodes");
+      const names = nodes.map((n: any) => n.name);
+      if (!names.includes("main"))
+        throw new Error("expected 'main' in node list");
+      ok("GET /api/nodes returns node list");
+    } catch (e) {
+      fail("GET /api/nodes", e);
+    }
+
+    // Test /api/node/:name returns source
+    try {
+      const res = await fetch(`http://localhost:${port}/api/node/shell`);
+      const data = await res.json() as any;
+      if (data.name !== "shell")
+        throw new Error(`expected name='shell', got '${data.name}'`);
+      if (!data.source || !data.source.includes("Bun.spawn"))
+        throw new Error("expected shell source containing Bun.spawn");
+      ok("GET /api/node/:name returns node source");
+    } catch (e) {
+      fail("GET /api/node/:name", e);
+    }
+  } finally {
+    ac.abort();
+    await new Promise((r) => setTimeout(r, 100));
+  }
+}
+
 async function testCallWithoutSource(ctx: Ctx) {
   console.log("\n── Edge cases ──");
 
@@ -302,6 +425,8 @@ async function main() {
   await testAgentLoop(ctx);
   await testReactiveCompilation(ctx);
   await testSpawnLifecycle(ctx);
+  await testApiServer(ctx);
+  await testWebUi(ctx);
   await testCallWithoutSource(ctx);
 
   // Summary

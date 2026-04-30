@@ -400,6 +400,280 @@ for (let i = 0; i < maxIterations; i++) {
 return { session: sessionId, response: '[agent:loop] max iterations reached' };
 `,
 
+  // ── api:server ──────────────────────────────────────────────────
+  // OpenAI-compatible chat completions API on port 3001.
+  "api:server": `
+const signal = args && args.signal;
+const port = (args && args.port) || 3001;
+
+// Helper to create a unique ID
+function genId() {
+  return 'chatcmpl-' + Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
+}
+
+const server = Bun.serve({
+  port,
+  async fetch(req) {
+    const url = new URL(req.url);
+
+    // CORS headers for WebUI
+    const corsHeaders = {
+      'Access-Control-Allow-Origin': '*',
+      'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
+      'Access-Control-Allow-Headers': 'Content-Type, Authorization',
+    };
+
+    if (req.method === 'OPTIONS') {
+      return new Response(null, { status: 204, headers: corsHeaders });
+    }
+
+    // GET /v1/models
+    if (url.pathname === '/v1/models' && req.method === 'GET') {
+      return Response.json({
+        object: 'list',
+        data: [
+          { id: 'holoiconic', object: 'model', created: Math.floor(Date.now() / 1000), owned_by: 'holoiconic' },
+        ],
+      }, { headers: corsHeaders });
+    }
+
+    // POST /v1/chat/completions
+    if (url.pathname === '/v1/chat/completions' && req.method === 'POST') {
+      try {
+        const body = await req.json();
+        const messages = body.messages || [];
+        const lastUserMsg = messages.filter(m => m.role === 'user').pop();
+        const prompt = lastUserMsg ? lastUserMsg.content : '';
+
+        if (!prompt) {
+          return Response.json({ error: { message: 'No user message found', type: 'invalid_request_error' } }, { status: 400, headers: corsHeaders });
+        }
+
+        // Route through the agentic loop
+        const sessionId = 'api:' + Date.now();
+        const result = await ctx.call('agent:loop', {
+          prompt,
+          session: sessionId,
+          tools: body.tools,
+        });
+
+        const responseText = result.response || '';
+        const id = genId();
+
+        const completion = {
+          id,
+          object: 'chat.completion',
+          created: Math.floor(Date.now() / 1000),
+          model: body.model || 'holoiconic',
+          choices: [
+            {
+              index: 0,
+              message: { role: 'assistant', content: responseText },
+              finish_reason: 'stop',
+            },
+          ],
+          usage: { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 },
+        };
+
+        return Response.json(completion, { headers: corsHeaders });
+      } catch (err) {
+        return Response.json({ error: { message: err.message || String(err), type: 'internal_error' } }, { status: 500, headers: corsHeaders });
+      }
+    }
+
+    // Health check
+    if (url.pathname === '/health') {
+      return Response.json({ status: 'ok' }, { headers: corsHeaders });
+    }
+
+    return Response.json({ error: { message: 'Not found', type: 'invalid_request_error' } }, { status: 404, headers: corsHeaders });
+  },
+});
+
+console.log('[api:server] listening on http://localhost:' + port);
+
+// Keep alive until aborted
+if (signal) {
+  await new Promise((resolve) => {
+    signal.addEventListener('abort', resolve, { once: true });
+  });
+  server.stop(true);
+  console.log('[api:server] stopped');
+}
+`,
+
+  // ── web:ui ─────────────────────────────────────────────────────
+  // Minimal chat + graph explorer WebUI on port 3002.
+  "web:ui": `
+const signal = args && args.signal;
+const port = (args && args.port) || 3002;
+const apiPort = (args && args.apiPort) || 3001;
+
+const html = \`<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>holoiconic</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { background: #0d1117; color: #c9d1d9; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', monospace; display: flex; height: 100vh; }
+  #chat-panel { flex: 1; display: flex; flex-direction: column; border-right: 1px solid #21262d; }
+  #graph-panel { width: 360px; display: flex; flex-direction: column; }
+  .panel-header { padding: 12px 16px; border-bottom: 1px solid #21262d; font-weight: 600; font-size: 14px; color: #58a6ff; }
+  #messages { flex: 1; overflow-y: auto; padding: 16px; }
+  .msg { margin-bottom: 12px; padding: 8px 12px; border-radius: 6px; white-space: pre-wrap; word-wrap: break-word; font-size: 14px; line-height: 1.5; }
+  .msg.user { background: #1f2937; color: #e5e7eb; }
+  .msg.assistant { background: #161b22; color: #c9d1d9; border-left: 3px solid #58a6ff; }
+  .msg .role { font-size: 11px; text-transform: uppercase; color: #8b949e; margin-bottom: 4px; }
+  #input-row { display: flex; padding: 12px 16px; border-top: 1px solid #21262d; gap: 8px; }
+  #input { flex: 1; background: #161b22; border: 1px solid #30363d; color: #c9d1d9; padding: 8px 12px; border-radius: 6px; font-size: 14px; font-family: inherit; }
+  #input:focus { outline: none; border-color: #58a6ff; }
+  #send { background: #238636; color: #fff; border: none; padding: 8px 16px; border-radius: 6px; cursor: pointer; font-size: 14px; }
+  #send:hover { background: #2ea043; }
+  #send:disabled { opacity: 0.5; cursor: not-allowed; }
+  #node-list { flex: 1; overflow-y: auto; padding: 8px; }
+  .node-item { padding: 6px 10px; cursor: pointer; border-radius: 4px; font-size: 13px; font-family: monospace; }
+  .node-item:hover { background: #161b22; }
+  .node-item.selected { background: #1f2937; color: #58a6ff; }
+  #node-source { height: 300px; overflow-y: auto; padding: 12px; border-top: 1px solid #21262d; font-size: 12px; font-family: monospace; white-space: pre-wrap; background: #0d1117; color: #8b949e; }
+</style>
+</head>
+<body>
+<div id="chat-panel">
+  <div class="panel-header">holoiconic chat</div>
+  <div id="messages"></div>
+  <div id="input-row">
+    <input id="input" type="text" placeholder="Type a message..." autocomplete="off" />
+    <button id="send">Send</button>
+  </div>
+</div>
+<div id="graph-panel">
+  <div class="panel-header">graph nodes</div>
+  <div id="node-list"></div>
+  <div id="node-source">Click a node to view source</div>
+</div>
+<script>
+const API = 'http://localhost:' + \${apiPort} + '/v1/chat/completions';
+const msgDiv = document.getElementById('messages');
+const input = document.getElementById('input');
+const sendBtn = document.getElementById('send');
+const nodeList = document.getElementById('node-list');
+const nodeSource = document.getElementById('node-source');
+
+async function send() {
+  const text = input.value.trim();
+  if (!text) return;
+  input.value = '';
+  sendBtn.disabled = true;
+  addMsg('user', text);
+  try {
+    const res = await fetch(API, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ model: 'holoiconic', messages: [{ role: 'user', content: text }] }),
+    });
+    const data = await res.json();
+    if (data.error) { addMsg('assistant', 'Error: ' + data.error.message); }
+    else { addMsg('assistant', data.choices[0].message.content); }
+  } catch (e) { addMsg('assistant', 'Error: ' + e.message); }
+  sendBtn.disabled = false;
+  input.focus();
+  loadNodes();
+}
+
+function addMsg(role, content) {
+  const d = document.createElement('div');
+  d.className = 'msg ' + role;
+  d.innerHTML = '<div class="role">' + role + '</div>' + escHtml(content);
+  msgDiv.appendChild(d);
+  msgDiv.scrollTop = msgDiv.scrollHeight;
+}
+
+function escHtml(s) {
+  const d = document.createElement('div');
+  d.textContent = s;
+  return d.innerHTML;
+}
+
+sendBtn.onclick = send;
+input.onkeydown = (e) => { if (e.key === 'Enter') send(); };
+
+async function loadNodes() {
+  try {
+    const res = await fetch('http://localhost:' + \${port} + '/api/nodes');
+    const nodes = await res.json();
+    nodeList.innerHTML = '';
+    for (const n of nodes) {
+      const el = document.createElement('div');
+      el.className = 'node-item';
+      el.textContent = n.name;
+      el.onclick = () => showSource(n.name, el);
+      nodeList.appendChild(el);
+    }
+  } catch {}
+}
+
+async function showSource(name, el) {
+  document.querySelectorAll('.node-item').forEach(e => e.classList.remove('selected'));
+  el.classList.add('selected');
+  try {
+    const res = await fetch('http://localhost:' + \${port} + '/api/node/' + encodeURIComponent(name));
+    const data = await res.json();
+    nodeSource.textContent = data.source || '(no source)';
+  } catch { nodeSource.textContent = '(error loading)'; }
+}
+
+loadNodes();
+</script>
+</body>
+</html>\`;
+
+const server = Bun.serve({
+  port,
+  async fetch(req) {
+    const url = new URL(req.url);
+    const corsHeaders = {
+      'Access-Control-Allow-Origin': '*',
+      'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
+      'Access-Control-Allow-Headers': 'Content-Type',
+    };
+
+    // Serve the SPA
+    if (url.pathname === '/' || url.pathname === '/index.html') {
+      return new Response(html, { headers: { 'Content-Type': 'text/html; charset=utf-8', ...corsHeaders } });
+    }
+
+    // API: list nodes
+    if (url.pathname === '/api/nodes') {
+      const nodes = await ctx.query({ p: 'type', o: 'Function' });
+      const result = nodes.map(n => ({ name: n.s })).sort((a, b) => a.name.localeCompare(b.name));
+      return Response.json(result, { headers: corsHeaders });
+    }
+
+    // API: get node source
+    if (url.pathname.startsWith('/api/node/')) {
+      const name = decodeURIComponent(url.pathname.slice('/api/node/'.length));
+      const sourceQuads = await ctx.query({ s: name, p: 'source' });
+      const source = sourceQuads.length > 0 ? sourceQuads[0].o : null;
+      return Response.json({ name, source }, { headers: corsHeaders });
+    }
+
+    return new Response('Not found', { status: 404 });
+  },
+});
+
+console.log('[web:ui] listening on http://localhost:' + port);
+
+if (signal) {
+  await new Promise((resolve) => {
+    signal.addEventListener('abort', resolve, { once: true });
+  });
+  server.stop(true);
+  console.log('[web:ui] stopped');
+}
+`,
+
   // ── repl ────────────────────────────────────────────────────────
   // Interactive REPL — routes messages through agent:loop or direct dot-commands.
   "repl": `
@@ -492,7 +766,7 @@ console.log('[repl] exited');
 `,
 
   // ── main ────────────────────────────────────────────────────────
-  // Entry point: boots compiler, supervisor, then REPL.
+  // Entry point: boots compiler, supervisor, API, WebUI, then REPL.
   "main": `
 console.log('[main] booting holoiconic...');
 
@@ -508,8 +782,14 @@ await new Promise(r => setTimeout(r, 50));
 // 3. Register agent tools
 await ctx.call('agent:tools');
 
-// 4. Start the REPL
-console.log('[main] holoiconic ready');
+// 4. Start the API server
+await ctx.call('spawn', { node: 'api:server' });
+
+// 5. Start the WebUI
+await ctx.call('spawn', { node: 'web:ui' });
+
+// 6. Start the REPL
+console.log('[main] holoiconic ready — REPL, API (3001), WebUI (3002)');
 await ctx.call('spawn', { node: 'repl' });
 `,
 
