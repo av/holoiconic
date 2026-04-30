@@ -27,7 +27,7 @@ export type Pattern = {
 export type Subscriber = (change: Change) => void;
 
 export type Ctx = {
-  assert(s: string, p: string, o: string, g?: string): Promise<Quad>;
+  assert(s: string, p: string, o: string, g?: string, embedding?: number[]): Promise<Quad>;
   retract(s: string, p: string, o: string, g?: string): Promise<void>;
   query(pattern: Pattern): Promise<Quad[]>;
   call(name: string, args?: any): Promise<any>;
@@ -86,11 +86,20 @@ export function createCtx(db: Client): Ctx {
   const ctx: Ctx = {
     _nodeStorage: nodeStorage,
     // ── assert ───────────────────────────────────────────────────
-    async assert(s: string, p: string, o: string, g: string = "_"): Promise<Quad> {
-      const insertResult = await db.execute({
-        sql: "INSERT OR IGNORE INTO quads (s, p, o, g) VALUES (?, ?, ?, ?)",
-        args: [s, p, o, g],
-      });
+    async assert(s: string, p: string, o: string, g: string = "_", embedding?: number[]): Promise<Quad> {
+      let insertResult;
+      if (embedding && Array.isArray(embedding) && embedding.length > 0) {
+        const vecJson = JSON.stringify(embedding);
+        insertResult = await db.execute({
+          sql: "INSERT OR IGNORE INTO quads (s, p, o, g, embedding) VALUES (?, ?, ?, ?, vector32(?))",
+          args: [s, p, o, g, vecJson],
+        });
+      } else {
+        insertResult = await db.execute({
+          sql: "INSERT OR IGNORE INTO quads (s, p, o, g) VALUES (?, ?, ?, ?)",
+          args: [s, p, o, g],
+        });
+      }
 
       const rs = await db.execute({
         sql: "SELECT id, s, p, o, g, attrs FROM quads WHERE s = ? AND p = ? AND o = ? AND g = ?",

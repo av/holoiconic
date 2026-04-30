@@ -793,6 +793,55 @@ async function testVectorSearch(ctx: Ctx) {
   }
 }
 
+async function testEmbeddingPersistence(ctx: Ctx) {
+  console.log("\n── Embedding persistence ──");
+
+  try {
+    // Call embed — it should persist the embedding in the graph
+    await ctx.call("embed", { text: "persistence test text" });
+
+    // Verify embedding quad was stored in the 'embeddings' graph
+    const embQuads = await ctx.query({ p: "embedding", g: "embeddings" });
+    if (embQuads.length === 0)
+      throw new Error("expected embedding quads in 'embeddings' graph, got 0");
+
+    // Find the one for our text
+    const match = embQuads.find((q: any) => q.o === "persistence test text");
+    if (!match)
+      throw new Error("expected embedding quad with o='persistence test text'");
+    if (!match.s.startsWith("emb:"))
+      throw new Error(`expected subject starting with 'emb:', got '${match.s}'`);
+    ok("embed persists embedding quads in graph");
+  } catch (e) {
+    fail("embedding persistence", e);
+  }
+
+  try {
+    // ctx.assert with embedding parameter should work
+    const testVec = new Array(1536).fill(0).map((_, i) => (i % 2 === 0 ? 0.1 : -0.1));
+    const quad = await ctx.assert("test:vec", "has_embedding", "test_value", "_", testVec);
+    if (!quad || quad.s !== "test:vec")
+      throw new Error(`expected quad with s='test:vec', got ${JSON.stringify(quad)}`);
+    ok("ctx.assert accepts embedding parameter");
+  } catch (e) {
+    fail("ctx.assert with embedding", e);
+  }
+
+  try {
+    // vector:search should find persisted embeddings
+    const results = await ctx.call("vector:search", { text: "persistence test text", k: 5 });
+    if (!Array.isArray(results) || results.length === 0)
+      throw new Error("expected search results");
+    // The search should return results from the embeddings graph
+    const embResult = results.find((r: any) => r.quad.o === "persistence test text");
+    if (!embResult)
+      throw new Error("expected to find persisted embedding in search results");
+    ok("vector:search finds persisted embeddings");
+  } catch (e) {
+    fail("vector:search persisted embeddings", e);
+  }
+}
+
 async function testToolCallVisibility(ctx: Ctx) {
   console.log("\n── Tool call visibility ──");
 
@@ -876,6 +925,7 @@ async function main() {
   await testSnapshotBackup(ctx);
   await testEmbedNode(ctx);
   await testVectorSearch(ctx);
+  await testEmbeddingPersistence(ctx);
   await testApiServer(ctx);
   await testWebUi(ctx);
   await testToolCallVisibility(ctx);

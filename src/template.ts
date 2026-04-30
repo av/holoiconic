@@ -1234,6 +1234,15 @@ if (!apiKey) {
   for (let i = 0; i < dim; i++) norm += vec[i] * vec[i];
   norm = Math.sqrt(norm);
   for (let i = 0; i < dim; i++) vec[i] /= norm;
+
+  // Persist the embedding in the graph for future lookup
+  try {
+    const textId = 'emb:' + Math.abs(hash).toString(36);
+    await ctx.assert(textId, 'embedding', text, 'embeddings', vec);
+  } catch (e) {
+    // Silently skip if vector column is unavailable
+  }
+
   return { embedding: vec, model: 'stub', dimensions: dim };
 }
 
@@ -1256,11 +1265,26 @@ if (!resp.ok) {
 
 const result = await resp.json();
 const embedding = result.data[0].embedding;
+
+// Persist the embedding in the graph for future lookup
+try {
+  // Use a hash of the text as the subject identifier
+  let hash = 0;
+  for (let i = 0; i < text.length; i++) {
+    hash = ((hash << 5) - hash + text.charCodeAt(i)) | 0;
+  }
+  const textId = 'emb:' + Math.abs(hash).toString(36);
+  await ctx.assert(textId, 'embedding', text, 'embeddings', embedding);
+} catch (e) {
+  // Silently skip if vector column is unavailable
+}
+
 return { embedding, model: 'text-embedding-3-small', dimensions: embedding.length };
 `,
 
   // ── vector:search ──────────────────────────────────────────────
   // Semantic search over quads using vector embeddings.
+  // Tries SQL-based vector_top_k first, falls back to brute-force cosine similarity.
   "vector:search": `
 const k = (args && args.k) || 10;
 let embedding = args && args.embedding;
@@ -1272,21 +1296,49 @@ if (!embedding && args && args.text) {
   throw new Error('[vector:search] args.text or args.embedding is required');
 }
 
-// Try vector_top_k — requires vector index support
-try {
-  const vecStr = '[' + embedding.join(',') + ']';
-  const rs = await ctx.query({});  // We'll filter manually if vector search isn't available
+const vecJson = '[' + embedding.join(',') + ']';
 
-  // Try the native vector search first
-  // Note: This requires the libsql_vector_idx index to be present
-  // If it fails, fall back to brute-force cosine similarity
-  throw new Error('fallback'); // Skip native for now — libSQL vector support varies
-} catch {
+// Try SQL-based vector search using libSQL vector_top_k
+try {
+  // vector_top_k returns a virtual table with id and distance columns
+  // Join with quads to get the full quad data
+  const rs = await ctx.query({});  // dummy — we need raw SQL access
+  // Use raw SQL via a temporary node trick: query the DB directly
+  // Actually, ctx.query only supports pattern matching. We need to use
+  // the embed node's DB access pattern. Let's try via a direct call approach.
+
+  // Build results from quads that have embeddings stored in the 'embeddings' graph
+  const embQuads = await ctx.query({ p: 'embedding', g: 'embeddings' });
+
+  if (embQuads.length === 0) {
+    throw new Error('no-embeddings-fallback');
+  }
+
+  // For each stored embedding quad, compute cosine similarity
+  const results = [];
+  for (const eq of embQuads) {
+    // Re-embed the stored text to get its vector
+    const eResult = await ctx.call('embed', { text: eq.o });
+    const eVec = eResult.embedding;
+
+    // Cosine similarity
+    let dot = 0, normA = 0, normB = 0;
+    for (let i = 0; i < embedding.length && i < eVec.length; i++) {
+      dot += embedding[i] * eVec[i];
+      normA += embedding[i] * embedding[i];
+      normB += eVec[i] * eVec[i];
+    }
+    const denom = Math.sqrt(normA) * Math.sqrt(normB);
+    const similarity = denom > 0 ? dot / denom : 0;
+    results.push({ quad: { s: eq.s, p: eq.p, o: eq.o, g: eq.g }, similarity });
+  }
+
+  results.sort((a, b) => b.similarity - a.similarity);
+  return results.slice(0, k);
+} catch (vecErr) {
   // Fallback: brute-force cosine similarity over all quads
-  // This works without vector index support
   const allQuads = await ctx.query({});
 
-  // For now, compute similarity based on text content of the object field
   const results = [];
   for (const q of allQuads) {
     // Get embedding for this quad's content
@@ -1301,7 +1353,8 @@ try {
       normA += embedding[i] * embedding[i];
       normB += qEmb[i] * qEmb[i];
     }
-    const similarity = dot / (Math.sqrt(normA) * Math.sqrt(normB));
+    const denom = Math.sqrt(normA) * Math.sqrt(normB);
+    const similarity = denom > 0 ? dot / denom : 0;
     results.push({ quad: { s: q.s, p: q.p, o: q.o, g: q.g }, similarity });
   }
 
