@@ -160,32 +160,58 @@
 
 # repl
 
-- primary input is natural language → agent:loop; dot-commands are escape hatches
-- repl starts a new session by default — session ID is repl:<timestamp>, conversation history stored as quads
-- repl is built on pi-mono — TUI rendering, streaming, markdown, syntax highlighting, and tool-call display are framework-provided
-- LLM responses stream by default
-- .query queries quads by JSON pattern
-- .assert inserts a quad (s p o [--g graph])
-- .retract removes a quad (s p o [--g graph])
-- .call invokes a node by name with optional JSON args
-- .nodes lists all Function-typed nodes
-- .source shows a node's source code
-- .edit opens inline multi-line editing of a node's source — blank line terminates
-- .create creates a new node with inline multi-line source — blank line terminates
-- .spawn starts a long-lived node via sys:supervisor
-- .session shows the current session ID
-- .sessions lists all sessions stored in the graph
-- .resume loads a previous session's conversation history from the graph
-- .export exports the graph as a JSON snapshot, optionally to a file path
-- .import imports quads from a JSON snapshot file
-- .deps shows a node's call dependencies and dependents
-- .inspect shows comprehensive node info — types, source, schema, deps
-- .versions lists saved source versions for a node
-- .restore restores a node to a previous version by seq number
-- .cron starts a node on a periodic timer (interval in ms)
-- .crons lists all cron jobs and their status
-- .metrics shows per-node call count, duration, and error statistics
-- .eval runs arbitrary AsyncFunction code with ctx in scope
+- label: primary input is natural language → agent:loop; dot-commands are escape hatches
+  command: grep -q "agent:loop.*prompt.*session" src/template.ts && grep -q "startsWith('.')" src/template.ts
+- label: repl starts a new session by default — session ID is repl:<timestamp>, conversation history stored as quads
+  command: grep -q "repl:.*Date.now()" src/template.ts && grep -q "session: sessionId" src/template.ts
+- label: repl is built on pi-mono — TUI rendering, streaming, markdown, syntax highlighting, and tool-call display are framework-provided
+  command: grep -q "pi-mono\|piMono" src/template.ts
+- label: LLM responses stream by default
+  command: grep -A5 "agent:loop.*prompt.*session" src/template.ts | grep -q "stream"
+- label: .query queries quads by JSON pattern
+  command: grep -q "\.query " src/template.ts && grep -q "ctx.query(pattern)" src/template.ts
+- label: .assert inserts a quad (s p o [--g graph])
+  command: grep -q "\.assert " src/template.ts && grep -q "\.assert.*--g" src/template.ts
+- label: .retract removes a quad (s p o [--g graph])
+  command: grep -q "\.retract " src/template.ts && grep -q "\.retract.*--g" src/template.ts
+- label: .call invokes a node by name with optional JSON args
+  command: grep -q "\.call " src/template.ts && grep -q "JSON.parse(rest" src/template.ts
+- label: .nodes lists all Function-typed nodes
+  command: grep -q "=== '.nodes'" src/template.ts && grep -q "p: 'type', o: 'Function'" src/template.ts
+- label: .source shows a node's source code
+  command: grep -q "\.source " src/template.ts && grep -q "s: name, p: 'source'" src/template.ts
+- label: .edit opens inline multi-line editing of a node's source — blank line terminates
+  command: grep -q "\.edit " src/template.ts && grep -q "blank line" src/template.ts
+- label: .create creates a new node with inline multi-line source — blank line terminates
+  command: grep -q "\.create " src/template.ts && grep -q "blank line" src/template.ts
+- label: .spawn starts a long-lived node via sys:supervisor
+  command: grep -q "\.spawn " src/template.ts && grep -q "ctx.call('spawn'" src/template.ts
+- label: .session shows the current session ID
+  command: grep -q "=== '.session'" src/template.ts && grep -q "sessionId" src/template.ts
+- label: .sessions lists all sessions stored in the graph
+  command: grep -q "=== '.sessions'" src/template.ts && grep -q "p: 'message'" src/template.ts
+- label: .resume loads a previous session's conversation history from the graph
+  command: grep -q "\.resume " src/template.ts
+- label: .export exports the graph as a JSON snapshot, optionally to a file path
+  command: grep -q "\.export" src/template.ts && grep -q "snapshot:export" src/template.ts
+- label: .import imports quads from a JSON snapshot file
+  command: grep -q "\.import " src/template.ts && grep -q "snapshot:import" src/template.ts
+- label: .deps shows a node's call dependencies and dependents
+  command: grep -q "\.deps " src/template.ts && grep -q "graph:deps" src/template.ts
+- label: .inspect shows comprehensive node info — types, source, schema, deps
+  command: grep -q "\.inspect " src/template.ts && grep -q "ctx.call('inspect'" src/template.ts
+- label: .versions lists saved source versions for a node
+  command: grep -q "\.versions " src/template.ts && grep -q "version:list" src/template.ts
+- label: .restore restores a node to a previous version by seq number
+  command: grep -q "\.restore " src/template.ts && grep -q "version:restore" src/template.ts
+- label: .cron starts a node on a periodic timer (interval in ms)
+  command: grep -q "\.cron " src/template.ts && grep -q "interval" src/template.ts
+- label: .crons lists all cron jobs and their status
+  command: grep -q "=== '.crons'" src/template.ts && grep -q "cron:list" src/template.ts
+- label: .metrics shows per-node call count, duration, and error statistics
+  command: grep -q "=== '.metrics'" src/template.ts && grep -q "metrics:report" src/template.ts
+- label: .eval runs arbitrary AsyncFunction code with ctx in scope
+  command: grep -q "\.eval " src/template.ts && grep -q "AsyncFn.*ctx" src/template.ts
 
 # agentic
 
