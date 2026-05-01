@@ -77,10 +77,14 @@
   command: grep -q "p = 'source'" src/ctx.ts
 - label: each node's source is a function body compiled to AsyncFunction — receives ctx and args
   command: grep -q 'AsyncFunction.*ctx.*args' src/ctx.ts
-- nodes have access to all Bun globals (Bun, fetch, Response, console, process)
-- nodes can use await import() for dynamic imports of npm packages
-- nodes reach other nodes through ctx.call — string-addressed, always resolves current compiled form
-- nodes define local helpers and closures but are a single callable unit
+- label: nodes have access to all Bun globals (Bun, fetch, Response, console, process)
+  command: grep -q 'Bun.spawn' src/template.ts && grep -q 'Bun.serve' src/template.ts && grep -q 'Bun.env' src/template.ts && grep -q 'console.log' src/template.ts
+- label: nodes can use await import() for dynamic imports of npm packages
+  command: bun -e 'const{createDatabase,initSchema}=require("./src/db.ts");const{createCtx}=require("./src/ctx.ts");(async()=>{const db=createDatabase(":memory:");await initSchema(db);const ctx=createCtx(db);await ctx.assert("test:import","source","const m = await import(\"node:path\"); return m.sep");await ctx.assert("test:import","type","Function");const r=await ctx.call("test:import");if(typeof r!=="string")process.exit(1);console.log("ok")})()'
+- label: nodes reach other nodes through ctx.call — string-addressed, always resolves current compiled form
+  command: bun -e 'const{createDatabase,initSchema}=require("./src/db.ts");const{createCtx}=require("./src/ctx.ts");(async()=>{const db=createDatabase(":memory:");await initSchema(db);const ctx=createCtx(db);await ctx.assert("a:node","source","return 42");await ctx.assert("a:node","type","Function");await ctx.assert("b:node","source","return await ctx.call(\"a:node\")");await ctx.assert("b:node","type","Function");const r=await ctx.call("b:node");if(r!==42)process.exit(1);console.log("ok")})()'
+- label: nodes define local helpers and closures but are a single callable unit
+  command: bun -e 'const{createDatabase,initSchema}=require("./src/db.ts");const{createCtx}=require("./src/ctx.ts");(async()=>{const db=createDatabase(":memory:");await initSchema(db);const ctx=createCtx(db);await ctx.assert("t:fn","source","function helper(x){return x*2} const y=helper(21); return y");await ctx.assert("t:fn","type","Function");const r=await ctx.call("t:fn");if(r!==42)process.exit(1);console.log("ok")})()'
 - label: compilation is reactive — sys:compiler watches { p: 'source' } and invalidates its cache on change
   command: grep -q "p: 'source'" src/template.ts
 - label: all node source strings are syntactically valid AsyncFunction bodies
@@ -88,15 +92,22 @@
 
 # reactivity
 
-- all mutations through ctx.assert/ctx.retract emit events to ctx.on subscribers
-- subscriptions are in-process and ephemeral — nodes register them on start, they vanish on process exit
-- on restart, nodes re-run and re-register their subscriptions naturally
-- ctx.on takes a pattern { s?, p?, o?, g? } — omitted fields are wildcards
-- ctx.on returns an unsubscribe function
-- reactive callbacks fire only on actual changes — duplicate asserts and missing retracts are no-ops
+- label: all mutations through ctx.assert/ctx.retract emit events to ctx.on subscribers
+  command: grep -q 'fire({ type: "assert"' src/ctx.ts && grep -q 'fire({ type: "retract"' src/ctx.ts
+- label: subscriptions are in-process and ephemeral — nodes register them on start, they vanish on process exit
+  command: grep -q 'const subscribers: Sub\[\] = \[\]' src/ctx.ts && ! grep -q 'persist.*sub\|save.*sub\|store.*sub' src/ctx.ts
+- label: on restart, nodes re-run and re-register their subscriptions naturally
+  command: grep -q 'ctx.on.*source' src/template.ts && grep -q 'ctx.on.*type.*Spawned' src/template.ts
+- label: ctx.on takes a pattern { s?, p?, o?, g? } — omitted fields are wildcards
+  command: grep -q 'on(pattern: Pattern' src/ctx.ts && grep -q 's?: string' src/ctx.ts && grep -q 'p?: string' src/ctx.ts
+- label: ctx.on returns an unsubscribe function
+  command: grep -q 'on(pattern: Pattern, callback: Subscriber): () => void' src/ctx.ts
+- label: reactive callbacks fire only on actual changes — duplicate asserts and missing retracts are no-ops
+  command: bun -e 'const{createDatabase,initSchema}=require("./src/db.ts");const{createCtx}=require("./src/ctx.ts");(async()=>{const db=createDatabase(":memory:");await initSchema(db);const ctx=createCtx(db);let fires=0;ctx.on({s:"x"},()=>fires++);await ctx.assert("x","p","v");await ctx.assert("x","p","v");const r=await ctx.retract("x","p","missing");if(fires!==1)process.exit(1);if(r.length!==0)process.exit(1);console.log("ok")})()'
 - label: lifecycle events are quads, not a separate mechanism — supervisor asserts (name, 'lifecycle', 'cleanup')
   command: grep -q "'lifecycle'" src/template.ts
-- nodes can watch their own lifecycle via ctx.on({ s: ctx.self, p: 'lifecycle', o: 'cleanup' }, callback) — supported but not currently used by any built-in node
+- label: nodes can watch their own lifecycle via ctx.on({ s: ctx.self, p: 'lifecycle', o: 'cleanup' }, callback) — supported but not currently used by any built-in node
+  command: grep -q "'lifecycle'" src/template.ts && grep -q 'matchesPattern' src/ctx.ts
 
 # spawn
 
@@ -106,8 +117,10 @@
   command: grep -q 'AbortController' src/template.ts
 - label: spawned nodes receive args.signal (AbortSignal) for cooperative cancellation
   command: grep -q 'args.signal' src/template.ts
-- when a spawned node's source changes, sys:supervisor detects it, asserts (name, 'lifecycle', 'cleanup'), aborts, and re-runs the node
-- multiple cleanup handlers can be registered — same mechanism as graph reactivity
+- label: when a spawned node's source changes, sys:supervisor detects it, asserts (name, 'lifecycle', 'cleanup'), aborts, and re-runs the node
+  command: grep -q "ctx.on.*p: 'source'" src/template.ts && grep -q "ctx.assert(name, 'lifecycle', 'cleanup')" src/template.ts && grep -q 'ac.abort()' src/template.ts
+- label: multiple cleanup handlers can be registered — same mechanism as graph reactivity
+  command: bun -e 'const{createDatabase,initSchema}=require("./src/db.ts");const{createCtx}=require("./src/ctx.ts");(async()=>{const db=createDatabase(":memory:");await initSchema(db);const ctx=createCtx(db);let a=0,b=0;ctx.on({s:"n",p:"lifecycle",o:"cleanup"},()=>a++);ctx.on({s:"n",p:"lifecycle",o:"cleanup"},()=>b++);await ctx.assert("n","lifecycle","cleanup");if(a!==1||b!==1)process.exit(1);console.log("ok")})()'
 - label: sys:supervisor retries crashed nodes with exponential backoff — max 3 retries, delays 500/1000/2000ms — retry count resets on manual source change
   command: grep -q 'Math.pow(2' src/template.ts && grep -q '500' src/template.ts
 
@@ -119,16 +132,20 @@
   command: grep -q 'createDatabase' src/boot.ts && grep -q 'createCtx' src/boot.ts && grep -q 'call.*main' src/boot.ts
 - label: the kernel's ctx.call compiles from scratch on every call — no cache, no reactivity
   command: grep -q 'no cache' src/ctx.ts
-- the kernel wires assert/retract to emit events through ctx.on automatically
+- label: the kernel wires assert/retract to emit events through ctx.on automatically
+  command: grep -q 'function fire' src/ctx.ts && grep -q 'fire({ type: "assert"' src/ctx.ts && grep -q 'fire({ type: "retract"' src/ctx.ts
 - label: if the graph is empty on boot, the kernel seeds it from a template
   command: grep -q 'length === 0' src/boot.ts && grep -q 'seedTemplate' src/boot.ts
 - label: the template seeds 28 nodes: sys:compiler, sys:supervisor, main, spawn, shell, llm, agent:tools, agent:loop, api:server, web:ui, repl, set, snapshots, embed, vector:search, graph introspection, versioning, cron, and metrics
   command: test $(grep -c '^  "' src/template.ts) -ge 28
 - label: main calls sys:compiler first — which replaces ctx.call with a cached, reactively-invalidated version
   command: grep -q 'sys:compiler' src/template.ts
-- main then calls spawn for sys:supervisor and the application
-- before sys:compiler runs, compilation is cold — after, it is live and reactive
-- all sys nodes are rewritable like any other node
+- label: main then calls spawn for sys:supervisor and the application
+  command: grep -A30 '"main":' src/template.ts | grep -q "spawn.*node.*sys:supervisor" && grep -A30 '"main":' src/template.ts | grep -q "spawn.*node.*api:server"
+- label: before sys:compiler runs, compilation is cold — after, it is live and reactive
+  command: grep -q 'no cache' src/ctx.ts && grep -q 'cachedCall' src/template.ts
+- label: all sys nodes are rewritable like any other node
+  command: bun -e 'const{createDatabase,initSchema}=require("./src/db.ts");const{createCtx}=require("./src/ctx.ts");(async()=>{const db=createDatabase(":memory:");await initSchema(db);const ctx=createCtx(db);await ctx.assert("sys:compiler","source","return 1");const r=await ctx.retract("sys:compiler","source","return 1");if(r.length!==1)process.exit(1);await ctx.assert("sys:compiler","source","return 2");const q=await ctx.query({s:"sys:compiler",p:"source"});if(q[0].o!=="return 2")process.exit(1);console.log("ok")})()'
 - label: the project builds and all integration tests pass
   command: bun run src/test-boot.ts 2>&1 | grep -q 'passed, 0 failed'
 
