@@ -532,7 +532,7 @@ console.log('[agent:tools] registered 18 tools');
 const prompt = args && args.prompt;
 if (!prompt) throw new Error('[agent:loop] args.prompt is required');
 
-const sessionId = (args && args.session) || ('session:' + Date.now());
+const sessionId = (args && args.session) || ('session:' + Date.now() + ':' + Math.random().toString(36).slice(2, 8));
 
 // System prompt
 const systemPrompt = \`You are an AI assistant running inside holoiconic, a self-modifying agentic runtime.
@@ -555,9 +555,16 @@ Be concise and helpful. When using tools, explain what you are doing.\`;
 // Load conversation history from graph
 // Messages are stored as {seq, msg} to ensure uniqueness even with identical content
 const historyQuads = await ctx.query({ p: 'message', g: sessionId });
-const history = historyQuads
-  .sort((a, b) => a.id - b.id)
-  .map(q => { const w = JSON.parse(q.o); return w.msg || w; });
+const history = [];
+for (const q of historyQuads.sort((a, b) => a.id - b.id)) {
+  try {
+    const w = JSON.parse(q.o);
+    history.push(w.msg || w);
+  } catch (e) {
+    // Skip malformed message quads — do not crash the loop
+    console.warn('[agent:loop] skipping malformed message quad:', q.s, q.o.slice(0, 80));
+  }
+}
 
 // Determine next sequence number
 let seq = historyQuads.length;
@@ -868,7 +875,11 @@ const server = Bun.serve({
 
         return Response.json(completion, { headers: corsHeaders });
       } catch (err) {
-        return Response.json({ error: { message: err.message || String(err), type: 'internal_error' } }, { status: 500, headers: corsHeaders });
+        // Distinguish client errors (bad JSON, bad input) from server errors
+        const isSyntaxError = err instanceof SyntaxError || (err.message && err.message.includes('JSON'));
+        const statusCode = isSyntaxError ? 400 : 500;
+        const errorType = isSyntaxError ? 'invalid_request_error' : 'internal_error';
+        return Response.json({ error: { message: err.message || String(err), type: errorType } }, { status: statusCode, headers: corsHeaders });
       }
     }
 
@@ -1398,7 +1409,8 @@ const server = Bun.serve({
           await ctx.assert(name, 'source', source);
           return Response.json({ ok: true, name }, { status: 201, headers: corsHeaders });
         } catch (err) {
-          return Response.json({ error: err.message || String(err) }, { status: 500, headers: corsHeaders });
+          const isSyntaxError = err instanceof SyntaxError || (err.message && err.message.includes('JSON'));
+          return Response.json({ error: err.message || String(err) }, { status: isSyntaxError ? 400 : 500, headers: corsHeaders });
         }
       }
       // GET: list nodes — returns names and their types
@@ -1438,7 +1450,8 @@ const server = Bun.serve({
 
         return Response.json({ ok: true, name }, { headers: corsHeaders });
       } catch (err) {
-        return Response.json({ error: err.message || String(err) }, { status: 500, headers: corsHeaders });
+        const isSyntaxError = err instanceof SyntaxError || (err.message && err.message.includes('JSON'));
+        return Response.json({ error: err.message || String(err) }, { status: isSyntaxError ? 400 : 500, headers: corsHeaders });
       }
     }
 
@@ -1477,7 +1490,7 @@ const server = Bun.serve({
       return Response.json({ name, source }, { headers: corsHeaders });
     }
 
-    return new Response('Not found', { status: 404 });
+    return Response.json({ error: 'Not found' }, { status: 404, headers: corsHeaders });
   },
 });
 
@@ -1645,7 +1658,7 @@ return { embedding, model: 'text-embedding-3-small', dimensions: embedding.lengt
   // Semantic search over quads using vector embeddings.
   // Tries SQL-based vector_top_k first, falls back to brute-force cosine similarity.
   "vector:search": `
-const k = (args && args.k) || 10;
+const k = (args && args.k !== undefined && args.k !== null) ? args.k : 10;
 let embedding = args && args.embedding;
 
 if (!embedding && args && args.text) {
@@ -1670,7 +1683,7 @@ try {
   const embQuads = await ctx.query({ p: 'embedding', g: 'embeddings' });
 
   if (embQuads.length === 0) {
-    throw new Error('no-embeddings-fallback');
+    throw new Error('[vector:search] no stored embeddings found, falling back to brute-force');
   }
 
   // For each stored embedding quad, compute cosine similarity
@@ -1755,7 +1768,7 @@ if (typeFilter) {
 
 const subjects = new Set();
 for (const q of quads) {
-  subjects.add(typeFilter ? q.s : q.s);
+  subjects.add(q.s);
 }
 
 const result = [...subjects].sort();
