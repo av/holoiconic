@@ -28,9 +28,10 @@ export type Subscriber = (change: Change) => void;
 
 export type Ctx = {
   assert(s: string, p: string, o: string, g?: string, embedding?: number[]): Promise<Quad>;
-  retract(s: string, p: string, o: string, g?: string): Promise<void>;
+  retract(s: string, p: string, o?: string, g?: string): Promise<Quad[]>;
   query(pattern: Pattern): Promise<Quad[]>;
   call(name: string, args?: any): Promise<any>;
+  set(s: string, p: string, o: string, g?: string, embedding?: number[]): Promise<Quad>;
   on(pattern: Pattern, callback: Subscriber): () => void;
   readonly self: string;
   /** @internal — exposed for sys:compiler to use the same AsyncLocalStorage */
@@ -87,53 +88,54 @@ export function createCtx(db: Client): Ctx {
     _nodeStorage: nodeStorage,
     // ── assert ───────────────────────────────────────────────────
     async assert(s: string, p: string, o: string, g: string = "_", embedding?: number[]): Promise<Quad> {
-      let insertResult;
+      let rs;
       if (embedding && Array.isArray(embedding) && embedding.length > 0) {
         const vecJson = JSON.stringify(embedding);
-        insertResult = await db.execute({
-          sql: "INSERT OR IGNORE INTO quads (s, p, o, g, embedding) VALUES (?, ?, ?, ?, vector32(?))",
+        rs = await db.execute({
+          sql: "INSERT OR IGNORE INTO quads (s, p, o, g, embedding) VALUES (?, ?, ?, ?, vector32(?)) RETURNING id, s, p, o, g, attrs",
           args: [s, p, o, g, vecJson],
         });
       } else {
-        insertResult = await db.execute({
-          sql: "INSERT OR IGNORE INTO quads (s, p, o, g) VALUES (?, ?, ?, ?)",
+        rs = await db.execute({
+          sql: "INSERT OR IGNORE INTO quads (s, p, o, g) VALUES (?, ?, ?, ?) RETURNING id, s, p, o, g, attrs",
           args: [s, p, o, g],
         });
       }
 
-      const rs = await db.execute({
+      if (rs.rows.length > 0) {
+        const quad = rowToQuad(rs.rows[0]);
+        fire({ type: "assert", quad });
+        return quad;
+      }
+
+      // Duplicate — RETURNING yields 0 rows on OR IGNORE
+      const existing = await db.execute({
         sql: "SELECT id, s, p, o, g, attrs FROM quads WHERE s = ? AND p = ? AND o = ? AND g = ?",
         args: [s, p, o, g],
       });
-
-      const quad = rowToQuad(rs.rows[0]);
-
-      // Only fire change events for actual inserts, not duplicate no-ops
-      if (insertResult.rowsAffected > 0) {
-        fire({ type: "assert", quad });
-      }
-
-      return quad;
+      return rowToQuad(existing.rows[0]);
     },
 
     // ── retract ──────────────────────────────────────────────────
-    async retract(s: string, p: string, o: string, g: string = "_"): Promise<void> {
-      // First fetch the quad so we have it for the change event
-      const rs = await db.execute({
-        sql: "SELECT id, s, p, o, g, attrs FROM quads WHERE s = ? AND p = ? AND o = ? AND g = ?",
-        args: [s, p, o, g],
-      });
+    async retract(s: string, p: string, o?: string, g: string = "_"): Promise<Quad[]> {
+      let rs;
+      if (o !== undefined) {
+        rs = await db.execute({
+          sql: "DELETE FROM quads WHERE s = ? AND p = ? AND o = ? AND g = ? RETURNING id, s, p, o, g, attrs",
+          args: [s, p, o, g],
+        });
+      } else {
+        rs = await db.execute({
+          sql: "DELETE FROM quads WHERE s = ? AND p = ? AND g = ? RETURNING id, s, p, o, g, attrs",
+          args: [s, p, g],
+        });
+      }
 
-      if (rs.rows.length === 0) return; // no-op
-
-      const quad = rowToQuad(rs.rows[0]);
-
-      await db.execute({
-        sql: "DELETE FROM quads WHERE s = ? AND p = ? AND o = ? AND g = ?",
-        args: [s, p, o, g],
-      });
-
-      fire({ type: "retract", quad });
+      const quads = rs.rows.map(rowToQuad);
+      for (const quad of quads) {
+        fire({ type: "retract", quad });
+      }
+      return quads;
     },
 
     // ── query ────────────────────────────────────────────────────
@@ -165,6 +167,25 @@ export function createCtx(db: Client): Ctx {
       });
 
       return rs.rows.map(rowToQuad);
+    },
+
+    // ── set (atomic single-valued predicate) ─────────────────────
+    async set(s: string, p: string, o: string, g: string = "_", embedding?: number[]): Promise<Quad> {
+      const insertStmt = embedding && Array.isArray(embedding) && embedding.length > 0
+        ? { sql: "INSERT INTO quads (s, p, o, g, embedding) VALUES (?, ?, ?, ?, vector32(?)) RETURNING id, s, p, o, g, attrs", args: [s, p, o, g, JSON.stringify(embedding)] }
+        : { sql: "INSERT INTO quads (s, p, o, g) VALUES (?, ?, ?, ?) RETURNING id, s, p, o, g, attrs", args: [s, p, o, g] };
+
+      const [deleted, inserted] = await db.batch([
+        { sql: "DELETE FROM quads WHERE s = ? AND p = ? AND g = ? RETURNING id, s, p, o, g, attrs", args: [s, p, g] },
+        insertStmt,
+      ], "write");
+
+      for (const row of deleted.rows) {
+        fire({ type: "retract", quad: rowToQuad(row) });
+      }
+      const quad = rowToQuad(inserted.rows[0]);
+      fire({ type: "assert", quad });
+      return quad;
     },
 
     // ── call (naive kernel version — no cache) ───────────────────

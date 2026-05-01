@@ -1,5 +1,8 @@
 # core
 
+- no leftover artifacts in repo root — generated reports, logs, and test outputs go elsewhere
+- there is a gitignored `.local` folder at repo root for one-off scripts and testing artifacts
+- performance is one of the key considerations when designing new features
 - holoiconic is an agentic runtime where everything exists as quads in a reactive graph backed by Turso
 - the runtime is homoiconic: code, state, context, tools, and the agentic loop are all quads in the same graph
 - there is no distinction between system and user data — all quads are equally accessible and mutable
@@ -19,8 +22,8 @@
   command: grep -q 'F32_BLOB(1536)' src/db.ts
 - label: quads are unique on (s, p, o, g) — asserting an existing quad is a no-op
   command: grep -q 'UNIQUE(s, p, o, g)' src/db.ts && grep -q 'INSERT OR IGNORE' src/ctx.ts
-- label: retracting a non-existent quad is a no-op
-  command: grep -q 'rows.length === 0) return' src/ctx.ts
+- label: retracting a non-existent quad returns an empty array
+  command: grep -q 'return quads' src/ctx.ts
 - label: convention: a function is (name, 'source', code) and (name, 'type', 'Function')
   command: grep -q '"source"' src/template.ts && grep -q '"type", "Function"' src/template.ts
 - convention: value always goes in o, never duplicated in attrs
@@ -28,10 +31,10 @@
 # ctx
 
 - ctx is the single context object available everywhere — every node receives it
-- label: ctx has 5 primitives: assert, retract, query, call, on
-  command: grep -A10 'export type Ctx' src/ctx.ts | grep -cE '^\s+(assert|retract|query|call|on)\b' | grep -q 5
+- label: ctx has 6 primitives: assert, retract, query, call, set, on
+  command: grep -A10 'export type Ctx' src/ctx.ts | grep -cE '^\s+(assert|retract|query|call|set|on)\b' | grep -q 6
 - ctx.assert(s, p, o, g?, embedding?) writes a quad and fires change events — embedding is an optional F32_BLOB vector
-- ctx.retract(s, p, o, g?) removes a quad and fires change events
+- ctx.retract(s, p, o?, g?) removes matching quads and fires change events — omit o to retract all values for (s, p, g)
 - ctx.query({ s?, p?, o?, g? }) returns Quad[] matching the pattern — omitted fields are wildcards
 - ctx.call(name, args?) looks up (name, 'source', ?), compiles to AsyncFunction, and runs it
 - ctx.on(pattern, callback) watches for quad assert/retract matching pattern, returns an unsubscribe function
@@ -40,9 +43,11 @@
   command: grep -q 'AsyncLocalStorage' src/ctx.ts && grep -q 'get self' src/ctx.ts
 - label: ctx is mutable — nodes can replace any primitive (sys:compiler replaces ctx.call)
   command: grep -q 'ctx\.call =' src/template.ts
-- everything beyond these 5 primitives — llm, shell, vector, spawn — is implemented as nodes
-- label: set is a convenience node for single-valued predicates — retracts old values then asserts new, with serialized locking per (s, p, g) key
-  command: grep -q '"set":' src/template.ts
+- everything beyond these 6 primitives — llm, shell, vector, spawn — is implemented as nodes
+- label: set node delegates to ctx.set — the atomic single-valued predicate primitive
+  command: grep -q '"set":' src/template.ts && grep -q 'return ctx.set' src/template.ts
+- label: ctx.set(s, p, o, g?) atomically replaces all values for (s, p, g) with a single new value — uses db.batch for atomicity
+  command: grep -q 'async set' src/ctx.ts && grep -q 'db.batch' src/ctx.ts
 
 # execution
 
@@ -92,7 +97,7 @@
 
 - label: the kernel is ~30 lines of TypeScript — pure plumbing, no policy
   command: test $(grep -c '' src/boot.ts) -le 50
-- label: kernel connects to Turso, creates ctx with 5 naive primitives, and calls ctx.call('main')
+- label: kernel connects to Turso, creates ctx with the 6 primitives, and calls ctx.call('main')
   command: grep -q 'createDatabase' src/boot.ts && grep -q 'createCtx' src/boot.ts && grep -q 'call.*main' src/boot.ts
 - label: the kernel's ctx.call compiles from scratch on every call — no cache, no reactivity
   command: grep -q 'no cache' src/ctx.ts

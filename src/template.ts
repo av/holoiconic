@@ -1449,14 +1449,7 @@ const server = Bun.serve({
           return Response.json({ error: 'source (string) is required' }, { status: 400, headers: corsHeaders });
         }
 
-        // Find the old source quad
-        const oldSourceQuads = await ctx.query({ s: name, p: 'source' });
-        if (oldSourceQuads.length > 0) {
-          // Retract old source
-          await ctx.retract(name, 'source', oldSourceQuads[0].o);
-        }
-
-        // Assert the new source
+        await ctx.retract(name, 'source');
         await ctx.assert(name, 'source', newSource);
 
         return Response.json({ ok: true, name }, { headers: corsHeaders });
@@ -1951,11 +1944,7 @@ if (!match) throw new Error('[version:restore] no version found with seq=' + seq
 const versionData = JSON.parse(match.o);
 const restoredSource = versionData.source;
 
-// Retract current source and assert the restored version
-const currentSource = await ctx.query({ s: name, p: 'source' });
-if (currentSource.length > 0) {
-  await ctx.retract(name, 'source', currentSource[0].o);
-}
+await ctx.retract(name, 'source');
 await ctx.assert(name, 'source', restoredSource);
 
 return { name, seq, timestamp: versionData.timestamp, restored: true };
@@ -2001,12 +1990,10 @@ console.log('[cron] started ' + cronId + ' — runs ' + node + ' every ' + inter
 if (signal) {
   signal.addEventListener('abort', async () => {
     clearInterval(timer);
-    // Update status in graph
     try {
-      await ctx.retract(cronId, 'cron:status', 'running');
-      await ctx.assert(cronId, 'cron:status', 'stopped');
-      await ctx.assert(cronId, 'cron:stopped', new Date().toISOString());
-      await ctx.assert(cronId, 'cron:ticks', String(tickCount));
+      await ctx.set(cronId, 'cron:status', 'stopped');
+      await ctx.set(cronId, 'cron:stopped', new Date().toISOString());
+      await ctx.set(cronId, 'cron:ticks', String(tickCount));
     } catch {}
     console.log('[cron] stopped ' + cronId + ' after ' + tickCount + ' ticks');
   }, { once: true });
@@ -2021,10 +2008,9 @@ if (signal) {
   ctx._cronTimers.set(cronId, { timer, stopCron: async () => {
     clearInterval(timer);
     try {
-      await ctx.retract(cronId, 'cron:status', 'running');
-      await ctx.assert(cronId, 'cron:status', 'stopped');
-      await ctx.assert(cronId, 'cron:stopped', new Date().toISOString());
-      await ctx.assert(cronId, 'cron:ticks', String(tickCount));
+      await ctx.set(cronId, 'cron:status', 'stopped');
+      await ctx.set(cronId, 'cron:stopped', new Date().toISOString());
+      await ctx.set(cronId, 'cron:ticks', String(tickCount));
     } catch {}
     console.log('[cron] stopped ' + cronId + ' after ' + tickCount + ' ticks');
   }});
@@ -2076,27 +2062,27 @@ if (typeof durationMs !== 'number') throw new Error('[metrics] record.durationMs
 // Read current values
 const callsQuads = await ctx.query({ s: name, p: 'metric:calls', g: 'metrics' });
 const durationQuads = await ctx.query({ s: name, p: 'metric:duration_ms', g: 'metrics' });
-const errorsQuads = await ctx.query({ s: name, p: 'metric:errors', g: 'metrics' });
 
 const prevCalls = callsQuads.length > 0 ? parseInt(callsQuads[0].o) : 0;
 const prevDuration = durationQuads.length > 0 ? parseFloat(durationQuads[0].o) : 0;
-const prevErrors = errorsQuads.length > 0 ? parseInt(errorsQuads[0].o) : 0;
 
-// Retract old values
-for (const q of callsQuads) await ctx.retract(q.s, q.p, q.o, q.g);
-for (const q of durationQuads) await ctx.retract(q.s, q.p, q.o, q.g);
+const newCalls = prevCalls + 1;
+const newDuration = prevDuration + durationMs;
+
+await ctx.set(name, 'metric:calls', String(newCalls), 'metrics');
+await ctx.set(name, 'metric:duration_ms', String(newDuration), 'metrics');
+
+let newErrors = 0;
 if (error) {
-  for (const q of errorsQuads) await ctx.retract(q.s, q.p, q.o, q.g);
+  const errorsQuads = await ctx.query({ s: name, p: 'metric:errors', g: 'metrics' });
+  newErrors = (errorsQuads.length > 0 ? parseInt(errorsQuads[0].o) : 0) + 1;
+  await ctx.set(name, 'metric:errors', String(newErrors), 'metrics');
+} else {
+  const errorsQuads = await ctx.query({ s: name, p: 'metric:errors', g: 'metrics' });
+  newErrors = errorsQuads.length > 0 ? parseInt(errorsQuads[0].o) : 0;
 }
 
-// Assert new values
-await ctx.assert(name, 'metric:calls', String(prevCalls + 1), 'metrics');
-await ctx.assert(name, 'metric:duration_ms', String(prevDuration + durationMs), 'metrics');
-if (error) {
-  await ctx.assert(name, 'metric:errors', String(prevErrors + 1), 'metrics');
-}
-
-return { name, calls: prevCalls + 1, duration_ms: prevDuration + durationMs, errors: error ? prevErrors + 1 : prevErrors };
+return { name, calls: newCalls, duration_ms: newDuration, errors: newErrors };
 `,
 
   // ── metrics:report ─────────────────────────────────────────────
@@ -2165,31 +2151,7 @@ const g = (args && args.g) || '_';
 if (!s || !p || o === undefined || o === null) {
   throw new Error('[set] args.s, args.p, and args.o are required');
 }
-
-// Serialize set operations per (s, p, g) key to prevent concurrent race conditions
-if (!ctx._setLocks) ctx._setLocks = new Map();
-const lockKey = s + '\\0' + p + '\\0' + g;
-const prev = ctx._setLocks.get(lockKey) || Promise.resolve();
-const op = prev.then(async () => {
-  // Retract all existing values for this (s, p, *, g) pattern
-  const existing = await ctx.query({ s, p, g });
-  for (const eq of existing) {
-    await ctx.retract(eq.s, eq.p, eq.o, eq.g);
-  }
-  // Assert the new value
-  return ctx.assert(s, p, o, g);
-}).catch(async (err) => {
-  // Even if a previous operation failed, try our operation
-  const existing = await ctx.query({ s, p, g });
-  for (const eq of existing) {
-    await ctx.retract(eq.s, eq.p, eq.o, eq.g);
-  }
-  return ctx.assert(s, p, o, g);
-});
-ctx._setLocks.set(lockKey, op.catch(() => {}));
-
-const quad = await op;
-return quad;
+return ctx.set(s, p, o, g);
 `,
 
   // ── repl ────────────────────────────────────────────────────────
@@ -2307,7 +2269,7 @@ for await (const line of rl) {
           console.log('(empty input, no changes)');
         } else {
           const newSource = lines.join('\\n');
-          await ctx.retract(name, 'source', oldSource);
+          await ctx.retract(name, 'source');
           await ctx.assert(name, 'source', newSource);
           console.log('source updated for: ' + name);
         }
