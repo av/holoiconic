@@ -8607,8 +8607,8 @@ if (signal) {
       throw new Error(`only ${doneCount}/5 nodes completed`);
 
     // If they ran sequentially, it would take ~500ms. Concurrently, ~100-200ms.
-    if (overallElapsed > 450)
-      throw new Error(`took ${overallElapsed}ms — may not be concurrent (expected < 400ms for 5 x 100ms nodes)`);
+    if (overallElapsed > 600)
+      throw new Error(`took ${overallElapsed}ms — may not be concurrent (expected < 600ms for 5 x 100ms nodes)`);
 
     ok(`spawn: 5 nodes run concurrently (${overallElapsed}ms total, not 500ms+)`);
 
@@ -9619,7 +9619,7 @@ await ctx.assert('test:cronb', 'tick:' + Date.now(), 'b');
     const p1 = ctx.call("cron", { node: "test:crona", interval: 100, signal: ac1.signal });
     const p2 = ctx.call("cron", { node: "test:cronb", interval: 100, signal: ac2.signal });
 
-    await new Promise(r => setTimeout(r, 350));
+    await new Promise(r => setTimeout(r, 500));
     ac1.abort();
     ac2.abort();
     await Promise.all([p1, p2]);

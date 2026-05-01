@@ -302,3 +302,11 @@
   command: grep -A30 '"snapshot:import":' src/template.ts | grep -q 'skipped++' && grep -A30 '"snapshot:import":' src/template.ts | grep -q 'missing s/p/o'
 - label: Turso Cloud branching and point-in-time restore are platform-level — holoiconic does not implement or wrap them
   command: ! grep -q 'turso.*branch\|createBranch\|point-in-time' src/template.ts
+
+# testing
+
+- the integration test suite runs entirely against mock:llm — no real LLM provider is exercised
+- label: mock:llm is a graph-resident node that provides an OpenAI-compatible mock server and a pi-ai faux provider — no inline stubs in production code
+  command: grep -q '"mock:llm":' src/template.ts && ! grep -q 'api.*stub' src/template.ts
+- label: the llm, agent:loop, and embed nodes contain no inline stub/fallback branches — mock routing is handled by mock:llm
+  command: ! grep -v '//' src/template.ts | grep -q "= 'stub'\|api.*stub\|return.*stub"

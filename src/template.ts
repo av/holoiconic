@@ -1616,7 +1616,7 @@ return { path: dest };
 `,
 
   // ── embed ─────────────────────────────────────────────────────
-  // Generates an embedding vector for text. Uses OpenAI API or a stub.
+  // Generates an embedding vector for text via OpenAI API, routing through mock:llm when no key is set.
   "embed": `
 const text = args && args.text;
 if (!text) throw new Error('[embed] args.text is required');
