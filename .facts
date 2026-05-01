@@ -14,8 +14,8 @@
   command: ! grep -q 'protected\|readonly.*quad\|ACL\|permission' src/ctx.ts
 - label: breaking sys nodes breaks the runtime — that is by design, the system is fully self-modifiable
   command: grep -q 'ctx\.call =' src/template.ts && ! grep -q 'immutable\|frozen\|Object.freeze' src/ctx.ts
-- label: the runtime dependencies are @libsql/client and @mariozechner/pi-ai
-  command: jq -r '.dependencies | keys[]' package.json | grep -q '@libsql/client' && jq -r '.dependencies | keys[]' package.json | grep -q '@mariozechner/pi-ai'
+- label: the runtime dependencies are @libsql/client, @mariozechner/pi-ai, and @mariozechner/pi-tui
+  command: jq -r '.dependencies | keys[]' package.json | grep -q '@libsql/client' && jq -r '.dependencies | keys[]' package.json | grep -q '@mariozechner/pi-ai' && jq -r '.dependencies | keys[]' package.json | grep -q '@mariozechner/pi-tui'
 
 # quad
 
@@ -165,7 +165,7 @@
 - label: repl starts a new session by default — session ID is repl:<timestamp>, conversation history stored as quads
   command: grep -q "repl:.*Date.now()" src/template.ts && grep -q "session: sessionId" src/template.ts
 - label: repl is built on pi-mono — TUI rendering, streaming, markdown, syntax highlighting, and tool-call display are framework-provided
-  command: grep -q "pi-mono\|piMono" src/template.ts
+  command: grep -q "pi-mono" src/template.ts && grep -q "@mariozechner/pi-tui" src/template.ts
 - label: LLM responses stream by default
   command: grep -q "stream.*true" src/template.ts && grep -q "onDelta" src/template.ts
 - label: .query queries quads by JSON pattern

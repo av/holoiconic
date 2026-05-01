@@ -2183,6 +2183,44 @@ return ctx.set(s, p, o, g);
 const signal = args && args.signal;
 const readline = await import('node:readline');
 
+// TUI rendering via @mariozechner/pi-tui (from the pi-mono monorepo)
+// Provides markdown rendering, syntax highlighting, and formatted display
+const piTui = await import('@mariozechner/pi-tui');
+const { Markdown } = piTui;
+
+// pi-mono TUI theme for markdown rendering in the repl
+const piMonoTheme = {
+  heading: (t) => '\\x1b[1;36m\\x1b[1m\\x1b[4m' + t + '\\x1b[0m',
+  link: (t) => '\\x1b[4;34m' + t + '\\x1b[0m',
+  linkUrl: (t) => '\\x1b[2;34m' + t + '\\x1b[0m',
+  code: (t) => '\\x1b[43;30m ' + t + ' \\x1b[0m',
+  codeBlock: (t) => '\\x1b[2m' + t + '\\x1b[0m',
+  codeBlockBorder: (t) => '\\x1b[2m' + t + '\\x1b[0m',
+  quote: (t) => '\\x1b[3;37m' + t + '\\x1b[0m',
+  quoteBorder: (t) => '\\x1b[2;37m' + t + '\\x1b[0m',
+  hr: (t) => '\\x1b[2m' + t + '\\x1b[0m',
+  listBullet: (t) => '\\x1b[33m' + t + '\\x1b[0m',
+  bold: (t) => '\\x1b[1m' + t + '\\x1b[0m',
+  italic: (t) => '\\x1b[3m' + t + '\\x1b[0m',
+  strikethrough: (t) => '\\x1b[9m' + t + '\\x1b[0m',
+  underline: (t) => '\\x1b[4m' + t + '\\x1b[0m',
+};
+
+// Render markdown text to the terminal using pi-mono's Markdown component
+function renderMarkdown(text) {
+  const cols = process.stdout.columns || 80;
+  const md = new Markdown(text, 0, 0, piMonoTheme);
+  const lines = md.render(cols);
+  return lines.join('\\n');
+}
+
+// Format tool-call display using pi-mono markdown rendering
+function renderToolCall(toolName, toolInput) {
+  const inputStr = typeof toolInput === 'string' ? toolInput : JSON.stringify(toolInput, null, 2);
+  const md = '**\\u{1f527} ' + toolName + '**\\n\\n\\\`\\\`\\\`json\\n' + inputStr + '\\n\\\`\\\`\\\`';
+  return renderMarkdown(md);
+}
+
 // Create a persistent session ID for this REPL instance
 let sessionId = 'repl:' + Date.now();
 console.log('[repl] session: ' + sessionId);
@@ -2270,7 +2308,7 @@ for await (const line of rl) {
       const name = trimmed.slice(8).trim();
       const rs = await ctx.query({ s: name, p: 'source' });
       if (rs.length === 0) { console.log('no source found for: ' + name); }
-      else { console.log(rs[0].o); }
+      else { console.log(renderMarkdown('\`\`\`js\\n' + rs[0].o + '\\n\`\`\`')); }
 
     } else if (trimmed.startsWith('.edit ')) {
       const name = trimmed.slice(5).trim();
@@ -2478,14 +2516,23 @@ for await (const line of rl) {
 
     } else {
       // Route through agent:loop with persistent session, streaming text deltas to stdout
+      let streamed = false;
       const result = await ctx.call('agent:loop', {
         prompt: trimmed,
         session: sessionId,
         stream: true,
-        onDelta: (delta) => process.stdout.write(delta),
+        onDelta: (delta) => { streamed = true; process.stdout.write(delta); },
       });
-      // Print newline after streamed output (or print full response if no streaming occurred)
-      if (result.response) console.log('');
+      // After streaming, print newline
+      if (streamed) console.log('');
+      // If no streaming occurred, render response with pi-mono markdown
+      else if (result.response) console.log(renderMarkdown(result.response));
+      // Display tool calls via pi-mono TUI rendering
+      if (result.tool_calls && result.tool_calls.length > 0) {
+        for (const tc of result.tool_calls) {
+          console.log(renderToolCall(tc.name, tc.input));
+        }
+      }
     }
   } catch (err) {
     console.error('error:', err.message || err);
