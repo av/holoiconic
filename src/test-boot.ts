@@ -7340,6 +7340,628 @@ async function testVersioningDeep(ctx: Ctx) {
   }
 }
 
+// ── Ctx primitives edge cases ───────────────────────────────────
+
+async function testCtxPrimitivesEdgeCases(ctx: Ctx) {
+  console.log("\n── ctx.assert edge cases ──");
+
+  // Assert with all 4 fields and verify return shape
+  try {
+    const q = await ctx.assert("cprim:a1", "pred1", "obj1", "graph1");
+    if (q.s !== "cprim:a1") throw new Error(`s: expected 'cprim:a1', got '${q.s}'`);
+    if (q.p !== "pred1") throw new Error(`p: expected 'pred1', got '${q.p}'`);
+    if (q.o !== "obj1") throw new Error(`o: expected 'obj1', got '${q.o}'`);
+    if (q.g !== "graph1") throw new Error(`g: expected 'graph1', got '${q.g}'`);
+    if (typeof q.id !== "number") throw new Error(`id: expected number, got ${typeof q.id}`);
+    ok("ctx.assert: returns quad with correct s, p, o, g, id");
+  } catch (e) {
+    fail("ctx.assert return shape", e);
+  }
+
+  // Assert with default graph omits g, should be '_'
+  try {
+    const q = await ctx.assert("cprim:a2", "pred2", "obj2");
+    if (q.g !== "_") throw new Error(`g: expected '_', got '${q.g}'`);
+    ok("ctx.assert: omitting g defaults to '_'");
+  } catch (e) {
+    fail("ctx.assert default graph", e);
+  }
+
+  // Duplicate assert is a no-op — returns same quad, no new row
+  try {
+    const q1 = await ctx.assert("cprim:dup", "dp", "dv", "dg");
+    const q2 = await ctx.assert("cprim:dup", "dp", "dv", "dg");
+    if (q1.id !== q2.id) throw new Error(`duplicate assert created new row: ${q1.id} vs ${q2.id}`);
+    if (q1.s !== q2.s || q1.p !== q2.p || q1.o !== q2.o || q1.g !== q2.g)
+      throw new Error("duplicate assert returned different field values");
+    // Verify only 1 row exists
+    const rows = await ctx.query({ s: "cprim:dup", p: "dp", o: "dv", g: "dg" });
+    if (rows.length !== 1) throw new Error(`expected 1 row, got ${rows.length}`);
+    ok("ctx.assert: duplicate is a no-op, returns same quad");
+  } catch (e) {
+    fail("ctx.assert duplicate no-op", e);
+  }
+
+  // Assert with very long strings (50KB each for s, p, o)
+  try {
+    const longS = "cprim:long:" + "s".repeat(50 * 1024);
+    const longP = "p".repeat(50 * 1024);
+    const longO = "o".repeat(50 * 1024);
+    const q = await ctx.assert(longS, longP, longO);
+    if (q.s.length !== longS.length) throw new Error(`s length: expected ${longS.length}, got ${q.s.length}`);
+    if (q.p.length !== longP.length) throw new Error(`p length: expected ${longP.length}, got ${q.p.length}`);
+    if (q.o.length !== longO.length) throw new Error(`o length: expected ${longO.length}, got ${q.o.length}`);
+    // Query it back
+    const rows = await ctx.query({ s: longS, p: longP });
+    if (rows.length !== 1 || rows[0].o.length !== longO.length)
+      throw new Error("long string roundtrip failed");
+    ok("ctx.assert: very long strings (50KB each) stored and queryable");
+  } catch (e) {
+    fail("ctx.assert long strings", e);
+  }
+
+  // Assert with special characters (quotes, backslashes, tabs, newlines)
+  try {
+    const specS = 'cprim:sp"ec\'ial';
+    const specP = "p\\back\\slash";
+    const specO = "obj\twith\nnewlines";
+    const q = await ctx.assert(specS, specP, specO);
+    if (q.s !== specS) throw new Error(`special s: got '${q.s}'`);
+    if (q.p !== specP) throw new Error(`special p: got '${q.p}'`);
+    if (q.o !== specO) throw new Error(`special o: got '${q.o}'`);
+    ok("ctx.assert: special characters (quotes, backslashes, tabs, newlines)");
+  } catch (e) {
+    fail("ctx.assert special chars", e);
+  }
+
+  // Assert with SQL-dangerous characters (percent, underscore wildcards, semicolons)
+  try {
+    const sqlS = "cprim:sql%_';DROP TABLE quads;--";
+    const sqlO = "100% of values; SELECT * FROM quads WHERE 1=1";
+    const q = await ctx.assert(sqlS, "sqltest", sqlO);
+    if (q.s !== sqlS) throw new Error(`sql s mismatch`);
+    if (q.o !== sqlO) throw new Error(`sql o mismatch`);
+    ok("ctx.assert: SQL-dangerous characters stored correctly (parameterized queries)");
+  } catch (e) {
+    fail("ctx.assert SQL chars", e);
+  }
+
+  // Assert with unicode (emoji, CJK, RTL)
+  try {
+    const uniS = "cprim:\u{1F600}\u{1F680}";
+    const uniP = "世界";  // 世界
+    const uniO = "مرحبا";  // مرحبا
+    const q = await ctx.assert(uniS, uniP, uniO);
+    if (q.s !== uniS) throw new Error(`unicode s mismatch`);
+    if (q.p !== uniP) throw new Error(`unicode p mismatch`);
+    if (q.o !== uniO) throw new Error(`unicode o mismatch`);
+    const rows = await ctx.query({ s: uniS, p: uniP });
+    if (rows.length !== 1 || rows[0].o !== uniO)
+      throw new Error("unicode roundtrip failed");
+    ok("ctx.assert: unicode (emoji, CJK, RTL) stored and queryable");
+  } catch (e) {
+    fail("ctx.assert unicode", e);
+  }
+
+  // Assert with embedding vector (5th arg)
+  try {
+    const vec = new Array(1536).fill(0).map((_, i) => Math.cos(i) * 0.01);
+    const q = await ctx.assert("cprim:emb", "has_emb", "embval", "_", vec);
+    if (q.s !== "cprim:emb" || q.o !== "embval")
+      throw new Error("assert with embedding returned wrong quad");
+    const rows = await ctx.query({ s: "cprim:emb", p: "has_emb" });
+    if (rows.length !== 1) throw new Error(`expected 1, got ${rows.length}`);
+    ok("ctx.assert: with embedding vector stores and queries back");
+  } catch (e) {
+    fail("ctx.assert with embedding", e);
+  }
+
+  // Assert with empty string fields
+  try {
+    const q = await ctx.assert("cprim:empty", "", "");
+    if (q.p !== "") throw new Error(`expected empty p, got '${q.p}'`);
+    if (q.o !== "") throw new Error(`expected empty o, got '${q.o}'`);
+    ok("ctx.assert: empty string p and o fields work");
+  } catch (e) {
+    fail("ctx.assert empty strings", e);
+  }
+
+  console.log("\n── ctx.retract edge cases ──");
+
+  // Retract with full match returns retracted quad(s)
+  try {
+    await ctx.assert("cprim:r1", "rp", "rv", "rg");
+    const retracted = await ctx.retract("cprim:r1", "rp", "rv", "rg");
+    if (retracted.length !== 1) throw new Error(`expected 1, got ${retracted.length}`);
+    if (retracted[0].s !== "cprim:r1") throw new Error(`retracted s mismatch`);
+    if (retracted[0].p !== "rp") throw new Error(`retracted p mismatch`);
+    if (retracted[0].o !== "rv") throw new Error(`retracted o mismatch`);
+    if (retracted[0].g !== "rg") throw new Error(`retracted g mismatch`);
+    if (typeof retracted[0].id !== "number") throw new Error(`retracted id not a number`);
+    ok("ctx.retract: full match returns array of retracted quads with correct fields");
+  } catch (e) {
+    fail("ctx.retract full match", e);
+  }
+
+  // Retract with wildcards (omit o to retract all values for s, p)
+  try {
+    await ctx.assert("cprim:rwild", "tag", "a");
+    await ctx.assert("cprim:rwild", "tag", "b");
+    await ctx.assert("cprim:rwild", "tag", "c");
+    const retracted = await ctx.retract("cprim:rwild", "tag");
+    if (retracted.length !== 3) throw new Error(`expected 3 retracted, got ${retracted.length}`);
+    const values = retracted.map((q) => q.o).sort();
+    if (values[0] !== "a" || values[1] !== "b" || values[2] !== "c")
+      throw new Error(`retracted values: ${values.join(",")}`);
+    // Verify they are gone
+    const after = await ctx.query({ s: "cprim:rwild", p: "tag" });
+    if (after.length !== 0) throw new Error(`expected 0 remaining, got ${after.length}`);
+    ok("ctx.retract: omitting o retracts all values for (s, p)");
+  } catch (e) {
+    fail("ctx.retract wildcard", e);
+  }
+
+  // Retract non-existent quad returns empty array
+  try {
+    const retracted = await ctx.retract("cprim:nonexistent", "nopred", "noval");
+    if (!Array.isArray(retracted)) throw new Error("retract did not return an array");
+    if (retracted.length !== 0) throw new Error(`expected empty array, got ${retracted.length}`);
+    ok("ctx.retract: non-existent quad returns empty array");
+  } catch (e) {
+    fail("ctx.retract non-existent", e);
+  }
+
+  // Retract fires change events
+  try {
+    const events: any[] = [];
+    const unsub = ctx.on({ s: "cprim:rfire" }, (change) => {
+      events.push({ type: change.type, s: change.quad.s, p: change.quad.p, o: change.quad.o });
+    });
+    await ctx.assert("cprim:rfire", "val", "watch-me");
+    await ctx.retract("cprim:rfire", "val", "watch-me");
+    unsub();
+    if (events.length !== 2) throw new Error(`expected 2 events, got ${events.length}`);
+    if (events[0].type !== "assert") throw new Error(`first event should be assert, got ${events[0].type}`);
+    if (events[1].type !== "retract") throw new Error(`second event should be retract, got ${events[1].type}`);
+    if (events[1].o !== "watch-me") throw new Error(`retract event o mismatch`);
+    ok("ctx.retract: fires change event with type='retract'");
+  } catch (e) {
+    fail("ctx.retract fires events", e);
+  }
+
+  // Retract with g omitted uses default graph '_'
+  try {
+    await ctx.assert("cprim:rdefg", "val", "indefault");
+    await ctx.assert("cprim:rdefg", "val", "incustom", "custom-g");
+    // Retract without g — should only remove the '_' graph entry
+    const retracted = await ctx.retract("cprim:rdefg", "val", "indefault");
+    if (retracted.length !== 1) throw new Error(`expected 1 retracted, got ${retracted.length}`);
+    if (retracted[0].g !== "_") throw new Error(`retracted from wrong graph: ${retracted[0].g}`);
+    // custom-g entry should still exist
+    const remaining = await ctx.query({ s: "cprim:rdefg", p: "val", g: "custom-g" });
+    if (remaining.length !== 1) throw new Error(`custom-g entry should still exist`);
+    ok("ctx.retract: omitting g defaults to '_', leaves other graphs intact");
+  } catch (e) {
+    fail("ctx.retract default graph", e);
+  }
+
+  // Retract wildcard fires events for each retracted quad
+  try {
+    const events: any[] = [];
+    const unsub = ctx.on({ s: "cprim:rwildev" }, (change) => {
+      if (change.type === "retract") events.push(change.quad.o);
+    });
+    await ctx.assert("cprim:rwildev", "multi", "x");
+    await ctx.assert("cprim:rwildev", "multi", "y");
+    const retracted = await ctx.retract("cprim:rwildev", "multi");
+    unsub();
+    if (retracted.length !== 2) throw new Error(`expected 2 retracted, got ${retracted.length}`);
+    if (events.length !== 2) throw new Error(`expected 2 retract events, got ${events.length}`);
+    ok("ctx.retract: wildcard retract fires an event per quad");
+  } catch (e) {
+    fail("ctx.retract wildcard events", e);
+  }
+
+  console.log("\n── ctx.query edge cases ──");
+
+  // Query with each field as wildcard individually
+  try {
+    // Set up test data in a unique graph
+    await ctx.assert("cprim:qw1", "qp", "qo", "qg-wild");
+    await ctx.assert("cprim:qw2", "qp", "qo", "qg-wild");
+    await ctx.assert("cprim:qw3", "qp", "qo-other", "qg-wild");
+
+    // Wildcard s — match by p, o, g
+    const byPOG = await ctx.query({ p: "qp", o: "qo", g: "qg-wild" });
+    if (byPOG.length !== 2) throw new Error(`by p,o,g: expected 2, got ${byPOG.length}`);
+
+    // Wildcard p — match by s, o, g
+    const bySOG = await ctx.query({ s: "cprim:qw1", o: "qo", g: "qg-wild" });
+    if (bySOG.length !== 1) throw new Error(`by s,o,g: expected 1, got ${bySOG.length}`);
+
+    // Wildcard o — match by s, p, g
+    const bySPG = await ctx.query({ s: "cprim:qw3", p: "qp", g: "qg-wild" });
+    if (bySPG.length !== 1) throw new Error(`by s,p,g: expected 1, got ${bySPG.length}`);
+    if (bySPG[0].o !== "qo-other") throw new Error(`wildcard o returned wrong value`);
+
+    // Wildcard g — match by s, p, o
+    const bySPO = await ctx.query({ s: "cprim:qw1", p: "qp", o: "qo" });
+    if (bySPO.length !== 1) throw new Error(`by s,p,o: expected 1, got ${bySPO.length}`);
+    if (bySPO[0].g !== "qg-wild") throw new Error(`wildcard g returned wrong graph`);
+
+    ok("ctx.query: wildcard on each individual field (s, p, o, g) works correctly");
+  } catch (e) {
+    fail("ctx.query individual wildcards", e);
+  }
+
+  // Query result includes all expected fields
+  try {
+    await ctx.assert("cprim:qfields", "fp", "fo", "fg");
+    const rows = await ctx.query({ s: "cprim:qfields", p: "fp" });
+    if (rows.length !== 1) throw new Error(`expected 1, got ${rows.length}`);
+    const r = rows[0];
+    if (!("id" in r)) throw new Error("missing id field");
+    if (!("s" in r)) throw new Error("missing s field");
+    if (!("p" in r)) throw new Error("missing p field");
+    if (!("o" in r)) throw new Error("missing o field");
+    if (!("g" in r)) throw new Error("missing g field");
+    if (typeof r.id !== "number") throw new Error(`id should be number, got ${typeof r.id}`);
+    if (r.s !== "cprim:qfields") throw new Error(`s mismatch`);
+    if (r.p !== "fp") throw new Error(`p mismatch`);
+    if (r.o !== "fo") throw new Error(`o mismatch`);
+    if (r.g !== "fg") throw new Error(`g mismatch`);
+    ok("ctx.query: result includes id, s, p, o, g with correct types");
+  } catch (e) {
+    fail("ctx.query result fields", e);
+  }
+
+  // Query with non-existent values returns empty array
+  try {
+    const rows = await ctx.query({ s: "cprim:totallynonexistent999", p: "nope" });
+    if (!Array.isArray(rows)) throw new Error("query did not return an array");
+    if (rows.length !== 0) throw new Error(`expected 0, got ${rows.length}`);
+    ok("ctx.query: non-existent values returns empty array");
+  } catch (e) {
+    fail("ctx.query non-existent", e);
+  }
+
+  // Query with empty pattern (all wildcards) returns results
+  try {
+    const rows = await ctx.query({});
+    if (!Array.isArray(rows)) throw new Error("query({}) did not return an array");
+    if (rows.length === 0) throw new Error("query({}) returned 0 rows in a seeded database");
+    // Verify they're all valid quads
+    for (const r of rows.slice(0, 5)) {
+      if (typeof r.id !== "number" || typeof r.s !== "string" || typeof r.p !== "string")
+        throw new Error("invalid quad shape in results");
+    }
+    ok(`ctx.query: empty pattern {} returns all quads (${rows.length} rows)`);
+  } catch (e) {
+    fail("ctx.query empty pattern", e);
+  }
+
+  console.log("\n── ctx.set edge cases ──");
+
+  // ctx.set creates new value if none exists (via ctx.set directly, not the set node)
+  try {
+    const q = await ctx.set("cprim:setnew", "newp", "newv");
+    if (q.s !== "cprim:setnew") throw new Error(`s mismatch`);
+    if (q.p !== "newp") throw new Error(`p mismatch`);
+    if (q.o !== "newv") throw new Error(`o mismatch`);
+    if (q.g !== "_") throw new Error(`g should be '_', got '${q.g}'`);
+    const rows = await ctx.query({ s: "cprim:setnew", p: "newp" });
+    if (rows.length !== 1) throw new Error(`expected 1 row, got ${rows.length}`);
+    ok("ctx.set: creates new value if none exists");
+  } catch (e) {
+    fail("ctx.set create new", e);
+  }
+
+  // ctx.set replaces existing value atomically
+  try {
+    await ctx.set("cprim:setrepl", "val", "old-value");
+    const q = await ctx.set("cprim:setrepl", "val", "new-value");
+    if (q.o !== "new-value") throw new Error(`expected 'new-value', got '${q.o}'`);
+    const rows = await ctx.query({ s: "cprim:setrepl", p: "val" });
+    if (rows.length !== 1) throw new Error(`expected 1 row, got ${rows.length}`);
+    if (rows[0].o !== "new-value") throw new Error(`stored value mismatch`);
+    ok("ctx.set: replaces existing value atomically");
+  } catch (e) {
+    fail("ctx.set replace", e);
+  }
+
+  // ctx.set fires retract event for old value and assert event for new value
+  try {
+    await ctx.set("cprim:setev", "val", "before");
+    const events: any[] = [];
+    const unsub = ctx.on({ s: "cprim:setev", p: "val" }, (change) => {
+      events.push({ type: change.type, o: change.quad.o });
+    });
+    await ctx.set("cprim:setev", "val", "after");
+    unsub();
+    // Should have 2 events: retract "before", assert "after"
+    if (events.length !== 2)
+      throw new Error(`expected 2 events, got ${events.length}: ${JSON.stringify(events)}`);
+    const retractEv = events.find((e) => e.type === "retract");
+    const assertEv = events.find((e) => e.type === "assert");
+    if (!retractEv) throw new Error("no retract event fired");
+    if (!assertEv) throw new Error("no assert event fired");
+    if (retractEv.o !== "before") throw new Error(`retract should be 'before', got '${retractEv.o}'`);
+    if (assertEv.o !== "after") throw new Error(`assert should be 'after', got '${assertEv.o}'`);
+    ok("ctx.set: fires retract for old + assert for new value");
+  } catch (e) {
+    fail("ctx.set events", e);
+  }
+
+  // ctx.set when creating new (no previous value): only fires assert, no retract
+  try {
+    const events: any[] = [];
+    const unsub = ctx.on({ s: "cprim:setnewev" }, (change) => {
+      events.push({ type: change.type, o: change.quad.o });
+    });
+    await ctx.set("cprim:setnewev", "val", "fresh");
+    unsub();
+    // Should only have assert event (delete returned 0 rows, so no retract fires)
+    const assertEvents = events.filter((e) => e.type === "assert");
+    const retractEvents = events.filter((e) => e.type === "retract");
+    if (assertEvents.length !== 1) throw new Error(`expected 1 assert event, got ${assertEvents.length}`);
+    if (retractEvents.length !== 0) throw new Error(`expected 0 retract events, got ${retractEvents.length}`);
+    ok("ctx.set: new value fires only assert, no retract");
+  } catch (e) {
+    fail("ctx.set new-only events", e);
+  }
+
+  // ctx.set with same value: always re-inserts (not truly idempotent — always fires assert)
+  try {
+    await ctx.set("cprim:setidem", "val", "same");
+    const events: any[] = [];
+    const unsub = ctx.on({ s: "cprim:setidem", p: "val" }, (change) => {
+      events.push({ type: change.type, o: change.quad.o });
+    });
+    const q = await ctx.set("cprim:setidem", "val", "same");
+    unsub();
+    // ctx.set always deletes then inserts (batch), so it fires retract + assert even for same value
+    if (q.o !== "same") throw new Error(`expected 'same', got '${q.o}'`);
+    const rows = await ctx.query({ s: "cprim:setidem", p: "val" });
+    if (rows.length !== 1) throw new Error(`expected 1 row, got ${rows.length}`);
+    // Note: set always fires both events even for same value (different from assert idempotency)
+    if (events.length !== 2) throw new Error(`expected 2 events (retract+assert), got ${events.length}`);
+    ok("ctx.set: same value fires retract+assert (always re-inserts)");
+  } catch (e) {
+    fail("ctx.set same value", e);
+  }
+
+  // ctx.set with custom graph
+  try {
+    await ctx.set("cprim:setcg", "val", "v1", "cg1");
+    const q = await ctx.set("cprim:setcg", "val", "v2", "cg1");
+    if (q.o !== "v2") throw new Error(`expected 'v2', got '${q.o}'`);
+    if (q.g !== "cg1") throw new Error(`expected graph 'cg1', got '${q.g}'`);
+    const rows = await ctx.query({ s: "cprim:setcg", p: "val", g: "cg1" });
+    if (rows.length !== 1) throw new Error(`expected 1 row, got ${rows.length}`);
+    ok("ctx.set: custom graph parameter works correctly");
+  } catch (e) {
+    fail("ctx.set custom graph", e);
+  }
+
+  // ctx.set with embedding
+  try {
+    const vec = new Array(1536).fill(0.5);
+    const q = await ctx.set("cprim:setemb", "data", "embval", "_", vec);
+    if (q.o !== "embval") throw new Error(`expected 'embval', got '${q.o}'`);
+    const rows = await ctx.query({ s: "cprim:setemb", p: "data" });
+    if (rows.length !== 1) throw new Error(`expected 1, got ${rows.length}`);
+    ok("ctx.set: with embedding vector stores correctly");
+  } catch (e) {
+    fail("ctx.set with embedding", e);
+  }
+
+  console.log("\n── ctx.on edge cases ──");
+
+  // Unsubscribe stops further callbacks
+  try {
+    let count = 0;
+    const unsub = ctx.on({ s: "cprim:onsub" }, () => { count++; });
+    await ctx.assert("cprim:onsub", "v", "1");
+    if (count !== 1) throw new Error(`expected 1 before unsub, got ${count}`);
+    unsub();
+    await ctx.assert("cprim:onsub", "v", "2");
+    if (count !== 1) throw new Error(`expected still 1 after unsub, got ${count}`);
+    ok("ctx.on: unsubscribe stops further callbacks");
+  } catch (e) {
+    fail("ctx.on unsubscribe", e);
+  }
+
+  // Double unsubscribe is safe (no crash)
+  try {
+    const unsub = ctx.on({ s: "cprim:dblun" }, () => {});
+    unsub();
+    unsub(); // should not throw
+    ok("ctx.on: double unsubscribe is safe");
+  } catch (e) {
+    fail("ctx.on double unsub", e);
+  }
+
+  // Multiple subscribers all receive events
+  try {
+    let countA = 0;
+    let countB = 0;
+    let countC = 0;
+    const unsubA = ctx.on({ s: "cprim:multi" }, () => { countA++; });
+    const unsubB = ctx.on({ s: "cprim:multi" }, () => { countB++; });
+    const unsubC = ctx.on({ s: "cprim:multi" }, () => { countC++; });
+    await ctx.assert("cprim:multi", "ev", "go");
+    unsubA(); unsubB(); unsubC();
+    if (countA !== 1 || countB !== 1 || countC !== 1)
+      throw new Error(`expected all 1, got A=${countA} B=${countB} C=${countC}`);
+    ok("ctx.on: multiple subscribers all receive the event");
+  } catch (e) {
+    fail("ctx.on multiple subscribers", e);
+  }
+
+  // Callback receives correct event shape { type, quad }
+  try {
+    let captured: any = null;
+    const unsub = ctx.on({ s: "cprim:shape" }, (change) => { captured = change; });
+    await ctx.assert("cprim:shape", "sp", "sv", "sg");
+    unsub();
+    if (!captured) throw new Error("callback never fired");
+    if (captured.type !== "assert") throw new Error(`type: expected 'assert', got '${captured.type}'`);
+    if (!captured.quad) throw new Error("missing quad property");
+    if (captured.quad.s !== "cprim:shape") throw new Error(`quad.s mismatch`);
+    if (captured.quad.p !== "sp") throw new Error(`quad.p mismatch`);
+    if (captured.quad.o !== "sv") throw new Error(`quad.o mismatch`);
+    if (captured.quad.g !== "sg") throw new Error(`quad.g mismatch`);
+    if (typeof captured.quad.id !== "number") throw new Error(`quad.id should be number`);
+    ok("ctx.on: callback receives { type: 'assert', quad: { id, s, p, o, g } }");
+  } catch (e) {
+    fail("ctx.on event shape", e);
+  }
+
+  // Pattern matching: match on o field
+  try {
+    let fired = false;
+    const unsub = ctx.on({ o: "cprim:target-obj" }, () => { fired = true; });
+    await ctx.assert("cprim:omatch1", "any", "cprim:target-obj");
+    unsub();
+    if (!fired) throw new Error("did not fire for matching o");
+    ok("ctx.on: pattern matching on o field works");
+  } catch (e) {
+    fail("ctx.on o match", e);
+  }
+
+  // Pattern matching: match on g field
+  try {
+    let fired = false;
+    const unsub = ctx.on({ g: "cprim-target-graph" }, () => { fired = true; });
+    await ctx.assert("cprim:gmatch", "gp", "gv", "cprim-target-graph");
+    unsub();
+    if (!fired) throw new Error("did not fire for matching g");
+    ok("ctx.on: pattern matching on g field works");
+  } catch (e) {
+    fail("ctx.on g match", e);
+  }
+
+  // Subscriber error does not prevent other subscribers from firing
+  try {
+    let secondFired = false;
+    const unsub1 = ctx.on({ s: "cprim:errfirst" }, () => { throw new Error("subscriber crash"); });
+    const unsub2 = ctx.on({ s: "cprim:errfirst" }, () => { secondFired = true; });
+    // Suppress console.error for this test
+    const origError = console.error;
+    console.error = () => {};
+    await ctx.assert("cprim:errfirst", "p", "v");
+    console.error = origError;
+    unsub1(); unsub2();
+    if (!secondFired) throw new Error("second subscriber did not fire after first threw");
+    ok("ctx.on: subscriber error does not block other subscribers");
+  } catch (e) {
+    fail("ctx.on subscriber error isolation", e);
+  }
+
+  console.log("\n── ctx.call edge cases ──");
+
+  // Call with args passes them correctly
+  try {
+    await ctx.assert("cprim:callargs", "type", "Function");
+    await ctx.assert("cprim:callargs", "source", "return { got: args.x, also: args.y };");
+    const result = await ctx.call("cprim:callargs", { x: 42, y: "hello" });
+    if (result.got !== 42) throw new Error(`expected x=42, got ${result.got}`);
+    if (result.also !== "hello") throw new Error(`expected y='hello', got ${result.also}`);
+    ok("ctx.call: args are passed through correctly");
+  } catch (e) {
+    fail("ctx.call with args", e);
+  }
+
+  // Call returns the function's return value
+  try {
+    await ctx.assert("cprim:callret", "type", "Function");
+    await ctx.assert("cprim:callret", "source", "return 'specific-return-value';");
+    const result = await ctx.call("cprim:callret");
+    if (result !== "specific-return-value")
+      throw new Error(`expected 'specific-return-value', got '${result}'`);
+    ok("ctx.call: returns the function's return value");
+  } catch (e) {
+    fail("ctx.call return value", e);
+  }
+
+  // Call non-existent node throws with proper error
+  try {
+    await ctx.call("cprim:doesnotexist");
+    fail("ctx.call non-existent", "should have thrown");
+  } catch (e: any) {
+    if (e.message && e.message.includes("no source found"))
+      ok("ctx.call: non-existent node throws '[ctx.call] no source found'");
+    else
+      fail("ctx.call non-existent error", e);
+  }
+
+  // ctx.self returns correct node name inside a called function
+  try {
+    await ctx.assert("cprim:selftest", "type", "Function");
+    await ctx.assert("cprim:selftest", "source", "return ctx.self;");
+    const result = await ctx.call("cprim:selftest");
+    if (result !== "cprim:selftest")
+      throw new Error(`expected 'cprim:selftest', got '${result}'`);
+    ok("ctx.call: ctx.self returns correct node name inside execution");
+  } catch (e) {
+    fail("ctx.call ctx.self", e);
+  }
+
+  // Call with undefined args — args should be undefined
+  try {
+    await ctx.assert("cprim:callnoargs", "type", "Function");
+    await ctx.assert("cprim:callnoargs", "source", "return typeof args;");
+    const result = await ctx.call("cprim:callnoargs");
+    if (result !== "undefined")
+      throw new Error(`expected 'undefined', got '${result}'`);
+    ok("ctx.call: omitting args passes undefined");
+  } catch (e) {
+    fail("ctx.call no args", e);
+  }
+
+  // Call a node that returns a promise (async behavior)
+  try {
+    await ctx.assert("cprim:callasync", "type", "Function");
+    await ctx.assert("cprim:callasync", "source",
+      "const q = await ctx.assert('cprim:asyncresult', 'done', 'yes'); return q.o;"
+    );
+    const result = await ctx.call("cprim:callasync");
+    if (result !== "yes") throw new Error(`expected 'yes', got '${result}'`);
+    ok("ctx.call: async operations inside node work correctly");
+  } catch (e) {
+    fail("ctx.call async node", e);
+  }
+
+  // Call a node that throws — error propagates
+  try {
+    await ctx.assert("cprim:callerr", "type", "Function");
+    await ctx.assert("cprim:callerr", "source", "throw new Error('deliberate error');");
+    await ctx.call("cprim:callerr");
+    fail("ctx.call error propagation", "should have thrown");
+  } catch (e: any) {
+    if (e.message === "deliberate error")
+      ok("ctx.call: errors thrown in nodes propagate to caller");
+    else
+      fail("ctx.call error propagation", e);
+  }
+
+  // Nested ctx.call — inner call's return is available to outer
+  try {
+    await ctx.assert("cprim:inner", "type", "Function");
+    await ctx.assert("cprim:inner", "source", "return 'from-inner';");
+    await ctx.assert("cprim:outer", "type", "Function");
+    await ctx.assert("cprim:outer", "source",
+      "const r = await ctx.call('cprim:inner'); return 'outer-got-' + r;"
+    );
+    const result = await ctx.call("cprim:outer");
+    if (result !== "outer-got-from-inner")
+      throw new Error(`expected 'outer-got-from-inner', got '${result}'`);
+    ok("ctx.call: nested calls pass return values correctly");
+  } catch (e) {
+    fail("ctx.call nested", e);
+  }
+}
+
 // ── Main ──────────────────────────────────────────────────────────
 
 async function main() {
@@ -7455,6 +8077,7 @@ async function main() {
   await testPiTuiIntegration(ctx);
   await testSnapshotVersioningDeep(ctx);
   await testVersioningDeep(ctx);
+  await testCtxPrimitivesEdgeCases(ctx);
 
   // Summary
   console.log("\n── Summary ──");
