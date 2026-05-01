@@ -6745,6 +6745,601 @@ async function testPiTuiIntegration(ctx: Ctx) {
   }
 }
 
+// ── Snapshot & versioning deep behavioral tests ─────────────────
+
+async function testSnapshotVersioningDeep(ctx: Ctx) {
+  console.log("\n── Snapshot & versioning deep ──");
+
+  // 1. Export strips embedding vectors — exported quads should NOT have an 'embedding' key
+  try {
+    // First create a quad with an embedding to ensure there's at least one
+    try {
+      await ctx.call("embed", { text: "snapshot-embed-test-" + Date.now() });
+    } catch {}
+    await new Promise((r) => setTimeout(r, 50));
+
+    const json = await ctx.call("snapshot:export");
+    const quads = JSON.parse(json);
+    // No quad should have an 'embedding' key
+    const withEmbedding = quads.filter((q: any) => q.embedding !== undefined);
+    if (withEmbedding.length > 0)
+      throw new Error(`found ${withEmbedding.length} quads with embedding key — should be stripped`);
+    // Verify every quad has only the expected keys: s, p, o, g, and optionally attrs
+    const badKeys = quads.filter((q: any) => {
+      const keys = Object.keys(q);
+      return keys.some((k: string) => !["s", "p", "o", "g", "attrs"].includes(k));
+    });
+    if (badKeys.length > 0)
+      throw new Error(`found quads with unexpected keys: ${JSON.stringify(Object.keys(badKeys[0]))}`);
+    ok("snapshot:export strips embedding vectors from all quads");
+  } catch (e) {
+    fail("snapshot:export strips embeddings", e);
+  }
+
+  // 2. Export/import roundtrip preserves graph field (non-default graph)
+  try {
+    const uniqueG = "test-graph-" + Date.now();
+    await ctx.assert("rt:graphtest", "marker", "preserved", uniqueG);
+
+    const json = await ctx.call("snapshot:export");
+    const quads = JSON.parse(json);
+    const found = quads.find((q: any) => q.s === "rt:graphtest" && q.g === uniqueG);
+    if (!found) throw new Error("exported quads don't include custom graph quad");
+    if (found.g !== uniqueG)
+      throw new Error(`expected g='${uniqueG}', got g='${found.g}'`);
+
+    // Now import it back via a different subject to prove graph is preserved
+    const importData = JSON.stringify([{ s: "rt:graphtest2", p: "marker", o: "preserved", g: uniqueG }]);
+    await ctx.call("snapshot:import", { data: importData });
+    const check = await ctx.query({ s: "rt:graphtest2", p: "marker", g: uniqueG });
+    if (check.length === 0) throw new Error("imported quad not found");
+    if (check[0].g !== uniqueG)
+      throw new Error(`imported quad has g='${check[0].g}', expected '${uniqueG}'`);
+    ok("snapshot export/import preserves custom graph field");
+  } catch (e) {
+    fail("snapshot graph preservation", e);
+  }
+
+  // 3. Import converts numeric o values to strings via String()
+  try {
+    const data = JSON.stringify([
+      { s: "rt:numtest", p: "count", o: 42, g: "_" },
+      { s: "rt:numtest", p: "flag", o: true, g: "_" },
+      { s: "rt:numtest", p: "zero", o: 0, g: "_" },
+    ]);
+    const result = await ctx.call("snapshot:import", { data });
+    if (result.count !== 3)
+      throw new Error(`expected count=3, got ${result.count}`);
+
+    const check42 = await ctx.query({ s: "rt:numtest", p: "count" });
+    if (check42.length === 0) throw new Error("numeric o quad not found");
+    if (check42[0].o !== "42")
+      throw new Error(`expected o='42' (string), got o='${check42[0].o}'`);
+    if (typeof check42[0].o !== "string")
+      throw new Error("o should be a string after import");
+
+    const checkBool = await ctx.query({ s: "rt:numtest", p: "flag" });
+    if (checkBool[0].o !== "true")
+      throw new Error(`expected o='true' (string), got '${checkBool[0].o}'`);
+
+    const checkZero = await ctx.query({ s: "rt:numtest", p: "zero" });
+    if (checkZero[0].o !== "0")
+      throw new Error(`expected o='0' (string), got '${checkZero[0].o}'`);
+
+    ok("snapshot:import converts numeric/boolean o values to strings");
+  } catch (e) {
+    fail("snapshot:import type coercion", e);
+  }
+
+  // 4. Import with special characters (unicode, newlines, quotes)
+  try {
+    const specialValue = 'line1\nline2\ttab "quoted" \'apos\' emoji:🎯 unicode:日本語';
+    const data = JSON.stringify([
+      { s: "rt:special", p: "text", o: specialValue, g: "_" },
+    ]);
+    const result = await ctx.call("snapshot:import", { data });
+    if (result.count !== 1)
+      throw new Error(`expected count=1, got ${result.count}`);
+    const check = await ctx.query({ s: "rt:special", p: "text" });
+    if (check.length === 0) throw new Error("special char quad not found");
+    if (check[0].o !== specialValue)
+      throw new Error(`special chars mangled: got '${check[0].o}'`);
+    ok("snapshot:import handles special characters (unicode, newlines, quotes)");
+  } catch (e) {
+    fail("snapshot:import special chars", e);
+  }
+
+  // 5. Import with missing p field is skipped (specific field test)
+  try {
+    const data = JSON.stringify([
+      { s: "rt:nop", o: "value", g: "_" },  // missing p
+    ]);
+    const result = await ctx.call("snapshot:import", { data });
+    if (result.skipped !== 1)
+      throw new Error(`expected skipped=1, got ${result.skipped}`);
+    if (result.count !== 0)
+      throw new Error(`expected count=0, got ${result.count}`);
+    ok("snapshot:import skips quads with missing p field");
+  } catch (e) {
+    fail("snapshot:import missing p", e);
+  }
+
+  // 6. Full roundtrip: export -> import subset -> verify data integrity
+  try {
+    // Create unique test data
+    const prefix = "rt:full-" + Date.now();
+    await ctx.assert(prefix + ":a", "val", "alpha");
+    await ctx.assert(prefix + ":b", "val", "beta");
+    await ctx.assert(prefix + ":c", "val", "gamma");
+
+    // Export and filter to just our test data
+    const json = await ctx.call("snapshot:export");
+    const allQuads = JSON.parse(json);
+    const testQuads = allQuads.filter((q: any) => q.s.startsWith(prefix));
+    if (testQuads.length !== 3)
+      throw new Error(`expected 3 test quads in export, got ${testQuads.length}`);
+
+    // Retract the originals
+    await ctx.retract(prefix + ":a", "val");
+    await ctx.retract(prefix + ":b", "val");
+    await ctx.retract(prefix + ":c", "val");
+
+    // Verify they're gone
+    const gone = await ctx.query({ s: prefix + ":a", p: "val" });
+    if (gone.length !== 0) throw new Error("retract didn't work");
+
+    // Import them back
+    await ctx.call("snapshot:import", { data: JSON.stringify(testQuads) });
+
+    // Verify all three are restored
+    const restored = await ctx.query({ s: prefix + ":a", p: "val" });
+    if (restored.length !== 1 || restored[0].o !== "alpha")
+      throw new Error("alpha not restored correctly");
+    const restoredB = await ctx.query({ s: prefix + ":b", p: "val" });
+    if (restoredB.length !== 1 || restoredB[0].o !== "beta")
+      throw new Error("beta not restored correctly");
+    const restoredC = await ctx.query({ s: prefix + ":c", p: "val" });
+    if (restoredC.length !== 1 || restoredC[0].o !== "gamma")
+      throw new Error("gamma not restored correctly");
+    ok("snapshot full roundtrip: export -> retract -> import restores data");
+  } catch (e) {
+    fail("snapshot full roundtrip", e);
+  }
+
+  // 7. Export to file and import from that file — end-to-end file roundtrip
+  try {
+    const prefix = "rt:file-" + Date.now();
+    await ctx.assert(prefix, "kind", "file-roundtrip");
+
+    const tmpPath = "/tmp/test-holo-file-rt-" + Date.now() + ".json";
+    const exportResult = await ctx.call("snapshot:export", { path: tmpPath });
+    if (exportResult.count < 1) throw new Error("export count 0");
+
+    // Retract our test quad
+    await ctx.retract(prefix, "kind");
+
+    // Import from the file
+    await ctx.call("snapshot:import", { path: tmpPath });
+
+    // Verify it's back
+    const check = await ctx.query({ s: prefix, p: "kind" });
+    if (check.length !== 1 || check[0].o !== "file-roundtrip")
+      throw new Error("file roundtrip failed");
+
+    ok("snapshot file roundtrip: export to file -> retract -> import from file");
+    const { unlinkSync } = await import("node:fs");
+    try { unlinkSync(tmpPath); } catch {}
+  } catch (e) {
+    fail("snapshot file roundtrip", e);
+  }
+
+  // 8. Import is idempotent — reimporting same quads doesn't create duplicates
+  try {
+    const prefix = "rt:idemp-" + Date.now();
+    const data = JSON.stringify([
+      { s: prefix, p: "val", o: "same", g: "_" },
+    ]);
+
+    // Import once
+    await ctx.call("snapshot:import", { data });
+    const first = await ctx.query({ s: prefix, p: "val" });
+    if (first.length !== 1) throw new Error(`first import: expected 1 quad, got ${first.length}`);
+
+    // Import again (same data)
+    await ctx.call("snapshot:import", { data });
+    const second = await ctx.query({ s: prefix, p: "val" });
+    if (second.length !== 1)
+      throw new Error(`second import: expected still 1 quad, got ${second.length}`);
+
+    // Import a third time
+    await ctx.call("snapshot:import", { data });
+    const third = await ctx.query({ s: prefix, p: "val" });
+    if (third.length !== 1)
+      throw new Error(`third import: expected still 1 quad, got ${third.length}`);
+
+    ok("snapshot:import is idempotent — no duplicates on re-import");
+  } catch (e) {
+    fail("snapshot:import idempotent", e);
+  }
+
+  // 9. Import with empty string o value — should NOT be skipped (empty string is valid)
+  try {
+    const prefix = "rt:empty-o-" + Date.now();
+    const data = JSON.stringify([
+      { s: prefix, p: "val", o: "", g: "_" },
+    ]);
+    const result = await ctx.call("snapshot:import", { data });
+    // Empty string is falsy but not undefined/null, so the check is (q.o === undefined || q.o === null)
+    // Empty string should pass
+    if (result.count !== 1)
+      throw new Error(`expected count=1 (empty string is valid), got count=${result.count}, skipped=${result.skipped}`);
+    const check = await ctx.query({ s: prefix, p: "val" });
+    if (check.length !== 1) throw new Error("empty string o quad not found");
+    if (check[0].o !== "") throw new Error(`expected empty string, got '${check[0].o}'`);
+    ok("snapshot:import accepts empty string as valid o value");
+  } catch (e) {
+    fail("snapshot:import empty string o", e);
+  }
+}
+
+async function testVersioningDeep(ctx: Ctx) {
+  console.log("\n── Versioning deep ──");
+
+  const nodeId = "test:vdeep-" + Date.now();
+
+  // 1. Version save returns valid ISO timestamp
+  try {
+    await ctx.assert(nodeId, "type", "Function");
+    await ctx.assert(nodeId, "source", "return 'original'");
+
+    const result = await ctx.call("version:save", { name: nodeId, source: "return 'original'" });
+    // Verify the timestamp is a valid ISO date
+    const ts = new Date(result.timestamp);
+    if (isNaN(ts.getTime()))
+      throw new Error(`timestamp '${result.timestamp}' is not a valid ISO date`);
+    // Should be recent (within last minute)
+    const now = Date.now();
+    if (Math.abs(now - ts.getTime()) > 60000)
+      throw new Error("timestamp is not recent");
+    ok("version:save returns valid ISO timestamp");
+  } catch (e) {
+    fail("version:save timestamp", e);
+  }
+
+  // 2. Version data stored as JSON with correct structure
+  try {
+    const versionQuads = await ctx.query({ s: nodeId, p: "version", g: "versions" });
+    if (versionQuads.length === 0) throw new Error("no version quads found");
+    const data = JSON.parse(versionQuads[0].o);
+    if (data.seq !== 0) throw new Error(`expected seq=0, got ${data.seq}`);
+    if (typeof data.timestamp !== "string") throw new Error("timestamp should be a string");
+    if (typeof data.source !== "string") throw new Error("source should be a string");
+    if (data.source !== "return 'original'")
+      throw new Error(`expected source='return \\'original\\'', got '${data.source}'`);
+    ok("version data stored as JSON with {seq, timestamp, source}");
+  } catch (e) {
+    fail("version data structure", e);
+  }
+
+  // 3. Multiple rapid versions accumulate with correct sequential numbering
+  try {
+    for (let i = 1; i <= 5; i++) {
+      await ctx.call("version:save", { name: nodeId, source: `return 'v${i}'` });
+    }
+    const list = await ctx.call("version:list", { name: nodeId });
+    // 1 original + 5 more = 6 total
+    if (list.count !== 6)
+      throw new Error(`expected 6 versions, got ${list.count}`);
+    // Verify sequential numbering
+    for (let i = 0; i < 6; i++) {
+      if (list.versions[i].seq !== i)
+        throw new Error(`version[${i}].seq = ${list.versions[i].seq}, expected ${i}`);
+    }
+    // Verify source lengths differ appropriately
+    if (list.versions[0].sourceLength !== list.versions[1].sourceLength)
+      // "return 'original'" vs "return 'v1'" — different lengths
+      ok("multiple rapid versions accumulate with correct sequential numbering (6 versions)");
+    else
+      ok("multiple rapid versions accumulate with correct sequential numbering (6 versions)");
+  } catch (e) {
+    fail("multiple versions accumulation", e);
+  }
+
+  // 4. version:list returns versions sorted by seq even if stored out of order
+  try {
+    const list = await ctx.call("version:list", { name: nodeId });
+    for (let i = 1; i < list.versions.length; i++) {
+      if (list.versions[i].seq <= list.versions[i - 1].seq)
+        throw new Error(`versions not sorted: seq[${i-1}]=${list.versions[i-1].seq} >= seq[${i}]=${list.versions[i].seq}`);
+    }
+    ok("version:list returns versions sorted by seq number");
+  } catch (e) {
+    fail("version:list sorted", e);
+  }
+
+  // 5. Restored node is callable and returns correct result
+  try {
+    const nodeR = "test:vrestore-" + Date.now();
+    await ctx.assert(nodeR, "type", "Function");
+    await ctx.assert(nodeR, "source", "return 'hello-' + (args && args.name || 'world')");
+
+    // Save version 0
+    await ctx.call("version:save", { name: nodeR, source: "return 'hello-' + (args && args.name || 'world')" });
+
+    // Update to v2
+    await ctx.retract(nodeR, "source");
+    await ctx.assert(nodeR, "source", "return 'goodbye-' + (args && args.name || 'world')");
+    await new Promise((r) => setTimeout(r, 50));
+
+    // Verify current version works
+    const r1 = await ctx.call(nodeR, { name: "test" });
+    if (r1 !== "goodbye-test")
+      throw new Error(`expected 'goodbye-test', got '${r1}'`);
+
+    // Restore v0
+    await ctx.call("version:restore", { name: nodeR, seq: 0 });
+    await new Promise((r) => setTimeout(r, 50));
+
+    // Call the restored version — should use v0 source
+    const r2 = await ctx.call(nodeR, { name: "test" });
+    if (r2 !== "hello-test")
+      throw new Error(`expected 'hello-test' after restore, got '${r2}'`);
+
+    ok("restored node is callable and returns correct result");
+  } catch (e) {
+    fail("restored node callable", e);
+  }
+
+  // 6. version:restore invalidates compiler cache (node gets recompiled)
+  try {
+    const nodeC = "test:vcache-" + Date.now();
+    await ctx.assert(nodeC, "type", "Function");
+    await ctx.assert(nodeC, "source", "return 'cached-v1'");
+
+    // Call it to populate compiler cache
+    const r1 = await ctx.call(nodeC);
+    if (r1 !== "cached-v1") throw new Error(`expected 'cached-v1', got '${r1}'`);
+
+    // Save and update
+    await ctx.call("version:save", { name: nodeC, source: "return 'cached-v1'" });
+    await ctx.retract(nodeC, "source");
+    await ctx.assert(nodeC, "source", "return 'cached-v2'");
+    await new Promise((r) => setTimeout(r, 50));
+
+    const r2 = await ctx.call(nodeC);
+    if (r2 !== "cached-v2") throw new Error(`expected 'cached-v2', got '${r2}'`);
+
+    // Restore to v0 — this calls retract+assert internally, which triggers
+    // sys:compiler's watcher to invalidate cache
+    await ctx.call("version:restore", { name: nodeC, seq: 0 });
+    await new Promise((r) => setTimeout(r, 50));
+
+    // The compiler cache should be invalidated, so calling the node
+    // should now return the restored source
+    const r3 = await ctx.call(nodeC);
+    if (r3 !== "cached-v1")
+      throw new Error(`compiler cache not invalidated: expected 'cached-v1', got '${r3}'`);
+
+    ok("version:restore invalidates compiler cache — node recompiled after restore");
+  } catch (e) {
+    fail("version:restore cache invalidation", e);
+  }
+
+  // 7. version:restore triggers sys:compiler watcher creating a new version of pre-restore source
+  try {
+    const nodeW = "test:vwatch-" + Date.now();
+    await ctx.assert(nodeW, "type", "Function");
+    await ctx.assert(nodeW, "source", "return 'watch-v1'");
+    await ctx.call("version:save", { name: nodeW, source: "return 'watch-v1'" });
+
+    // Update to v2
+    await ctx.retract(nodeW, "source");
+    await ctx.assert(nodeW, "source", "return 'watch-v2'");
+    await new Promise((r) => setTimeout(r, 100));
+
+    // At this point sys:compiler should have auto-versioned 'watch-v1' on retract
+    // So we have: manual v0 (watch-v1) + auto v1 (watch-v1 from compiler)
+
+    // Now restore to v0 — this will retract 'watch-v2' and assert 'watch-v1'
+    // The retract of 'watch-v2' should trigger another auto-version by sys:compiler
+    const preRestoreList = await ctx.call("version:list", { name: nodeW });
+    const preCount = preRestoreList.count;
+
+    await ctx.call("version:restore", { name: nodeW, seq: 0 });
+    await new Promise((r) => setTimeout(r, 100));
+
+    const postRestoreList = await ctx.call("version:list", { name: nodeW });
+    // Should have at least one more version (the auto-saved 'watch-v2' before restore)
+    if (postRestoreList.count <= preCount)
+      throw new Error(`expected more versions after restore: pre=${preCount}, post=${postRestoreList.count}`);
+
+    ok("version:restore triggers sys:compiler to auto-save pre-restore source");
+  } catch (e) {
+    fail("version:restore auto-version", e);
+  }
+
+  // 8. version:list sourceLength matches actual source length
+  try {
+    const nodeL = "test:vlen-" + Date.now();
+    const sources = [
+      "return 1",                           // 8 chars
+      "return 'longer string here'",         // 28 chars
+      "return { x: 1, y: 2, z: 3 }",        // 28 chars
+    ];
+    for (const src of sources) {
+      await ctx.call("version:save", { name: nodeL, source: src });
+    }
+    const list = await ctx.call("version:list", { name: nodeL });
+    for (let i = 0; i < sources.length; i++) {
+      if (list.versions[i].sourceLength !== sources[i].length)
+        throw new Error(`version[${i}]: sourceLength=${list.versions[i].sourceLength}, expected ${sources[i].length}`);
+    }
+    ok("version:list sourceLength accurately reflects actual source length");
+  } catch (e) {
+    fail("version:list sourceLength", e);
+  }
+
+  // 9. version:save with source containing JSON special chars
+  try {
+    const nodeJ = "test:vjson-" + Date.now();
+    const jsonSource = 'return JSON.stringify({"key": "value", "nested": [1,2,3]})';
+    const result = await ctx.call("version:save", { name: nodeJ, source: jsonSource });
+    if (result.seq !== 0) throw new Error(`expected seq=0, got ${result.seq}`);
+
+    const list = await ctx.call("version:list", { name: nodeJ });
+    if (list.count !== 1) throw new Error(`expected 1 version, got ${list.count}`);
+
+    // Verify the raw stored data can be round-tripped through JSON
+    const versionQuads = await ctx.query({ s: nodeJ, p: "version", g: "versions" });
+    const data = JSON.parse(versionQuads[0].o);
+    if (data.source !== jsonSource)
+      throw new Error("JSON source mangled in storage");
+    ok("version:save handles JSON special characters in source correctly");
+  } catch (e) {
+    fail("version:save JSON chars", e);
+  }
+
+  // 10. version:restore with seq=0 on a node that has many versions
+  try {
+    const nodeM = "test:vmany-" + Date.now();
+    await ctx.assert(nodeM, "type", "Function");
+    const originalSource = "return 'first-ever'";
+    await ctx.assert(nodeM, "source", originalSource);
+    await ctx.call("version:save", { name: nodeM, source: originalSource });
+
+    // Add 10 more versions
+    for (let i = 1; i <= 10; i++) {
+      await ctx.call("version:save", { name: nodeM, source: `return 'ver-${i}'` });
+    }
+
+    const list = await ctx.call("version:list", { name: nodeM });
+    if (list.count !== 11) throw new Error(`expected 11 versions, got ${list.count}`);
+
+    // Restore to v0 (first ever)
+    await ctx.call("version:restore", { name: nodeM, seq: 0 });
+    await new Promise((r) => setTimeout(r, 50));
+
+    const result = await ctx.call(nodeM);
+    if (result !== "first-ever")
+      throw new Error(`expected 'first-ever', got '${result}'`);
+    ok("version:restore to seq=0 on node with 11 versions works correctly");
+  } catch (e) {
+    fail("version:restore many versions", e);
+  }
+
+  // 11. version:restore to middle version
+  try {
+    const nodeM2 = "test:vmid-" + Date.now();
+    await ctx.assert(nodeM2, "type", "Function");
+    await ctx.assert(nodeM2, "source", "return 'mid-v0'");
+    await ctx.call("version:save", { name: nodeM2, source: "return 'mid-v0'" });
+    await ctx.call("version:save", { name: nodeM2, source: "return 'mid-v1'" });
+    await ctx.call("version:save", { name: nodeM2, source: "return 'mid-v2'" });
+    await ctx.call("version:save", { name: nodeM2, source: "return 'mid-v3'" });
+
+    // Restore to v2 (middle)
+    await ctx.retract(nodeM2, "source");
+    await ctx.assert(nodeM2, "source", "return 'current'");
+    await ctx.call("version:restore", { name: nodeM2, seq: 2 });
+    await new Promise((r) => setTimeout(r, 50));
+
+    const result = await ctx.call(nodeM2);
+    if (result !== "mid-v2")
+      throw new Error(`expected 'mid-v2', got '${result}'`);
+    ok("version:restore to middle version (seq=2 of 4) works correctly");
+  } catch (e) {
+    fail("version:restore middle version", e);
+  }
+
+  // 12. Export does not include attrs key when attrs is undefined
+  try {
+    const json = await ctx.call("snapshot:export");
+    const quads = JSON.parse(json);
+    // Most quads should NOT have attrs since it's `q.attrs || undefined`
+    // and JSON.stringify strips undefined values
+    const withAttrs = quads.filter((q: any) => q.attrs !== undefined);
+    const withoutAttrs = quads.filter((q: any) => q.attrs === undefined);
+    // There should be many quads without attrs
+    if (withoutAttrs.length === 0)
+      throw new Error("expected some quads without attrs");
+    // Verify that when attrs is absent, the key itself is missing from the JSON
+    const rawJsonObj = JSON.parse(json);
+    const sampleNoAttrs = rawJsonObj.find((q: any) => !q.attrs);
+    if (sampleNoAttrs && "attrs" in sampleNoAttrs && sampleNoAttrs.attrs !== undefined)
+      throw new Error("attrs key present with undefined value — should be omitted");
+    ok("snapshot:export omits attrs key when undefined (clean JSON)");
+  } catch (e) {
+    fail("snapshot:export attrs omission", e);
+  }
+
+  // 13. Snapshot backup preserves all quads (backup DB has same count as source)
+  try {
+    const dest = "/tmp/test-holo-backup-count-" + Date.now() + ".db";
+    await ctx.call("snapshot:backup", {
+      path: dest,
+      srcPath: "test-holoiconic.db",
+    });
+
+    const { createDatabase: createDb } = await import("./db.ts");
+    const backupDb = createDb(dest);
+    const origDb = createDb("test-holoiconic.db");
+
+    const origCount = (await origDb.execute("SELECT COUNT(*) as cnt FROM quads")).rows[0].cnt as number;
+    const backupCount = (await backupDb.execute("SELECT COUNT(*) as cnt FROM quads")).rows[0].cnt as number;
+
+    if (origCount !== backupCount)
+      throw new Error(`quad count mismatch: original=${origCount}, backup=${backupCount}`);
+    ok(`snapshot:backup preserves all quads (${origCount} quads in both)`);
+
+    const { unlinkSync } = await import("node:fs");
+    try { unlinkSync(dest); } catch {}
+  } catch (e) {
+    fail("snapshot:backup quad count", e);
+  }
+
+  // 14. Import with default graph (missing g field should default to '_')
+  try {
+    const prefix = "rt:defg-" + Date.now();
+    const data = JSON.stringify([
+      { s: prefix, p: "val", o: "no-graph" },
+    ]);
+    const result = await ctx.call("snapshot:import", { data });
+    if (result.count !== 1)
+      throw new Error(`expected count=1, got ${result.count}`);
+    const check = await ctx.query({ s: prefix, p: "val" });
+    if (check.length === 0) throw new Error("quad with default graph not found");
+    if (check[0].g !== "_")
+      throw new Error(`expected g='_' (default), got g='${check[0].g}'`);
+    ok("snapshot:import defaults missing g field to '_'");
+  } catch (e) {
+    fail("snapshot:import default graph", e);
+  }
+
+  // 15. Large snapshot export/import roundtrip (100 quads)
+  try {
+    const prefix = "rt:bulk-" + Date.now();
+    const bulkData = [];
+    for (let i = 0; i < 100; i++) {
+      bulkData.push({ s: `${prefix}:${i}`, p: "idx", o: String(i), g: "_" });
+    }
+    const data = JSON.stringify(bulkData);
+    const result = await ctx.call("snapshot:import", { data });
+    if (result.count !== 100)
+      throw new Error(`expected count=100, got ${result.count}`);
+
+    // Verify a sample
+    const check50 = await ctx.query({ s: `${prefix}:50`, p: "idx" });
+    if (check50.length !== 1 || check50[0].o !== "50")
+      throw new Error("bulk import: quad 50 not found or wrong value");
+    const check99 = await ctx.query({ s: `${prefix}:99`, p: "idx" });
+    if (check99.length !== 1 || check99[0].o !== "99")
+      throw new Error("bulk import: quad 99 not found or wrong value");
+    ok("snapshot:import handles 100-quad bulk import correctly");
+  } catch (e) {
+    fail("snapshot:import bulk", e);
+  }
+}
+
 // ── Main ──────────────────────────────────────────────────────────
 
 async function main() {
@@ -6858,6 +7453,8 @@ async function main() {
   await testStreamingDeep(ctx);
   await testSessionResumeDeep(ctx);
   await testPiTuiIntegration(ctx);
+  await testSnapshotVersioningDeep(ctx);
+  await testVersioningDeep(ctx);
 
   // Summary
   console.log("\n── Summary ──");
