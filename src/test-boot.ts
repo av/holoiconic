@@ -213,6 +213,76 @@ async function testSessionContinuity(ctx: Ctx) {
   }
 }
 
+async function testSessionResume(ctx: Ctx) {
+  console.log("\n── Session resume ──");
+
+  try {
+    // 1. Create a session with some messages
+    const sessionId = "test:resume:" + Date.now();
+
+    const result1 = await ctx.call("agent:loop", {
+      prompt: "resume test message one",
+      session: sessionId,
+    });
+    if (result1.session !== sessionId)
+      throw new Error(`expected session='${sessionId}', got '${result1.session}'`);
+
+    const result2 = await ctx.call("agent:loop", {
+      prompt: "resume test message two",
+      session: sessionId,
+    });
+    if (result2.session !== sessionId)
+      throw new Error(`expected same session, got '${result2.session}'`);
+
+    // Verify messages exist in the session
+    const msgs = await ctx.query({ p: "message", g: sessionId });
+    if (msgs.length < 4)
+      throw new Error(`expected >=4 messages in session, got ${msgs.length}`);
+    ok("session resume: created session with messages");
+
+    // 2. Verify the .resume command exists in the repl source
+    const replSource = await ctx.query({ s: "repl", p: "source" });
+    if (replSource.length === 0)
+      throw new Error("repl node source not found");
+    if (!replSource[0].o.includes(".resume"))
+      throw new Error("repl source does not contain .resume command");
+    ok("session resume: .resume command exists in repl source");
+
+    // 3. Verify session can be found via .sessions query pattern
+    const allMsgQuads = await ctx.query({ p: "message" });
+    const sessions = new Set<string>();
+    for (const q of allMsgQuads) sessions.add(q.g);
+    if (!sessions.has(sessionId))
+      throw new Error(`session ${sessionId} not found in sessions list`);
+    ok("session resume: session appears in sessions list");
+
+    // 4. Verify that loading messages from a session works (the core of .resume)
+    const loadedMsgs = await ctx.query({ p: "message", g: sessionId });
+    if (loadedMsgs.length < 4)
+      throw new Error(`expected >=4 messages when loading session, got ${loadedMsgs.length}`);
+
+    // Verify messages can be parsed
+    const parsed = loadedMsgs
+      .sort((a: any, b: any) => a.id - b.id)
+      .map((q: any) => {
+        const w = JSON.parse(q.o);
+        return w.msg || w;
+      });
+    if (parsed[0].role !== "user")
+      throw new Error(`first message should be user, got: ${parsed[0].role}`);
+    ok("session resume: session messages are loadable and parseable");
+
+    // 5. Verify that a different session ID yields different messages
+    const otherSession = "test:resume:other:" + Date.now();
+    const otherMsgs = await ctx.query({ p: "message", g: otherSession });
+    if (otherMsgs.length !== 0)
+      throw new Error(`expected 0 messages in non-existent session, got ${otherMsgs.length}`);
+    ok("session resume: non-existent session returns no messages");
+  } catch (e) {
+    fail("session resume", e);
+  }
+}
+
 async function testReactiveCompilation(ctx: Ctx) {
   console.log("\n── Reactive compilation ──");
 
@@ -6077,6 +6147,7 @@ async function main() {
   await testCronEdgeCases(ctx);
   await testCtxSelfEdgeCases(ctx);
   await testQueryEdgeCases(ctx);
+  await testSessionResume(ctx);
   await testToolDispatchCompleteness(ctx);
   await testErrorMessageQuality(ctx);
   await testHttpStatusCodeAudit(ctx);

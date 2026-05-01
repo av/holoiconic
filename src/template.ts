@@ -2173,7 +2173,7 @@ const signal = args && args.signal;
 const readline = await import('node:readline');
 
 // Create a persistent session ID for this REPL instance
-const sessionId = 'repl:' + Date.now();
+let sessionId = 'repl:' + Date.now();
 console.log('[repl] session: ' + sessionId);
 
 const rl = readline.createInterface({
@@ -2322,6 +2322,19 @@ for await (const line of rl) {
         for (const s of sessions) console.log(' ', s);
       }
 
+    } else if (trimmed.startsWith('.resume ')) {
+      const target = trimmed.slice(8).trim();
+      if (!target) { console.log('usage: .resume <sessionId>'); }
+      else {
+        const msgQuads = await ctx.query({ p: 'message', g: target });
+        if (msgQuads.length === 0) {
+          console.log('no messages found in session: ' + target);
+        } else {
+          sessionId = target;
+          console.log('resumed session: ' + sessionId + ' (' + msgQuads.length + ' messages)');
+        }
+      }
+
     } else if (trimmed.startsWith('.export')) {
       const path = trimmed.slice(7).trim() || undefined;
       const result = await ctx.call('snapshot:export', path ? { path } : {});
@@ -2435,6 +2448,7 @@ for await (const line of rl) {
       console.log('  .create <name>                — create a new node interactively');
       console.log('  .spawn <name>                 — spawn a node');
       console.log('  .sessions                     — list sessions');
+      console.log('  .resume <sessionId>           — resume a previous session');
       console.log('  .export [path]                — export snapshot');
       console.log('  .import <path>                — import snapshot');
       console.log('  .deps <name>                  — show node dependencies');
