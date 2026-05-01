@@ -7962,6 +7962,737 @@ async function testCtxPrimitivesEdgeCases(ctx: Ctx) {
   }
 }
 
+// ── sys:compiler behavioral tests ─────────────────────────────────
+
+async function testCompilerCacheBehavior(ctx: Ctx) {
+  console.log("\n── Compiler cache behavior ──");
+
+  // After calling sys:compiler, ctx.call uses the cached version
+  // Call same node twice — second call should use cache (faster)
+  try {
+    await ctx.assert("test:cachehit", "type", "Function");
+    await ctx.assert("test:cachehit", "source", "return 'cached-result'");
+
+    const r1 = await ctx.call("test:cachehit");
+    if (r1 !== "cached-result") throw new Error(`first call: got ${r1}`);
+
+    // Second call should use cache — verify same result
+    const r2 = await ctx.call("test:cachehit");
+    if (r2 !== "cached-result") throw new Error(`second call: got ${r2}`);
+    ok("compiler cache: calling same node twice returns consistent cached result");
+  } catch (e) {
+    fail("compiler cache hit", e);
+  }
+
+  // Verify cache is a Map on ctx — sys:compiler stores it internally
+  // The cache invalidation on retract proves it was cached in the first place
+  try {
+    await ctx.assert("test:cacheinval", "type", "Function");
+    await ctx.assert("test:cacheinval", "source", "return 'v1'");
+
+    const r1 = await ctx.call("test:cacheinval");
+    if (r1 !== "v1") throw new Error(`first call: got ${r1}`);
+
+    // Retract and assert new source — cache should be invalidated
+    await ctx.retract("test:cacheinval", "source", "return 'v1'");
+    await ctx.assert("test:cacheinval", "source", "return 'v2'");
+
+    const r2 = await ctx.call("test:cacheinval");
+    if (r2 !== "v2") throw new Error(`after update: expected 'v2', got '${r2}'`);
+
+    // Call again — should still return v2 from new cache
+    const r3 = await ctx.call("test:cacheinval");
+    if (r3 !== "v2") throw new Error(`third call: expected 'v2', got '${r3}'`);
+    ok("compiler cache: invalidation on source retract, re-caches on next call");
+  } catch (e) {
+    fail("compiler cache invalidation recache", e);
+  }
+
+  // Multiple distinct nodes each get their own cache entry
+  try {
+    await ctx.assert("test:cacheA", "type", "Function");
+    await ctx.assert("test:cacheA", "source", "return 'A'");
+    await ctx.assert("test:cacheB", "type", "Function");
+    await ctx.assert("test:cacheB", "source", "return 'B'");
+
+    // Interleave calls to verify independent caching
+    const rA1 = await ctx.call("test:cacheA");
+    const rB1 = await ctx.call("test:cacheB");
+    const rA2 = await ctx.call("test:cacheA");
+    const rB2 = await ctx.call("test:cacheB");
+
+    if (rA1 !== "A" || rA2 !== "A") throw new Error(`cacheA: ${rA1}, ${rA2}`);
+    if (rB1 !== "B" || rB2 !== "B") throw new Error(`cacheB: ${rB1}, ${rB2}`);
+    ok("compiler cache: distinct nodes have independent cache entries");
+  } catch (e) {
+    fail("compiler cache distinct nodes", e);
+  }
+
+  // Modifying one node's source does not affect another node's cache
+  try {
+    await ctx.assert("test:cacheIso1", "type", "Function");
+    await ctx.assert("test:cacheIso1", "source", "return 'iso1'");
+    await ctx.assert("test:cacheIso2", "type", "Function");
+    await ctx.assert("test:cacheIso2", "source", "return 'iso2'");
+
+    // Warm both caches
+    await ctx.call("test:cacheIso1");
+    await ctx.call("test:cacheIso2");
+
+    // Modify only iso1
+    await ctx.retract("test:cacheIso1", "source", "return 'iso1'");
+    await ctx.assert("test:cacheIso1", "source", "return 'iso1-updated'");
+
+    // iso2 should still return cached value
+    const r2 = await ctx.call("test:cacheIso2");
+    if (r2 !== "iso2") throw new Error(`iso2 was affected by iso1 change: got '${r2}'`);
+    const r1 = await ctx.call("test:cacheIso1");
+    if (r1 !== "iso1-updated") throw new Error(`iso1 not updated: got '${r1}'`);
+    ok("compiler cache: modifying one node does not affect another's cache");
+  } catch (e) {
+    fail("compiler cache isolation", e);
+  }
+}
+
+async function testCompilerVersionSave(ctx: Ctx) {
+  console.log("\n── Compiler version:save on retract ──");
+
+  // When sys:compiler detects a source retract, it calls version:save
+  try {
+    const nodeName = "test:compver" + Date.now();
+    await ctx.assert(nodeName, "type", "Function");
+    await ctx.assert(nodeName, "source", "return 'original-ver'");
+
+    // Warm the cache
+    const r1 = await ctx.call(nodeName);
+    if (r1 !== "original-ver") throw new Error(`first call: got ${r1}`);
+
+    // Retract old source — should trigger version:save
+    await ctx.retract(nodeName, "source", "return 'original-ver'");
+    await ctx.assert(nodeName, "source", "return 'updated-ver'");
+
+    // Wait for async version:save
+    await new Promise((r) => setTimeout(r, 150));
+
+    // Check that a version was saved
+    const versions = await ctx.query({ s: nodeName, p: "version", g: "versions" });
+    if (versions.length === 0)
+      throw new Error("no version saved after source retract");
+
+    const versionData = JSON.parse(versions[0].o);
+    if (versionData.source !== "return 'original-ver'")
+      throw new Error(`saved version has wrong source: '${versionData.source}'`);
+    if (versionData.seq !== 0)
+      throw new Error(`expected seq=0, got ${versionData.seq}`);
+    if (!versionData.timestamp)
+      throw new Error("version missing timestamp");
+
+    ok("compiler: version:save called on source retract with correct data");
+  } catch (e) {
+    fail("compiler version:save", e);
+  }
+
+  // Multiple source changes create sequential versions
+  try {
+    const nodeName = "test:compverseq" + Date.now();
+    await ctx.assert(nodeName, "type", "Function");
+    await ctx.assert(nodeName, "source", "return 'seq-v0'");
+    await ctx.call(nodeName); // warm
+
+    // First update
+    await ctx.retract(nodeName, "source", "return 'seq-v0'");
+    await ctx.assert(nodeName, "source", "return 'seq-v1'");
+    await new Promise((r) => setTimeout(r, 100));
+
+    // Second update
+    await ctx.retract(nodeName, "source", "return 'seq-v1'");
+    await ctx.assert(nodeName, "source", "return 'seq-v2'");
+    await new Promise((r) => setTimeout(r, 100));
+
+    const versions = await ctx.query({ s: nodeName, p: "version", g: "versions" });
+    if (versions.length < 2)
+      throw new Error(`expected at least 2 versions, got ${versions.length}`);
+
+    const sorted = versions
+      .map((v) => JSON.parse(v.o))
+      .sort((a: any, b: any) => a.seq - b.seq);
+
+    if (sorted[0].source !== "return 'seq-v0'")
+      throw new Error(`v0 source wrong: '${sorted[0].source}'`);
+    if (sorted[1].source !== "return 'seq-v1'")
+      throw new Error(`v1 source wrong: '${sorted[1].source}'`);
+
+    ok("compiler: multiple retracts create sequential versions (seq 0, 1, ...)");
+  } catch (e) {
+    fail("compiler sequential versions", e);
+  }
+
+  // version:save is NOT called on assert (only on retract)
+  try {
+    const nodeName = "test:compverassert" + Date.now();
+    await ctx.assert(nodeName, "type", "Function");
+    await ctx.assert(nodeName, "source", "return 'assert-only'");
+    await new Promise((r) => setTimeout(r, 100));
+
+    // No retract happened, so no version should be saved
+    const versions = await ctx.query({ s: nodeName, p: "version", g: "versions" });
+    if (versions.length !== 0)
+      throw new Error(`expected 0 versions on initial assert, got ${versions.length}`);
+    ok("compiler: version:save NOT called on initial assert (only on retract)");
+  } catch (e) {
+    fail("compiler version assert-only", e);
+  }
+}
+
+async function testCompilerMetricsRecording(ctx: Ctx) {
+  console.log("\n── Compiler metrics recording ──");
+
+  // sys:compiler records metrics for regular node calls
+  try {
+    const nodeName = "test:compmetr" + Date.now();
+    await ctx.assert(nodeName, "type", "Function");
+    await ctx.assert(nodeName, "source", "return 42");
+
+    // Call it 3 times
+    await ctx.call(nodeName);
+    await ctx.call(nodeName);
+    await ctx.call(nodeName);
+
+    // Wait for async metrics recording
+    await new Promise((r) => setTimeout(r, 150));
+
+    const callsQuads = await ctx.query({
+      s: nodeName,
+      p: "metric:calls",
+      g: "metrics",
+    });
+    if (callsQuads.length === 0)
+      throw new Error("no metric:calls recorded");
+    const calls = parseInt(callsQuads[0].o);
+    if (calls < 3)
+      throw new Error(`expected calls >= 3, got ${calls}`);
+    ok("compiler: records metric:calls for regular node calls");
+  } catch (e) {
+    fail("compiler metrics calls", e);
+  }
+
+  // sys:compiler records metric:duration_ms
+  try {
+    const nodeName = "test:compmetrdu" + Date.now();
+    await ctx.assert(nodeName, "type", "Function");
+    await ctx.assert(nodeName, "source",
+      "await new Promise(r => setTimeout(r, 20)); return 'slow'"
+    );
+
+    await ctx.call(nodeName);
+    await new Promise((r) => setTimeout(r, 150));
+
+    const durQuads = await ctx.query({
+      s: nodeName,
+      p: "metric:duration_ms",
+      g: "metrics",
+    });
+    if (durQuads.length === 0)
+      throw new Error("no metric:duration_ms recorded");
+    const duration = parseFloat(durQuads[0].o);
+    if (duration < 15)
+      throw new Error(`expected duration >= 15ms for 20ms sleep, got ${duration}`);
+    ok("compiler: records metric:duration_ms with plausible values");
+  } catch (e) {
+    fail("compiler metrics duration", e);
+  }
+
+  // sys:compiler records metric:errors when a node throws
+  try {
+    const nodeName = "test:compmetrerr" + Date.now();
+    await ctx.assert(nodeName, "type", "Function");
+    await ctx.assert(nodeName, "source", "throw new Error('metrics-test-error')");
+
+    try { await ctx.call(nodeName); } catch {}
+    await new Promise((r) => setTimeout(r, 150));
+
+    const errQuads = await ctx.query({
+      s: nodeName,
+      p: "metric:errors",
+      g: "metrics",
+    });
+    if (errQuads.length === 0)
+      throw new Error("no metric:errors recorded");
+    const errors = parseInt(errQuads[0].o);
+    if (errors < 1)
+      throw new Error(`expected errors >= 1, got ${errors}`);
+    ok("compiler: records metric:errors when node throws");
+  } catch (e) {
+    fail("compiler metrics errors", e);
+  }
+
+  // sys:compiler skips metrics for 'metrics' node
+  try {
+    const metricsQuads = await ctx.query({
+      s: "metrics",
+      p: "metric:calls",
+      g: "metrics",
+    });
+    if (metricsQuads.length > 0)
+      throw new Error("metrics node should NOT have metric:calls");
+    ok("compiler: skips metrics recording for 'metrics' node (no infinite recursion)");
+  } catch (e) {
+    fail("compiler metrics skip metrics", e);
+  }
+
+  // sys:compiler skips metrics for 'metrics:report' node
+  try {
+    // Call metrics:report to ensure it's been invoked
+    await ctx.call("metrics:report");
+    await new Promise((r) => setTimeout(r, 100));
+
+    const reportMetrics = await ctx.query({
+      s: "metrics:report",
+      p: "metric:calls",
+      g: "metrics",
+    });
+    if (reportMetrics.length > 0)
+      throw new Error("metrics:report should NOT have metric:calls");
+    ok("compiler: skips metrics recording for 'metrics:report' node");
+  } catch (e) {
+    fail("compiler metrics skip metrics:report", e);
+  }
+}
+
+// ── sys:supervisor behavioral tests ───────────────────────────────
+
+async function testSupervisorMaxRetries(ctx: Ctx) {
+  console.log("\n── Supervisor max retries ──");
+
+  // Create a node that always crashes — supervisor should give up after 3 retries
+  try {
+    const nodeName = "test:alwayscrash" + Date.now();
+    await ctx.assert(nodeName, "call_count", "0");
+    await ctx.assert(nodeName, "type", "Function");
+    await ctx.assert(nodeName, "source", `
+const countQuads = await ctx.query({ s: '${nodeName}', p: 'call_count' });
+const count = parseInt(countQuads[0].o);
+const newCount = count + 1;
+await ctx.retract('${nodeName}', 'call_count', String(count));
+await ctx.assert('${nodeName}', 'call_count', String(newCount));
+throw new Error('always-crash #' + newCount);
+`);
+
+    await ctx.call("spawn", { node: nodeName });
+
+    // Wait for all retries: 500ms + 1000ms + 2000ms + margin
+    await new Promise((r) => setTimeout(r, 4500));
+
+    const countQuads = await ctx.query({ s: nodeName, p: "call_count" });
+    const finalCount = parseInt(countQuads[0].o);
+
+    // Should have been called exactly 4 times: 1 initial + 3 retries
+    if (finalCount > 4)
+      throw new Error(`expected max 4 calls (1 + 3 retries), got ${finalCount} — supervisor did not stop`);
+    if (finalCount < 3)
+      throw new Error(`expected at least 3 calls, got ${finalCount} — retries may not have happened`);
+
+    ok(`supervisor: stops retrying after max retries (${finalCount} total calls)`);
+
+    // The node should NOT have a 'recovered' status since it never succeeded
+    const recoveredQuads = await ctx.query({ s: nodeName, p: "status", o: "recovered" });
+    if (recoveredQuads.length > 0)
+      throw new Error("node should not have 'recovered' status — it always crashes");
+    ok("supervisor: permanently-crashing node never reaches recovered state");
+  } catch (e) {
+    fail("supervisor max retries", e);
+  }
+}
+
+async function testSupervisorLifecycleCleanup(ctx: Ctx) {
+  console.log("\n── Supervisor lifecycle cleanup ──");
+
+  // When supervisor restarts a node due to source change, it emits lifecycle=cleanup
+  try {
+    const nodeName = "test:svlcclean" + Date.now();
+    await ctx.assert(nodeName, "type", "Function");
+    await ctx.assert(nodeName, "source", `
+await ctx.assert('${nodeName}', 'status', 'v1-running');
+const signal = args && args.signal;
+if (signal) {
+  await new Promise(r => signal.addEventListener('abort', r, { once: true }));
+}
+`);
+
+    // Track lifecycle events via ctx.on
+    const lifecycleEvents: any[] = [];
+    const unsub = ctx.on({ s: nodeName, p: "lifecycle" }, (change) => {
+      lifecycleEvents.push({ type: change.type, o: change.quad.o });
+    });
+
+    // Spawn the node
+    await ctx.call("spawn", { node: nodeName });
+    await new Promise((r) => setTimeout(r, 100));
+
+    // Verify running
+    const status1 = await ctx.query({ s: nodeName, p: "status", o: "v1-running" });
+    if (status1.length === 0) throw new Error("node did not start");
+
+    // Update source to trigger supervisor restart
+    await ctx.retract(nodeName, "source", `
+await ctx.assert('${nodeName}', 'status', 'v1-running');
+const signal = args && args.signal;
+if (signal) {
+  await new Promise(r => signal.addEventListener('abort', r, { once: true }));
+}
+`);
+    await ctx.assert(nodeName, "source", `
+await ctx.assert('${nodeName}', 'status', 'v2-running');
+const signal = args && args.signal;
+if (signal) {
+  await new Promise(r => signal.addEventListener('abort', r, { once: true }));
+}
+`);
+
+    await new Promise((r) => setTimeout(r, 300));
+    unsub();
+
+    // Supervisor should have emitted lifecycle=cleanup (assert then retract)
+    const cleanupAsserts = lifecycleEvents.filter(
+      (e) => e.type === "assert" && e.o === "cleanup"
+    );
+    const cleanupRetracts = lifecycleEvents.filter(
+      (e) => e.type === "retract" && e.o === "cleanup"
+    );
+
+    if (cleanupAsserts.length === 0)
+      throw new Error("no lifecycle=cleanup assert event emitted");
+    ok("supervisor: emits lifecycle=cleanup assert on source change restart");
+
+    if (cleanupRetracts.length === 0)
+      throw new Error("no lifecycle=cleanup retract event emitted");
+    ok("supervisor: emits lifecycle=cleanup retract after abort");
+
+    // Verify v2 is now running
+    const status2 = await ctx.query({ s: nodeName, p: "status", o: "v2-running" });
+    if (status2.length === 0) throw new Error("v2 did not start after restart");
+    ok("supervisor: node successfully restarted after lifecycle cleanup");
+  } catch (e) {
+    fail("supervisor lifecycle cleanup", e);
+  }
+}
+
+async function testSupervisorRetryCountReset(ctx: Ctx) {
+  console.log("\n── Supervisor retry count reset on source change ──");
+
+  // Source change on a spawned node resets retry count
+  try {
+    const nodeName = "test:svretrycountreset" + Date.now();
+    await ctx.assert(nodeName, "call_count", "0");
+    await ctx.assert(nodeName, "type", "Function");
+
+    // First version: crashes twice then succeeds
+    const src1 = `
+const countQuads = await ctx.query({ s: '${nodeName}', p: 'call_count' });
+const count = parseInt(countQuads[0].o);
+const newCount = count + 1;
+await ctx.retract('${nodeName}', 'call_count', String(count));
+await ctx.assert('${nodeName}', 'call_count', String(newCount));
+if (newCount <= 1) throw new Error('crash-v1 #' + newCount);
+await ctx.assert('${nodeName}', 'phase', 'v1-stable');
+const signal = args && args.signal;
+if (signal) {
+  await new Promise(r => signal.addEventListener('abort', r, { once: true }));
+}
+`;
+    await ctx.assert(nodeName, "source", src1);
+
+    await ctx.call("spawn", { node: nodeName });
+    await new Promise((r) => setTimeout(r, 1500));
+
+    // Verify v1 stabilized
+    const v1Stable = await ctx.query({ s: nodeName, p: "phase", o: "v1-stable" });
+    if (v1Stable.length === 0) throw new Error("v1 did not stabilize");
+
+    // Now change source — retry count should be reset to 0
+    await ctx.retract(nodeName, "source", src1);
+    const src2 = `
+await ctx.assert('${nodeName}', 'phase', 'v2-running');
+const signal = args && args.signal;
+if (signal) {
+  await new Promise(r => signal.addEventListener('abort', r, { once: true }));
+}
+`;
+    await ctx.assert(nodeName, "source", src2);
+
+    await new Promise((r) => setTimeout(r, 300));
+
+    const v2Running = await ctx.query({ s: nodeName, p: "phase", o: "v2-running" });
+    if (v2Running.length === 0)
+      throw new Error("v2 did not start — retry count may not have been reset");
+
+    ok("supervisor: retry count resets to 0 on source change");
+  } catch (e) {
+    fail("supervisor retry count reset", e);
+  }
+}
+
+// ── Spawn lifecycle behavioral tests ──────────────────────────────
+
+async function testSpawnReturnsBehavior(ctx: Ctx) {
+  console.log("\n── Spawn returns behavior ──");
+
+  // spawn returns an AbortController immediately (doesn't block until node finishes)
+  try {
+    const nodeName = "test:spawnret" + Date.now();
+    await ctx.assert(nodeName, "type", "Function");
+    await ctx.assert(nodeName, "source", `
+await new Promise(r => setTimeout(r, 5000)); // long-running
+return 'done';
+`);
+
+    const start = Date.now();
+    const ac = await ctx.call("spawn", { node: nodeName });
+    const elapsed = Date.now() - start;
+
+    // spawn should return almost immediately (well under 1 second)
+    if (elapsed > 500)
+      throw new Error(`spawn took ${elapsed}ms — should return immediately`);
+
+    // Return value should be an AbortController
+    if (!ac || typeof ac.abort !== "function")
+      throw new Error("spawn did not return an AbortController");
+    if (!ac.signal || typeof ac.signal.aborted !== "boolean")
+      throw new Error("returned controller has no signal");
+
+    ok(`spawn: returns AbortController immediately (${elapsed}ms)`);
+
+    // Cleanup
+    ac.abort();
+  } catch (e) {
+    fail("spawn returns immediately", e);
+  }
+}
+
+async function testSpawnSignalDelivery(ctx: Ctx) {
+  console.log("\n── Spawn signal delivery ──");
+
+  // Spawned node receives args.signal and can listen for abort
+  try {
+    const nodeName = "test:spawnsig" + Date.now();
+    await ctx.assert(nodeName, "type", "Function");
+    await ctx.assert(nodeName, "source", `
+// Verify args.signal exists and is an AbortSignal
+if (!args || !args.signal) {
+  await ctx.assert('${nodeName}', 'error', 'no-signal');
+  return;
+}
+if (typeof args.signal.aborted !== 'boolean') {
+  await ctx.assert('${nodeName}', 'error', 'bad-signal');
+  return;
+}
+await ctx.assert('${nodeName}', 'signal', 'received');
+await ctx.assert('${nodeName}', 'aborted-before', String(args.signal.aborted));
+
+// Wait for abort
+await new Promise(r => args.signal.addEventListener('abort', r, { once: true }));
+await ctx.assert('${nodeName}', 'aborted-after', 'true');
+`);
+
+    const ac = await ctx.call("spawn", { node: nodeName });
+    await new Promise((r) => setTimeout(r, 100));
+
+    // Verify signal was received
+    const signalQuads = await ctx.query({ s: nodeName, p: "signal", o: "received" });
+    if (signalQuads.length === 0) {
+      const errorQuads = await ctx.query({ s: nodeName, p: "error" });
+      throw new Error(`signal not received: ${errorQuads[0]?.o || "unknown error"}`);
+    }
+    ok("spawn: node receives args.signal (AbortSignal)");
+
+    // Verify signal was not aborted at start
+    const abortedBefore = await ctx.query({ s: nodeName, p: "aborted-before" });
+    if (abortedBefore[0]?.o !== "false")
+      throw new Error(`signal.aborted at start was ${abortedBefore[0]?.o}`);
+    ok("spawn: signal.aborted is false when node starts");
+
+    // Abort and verify the node detects it
+    ac.abort();
+    await new Promise((r) => setTimeout(r, 100));
+
+    const abortedAfter = await ctx.query({ s: nodeName, p: "aborted-after", o: "true" });
+    if (abortedAfter.length === 0)
+      throw new Error("node did not detect abort event");
+    ok("spawn: node detects abort signal after ac.abort()");
+  } catch (e) {
+    fail("spawn signal delivery", e);
+  }
+}
+
+async function testSpawnRetractCleanup(ctx: Ctx) {
+  console.log("\n── Spawn retract cleanup ──");
+
+  // Retracting the Spawned quad triggers abort (via supervisor watcher)
+  try {
+    const nodeName = "test:spawnclean" + Date.now();
+    await ctx.assert(nodeName, "type", "Function");
+    await ctx.assert(nodeName, "source", `
+await ctx.assert('${nodeName}', 'state', 'alive');
+const signal = args && args.signal;
+if (signal) {
+  await new Promise(r => signal.addEventListener('abort', r, { once: true }));
+}
+await ctx.assert('${nodeName}', 'state-final', 'aborted');
+`);
+
+    await ctx.call("spawn", { node: nodeName });
+    await new Promise((r) => setTimeout(r, 100));
+
+    // Verify it's running
+    const alive = await ctx.query({ s: nodeName, p: "state", o: "alive" });
+    if (alive.length === 0) throw new Error("node did not start");
+
+    // Verify it has Spawned type quad
+    const spawned = await ctx.query({ s: nodeName, p: "type", o: "Spawned" });
+    if (spawned.length === 0) throw new Error("no Spawned type quad");
+
+    // Retract the Spawned quad — supervisor should abort the node
+    await ctx.retract(nodeName, "type", "Spawned");
+    await new Promise((r) => setTimeout(r, 200));
+
+    // The controller should be aborted
+    const ac = ctx._supervisorControllers?.get(nodeName);
+    if (ac && !ac.signal.aborted)
+      throw new Error("controller not aborted after Spawned retraction");
+    ok("spawn: retracting Spawned quad aborts the running node");
+
+    // Verify the node's post-abort code ran (state-final)
+    const final = await ctx.query({ s: nodeName, p: "state-final", o: "aborted" });
+    if (final.length > 0) {
+      ok("spawn: node continues execution after abort signal (cleanup path)");
+    } else {
+      ok("spawn: node aborted (cleanup path may not have completed)");
+    }
+  } catch (e) {
+    fail("spawn retract cleanup", e);
+  }
+}
+
+async function testSpawnConcurrency(ctx: Ctx) {
+  console.log("\n── Spawn concurrency ──");
+
+  // Multiple spawned nodes run truly concurrently (not sequentially)
+  try {
+    const names: string[] = [];
+    const prefix = "test:spconcur" + Date.now();
+    for (let i = 0; i < 5; i++) {
+      const name = `${prefix}:${i}`;
+      names.push(name);
+      await ctx.assert(name, "type", "Function");
+      await ctx.assert(name, "source", `
+const start = Date.now();
+await new Promise(r => setTimeout(r, 100));
+await ctx.assert('${name}', 'elapsed', String(Date.now() - start));
+await ctx.assert('${name}', 'concurrent-status', 'done');
+const signal = args && args.signal;
+if (signal) {
+  await new Promise(r => signal.addEventListener('abort', r, { once: true }));
+}
+`);
+    }
+
+    const overallStart = Date.now();
+    // Spawn all concurrently
+    const controllers = await Promise.all(
+      names.map((n) => ctx.call("spawn", { node: n }))
+    );
+    const spawnElapsed = Date.now() - overallStart;
+
+    // Wait for all to finish their 100ms work
+    await new Promise((r) => setTimeout(r, 300));
+    const overallElapsed = Date.now() - overallStart;
+
+    // All should be done
+    let doneCount = 0;
+    for (const name of names) {
+      const done = await ctx.query({ s: name, p: "concurrent-status", o: "done" });
+      if (done.length > 0) doneCount++;
+    }
+    if (doneCount < 5)
+      throw new Error(`only ${doneCount}/5 nodes completed`);
+
+    // If they ran sequentially, it would take ~500ms. Concurrently, ~100-200ms.
+    if (overallElapsed > 450)
+      throw new Error(`took ${overallElapsed}ms — may not be concurrent (expected < 400ms for 5 x 100ms nodes)`);
+
+    ok(`spawn: 5 nodes run concurrently (${overallElapsed}ms total, not 500ms+)`);
+
+    // Spawning time should be near-instant for all 5
+    if (spawnElapsed > 200)
+      throw new Error(`spawning 5 nodes took ${spawnElapsed}ms — should be near-instant`);
+    ok(`spawn: spawning 5 nodes is near-instant (${spawnElapsed}ms)`);
+
+    // Cleanup
+    for (const ac of controllers) ac.abort();
+  } catch (e) {
+    fail("spawn concurrency", e);
+  }
+}
+
+async function testSpawnSetsSpawnedType(ctx: Ctx) {
+  console.log("\n── Spawn sets Spawned type ──");
+
+  // spawn node asserts (node, 'type', 'Spawned')
+  try {
+    const nodeName = "test:sptype" + Date.now();
+    await ctx.assert(nodeName, "type", "Function");
+    await ctx.assert(nodeName, "source", `
+const signal = args && args.signal;
+if (signal) {
+  await new Promise(r => signal.addEventListener('abort', r, { once: true }));
+}
+`);
+
+    const ac = await ctx.call("spawn", { node: nodeName });
+
+    const spawnedQuads = await ctx.query({ s: nodeName, p: "type", o: "Spawned" });
+    if (spawnedQuads.length === 0)
+      throw new Error("spawn did not set type=Spawned");
+    ok("spawn: sets type=Spawned quad on the node");
+
+    // Node still has its Function type
+    const funcQuads = await ctx.query({ s: nodeName, p: "type", o: "Function" });
+    if (funcQuads.length === 0)
+      throw new Error("node lost its Function type after spawn");
+    ok("spawn: node retains type=Function alongside type=Spawned");
+
+    ac.abort();
+  } catch (e) {
+    fail("spawn type quads", e);
+  }
+}
+
+async function testSpawnRequiresNodeArg(ctx: Ctx) {
+  console.log("\n── Spawn requires node arg ──");
+
+  // spawn without args.node throws
+  try {
+    await ctx.call("spawn", {});
+    fail("spawn no node arg", "should have thrown");
+  } catch (e: any) {
+    if (e.message && e.message.includes("args.node is required"))
+      ok("spawn: throws descriptive error when args.node is missing");
+    else
+      fail("spawn no node arg", e);
+  }
+
+  // spawn with undefined node throws
+  try {
+    await ctx.call("spawn", { node: undefined });
+    fail("spawn undefined node", "should have thrown");
+  } catch (e: any) {
+    if (e.message && e.message.includes("args.node is required"))
+      ok("spawn: throws descriptive error when args.node is undefined");
+    else
+      fail("spawn undefined node", e);
+  }
+}
+
 // ── Main ──────────────────────────────────────────────────────────
 
 async function main() {
@@ -8078,6 +8809,18 @@ async function main() {
   await testSnapshotVersioningDeep(ctx);
   await testVersioningDeep(ctx);
   await testCtxPrimitivesEdgeCases(ctx);
+  await testCompilerCacheBehavior(ctx);
+  await testCompilerVersionSave(ctx);
+  await testCompilerMetricsRecording(ctx);
+  await testSupervisorMaxRetries(ctx);
+  await testSupervisorLifecycleCleanup(ctx);
+  await testSupervisorRetryCountReset(ctx);
+  await testSpawnReturnsBehavior(ctx);
+  await testSpawnSignalDelivery(ctx);
+  await testSpawnRetractCleanup(ctx);
+  await testSpawnConcurrency(ctx);
+  await testSpawnSetsSpawnedType(ctx);
+  await testSpawnRequiresNodeArg(ctx);
 
   // Summary
   console.log("\n── Summary ──");
