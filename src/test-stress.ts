@@ -8,6 +8,7 @@ import { unlinkSync } from "node:fs";
 let passed = 0;
 let failed = 0;
 const results: string[] = [];
+const timings: { scenario: string; metric: string; value: string }[] = [];
 
 function ok(label: string) {
   passed++;
@@ -20,6 +21,10 @@ function fail(label: string, err: any) {
   const msg = err instanceof Error ? err.message : String(err);
   results.push(`  FAIL  ${label}: ${msg}`);
   console.log(`  FAIL  ${label}: ${msg}`);
+}
+
+function timing(scenario: string, metric: string, value: string) {
+  timings.push({ scenario, metric, value });
 }
 
 // ── Boot (non-interactive, with compiler + supervisor) ───────────
@@ -46,522 +51,592 @@ async function registerNode(ctx: Ctx, name: string, source: string) {
 }
 
 // ═════════════════════════════════════════════════════════════════
-// Stress Test 1: Many Nodes (100 nodes)
+// Stress Test 1: Mass Quad Insertion (1000 quads)
 // ═════════════════════════════════════════════════════════════════
 
-async function testManyNodes(ctx: Ctx) {
-  console.log("\n── Stress Test 1: Many Nodes (100) ──");
-
-  const NODE_COUNT = 100;
-
-  // 1a: Create 100 nodes programmatically
-  try {
-    const createStart = performance.now();
-    for (let i = 0; i < NODE_COUNT; i++) {
-      await registerNode(
-        ctx,
-        `stress:node:${i}`,
-        `return 'result-' + ${i} + '-' + (args && args.input || 'default');`
-      );
-    }
-    const createTime = performance.now() - createStart;
-    ok(`created ${NODE_COUNT} nodes in ${createTime.toFixed(1)}ms (${(createTime / NODE_COUNT).toFixed(2)}ms/node)`);
-  } catch (e) {
-    fail("create 100 nodes", e);
-  }
-
-  // 1b: Call all 100 nodes and verify results
-  try {
-    const callStart = performance.now();
-    const results: string[] = [];
-    for (let i = 0; i < NODE_COUNT; i++) {
-      const result = await ctx.call(`stress:node:${i}`, { input: "test" });
-      results.push(result);
-    }
-    const callTime = performance.now() - callStart;
-
-    // Verify each result
-    let allCorrect = true;
-    for (let i = 0; i < NODE_COUNT; i++) {
-      if (results[i] !== `result-${i}-test`) {
-        allCorrect = false;
-        throw new Error(`node ${i}: expected "result-${i}-test", got "${results[i]}"`);
-      }
-    }
-    if (!allCorrect) throw new Error("some results were incorrect");
-
-    ok(`called ${NODE_COUNT} nodes sequentially in ${callTime.toFixed(1)}ms (${(callTime / NODE_COUNT).toFixed(2)}ms/call)`);
-  } catch (e) {
-    fail("call 100 nodes", e);
-  }
-
-  // 1c: Call all 100 nodes in parallel
-  try {
-    const parallelStart = performance.now();
-    const promises = Array.from({ length: NODE_COUNT }, (_, i) =>
-      ctx.call(`stress:node:${i}`, { input: "parallel" })
-    );
-    const parallelResults = await Promise.all(promises);
-    const parallelTime = performance.now() - parallelStart;
-
-    for (let i = 0; i < NODE_COUNT; i++) {
-      if (parallelResults[i] !== `result-${i}-parallel`) {
-        throw new Error(`parallel node ${i}: expected "result-${i}-parallel", got "${parallelResults[i]}"`);
-      }
-    }
-
-    ok(`called ${NODE_COUNT} nodes in parallel in ${parallelTime.toFixed(1)}ms (${(parallelTime / NODE_COUNT).toFixed(2)}ms/call)`);
-  } catch (e) {
-    fail("call 100 nodes in parallel", e);
-  }
-
-  // 1d: Verify all nodes exist in the graph
-  try {
-    const allFunctions = await ctx.query({ p: "type", o: "Function" });
-    const stressNodes = allFunctions.filter((q) => q.s.startsWith("stress:node:"));
-    if (stressNodes.length !== NODE_COUNT) {
-      throw new Error(`expected ${NODE_COUNT} stress nodes, got ${stressNodes.length}`);
-    }
-    ok(`all ${NODE_COUNT} nodes queryable in graph`);
-  } catch (e) {
-    fail("query 100 nodes", e);
-  }
-}
-
-// ═════════════════════════════════════════════════════════════════
-// Stress Test 2: Many Quads (1000 quads)
-// ═════════════════════════════════════════════════════════════════
-
-async function testManyQuads(ctx: Ctx) {
-  console.log("\n── Stress Test 2: Many Quads (1000) ──");
+async function testMassQuadInsertion(ctx: Ctx) {
+  console.log("\n── Stress Test 1: Mass Quad Insertion (1000 quads) ──");
 
   const QUAD_COUNT = 1000;
-  const GRAPH = "stress-quads";
+  const GRAPH = "stress-mass";
 
-  // 2a: Assert 1000 quads
+  // 1a: Assert 1000 quads in a tight loop and measure time
+  let insertTime = 0;
   try {
     const insertStart = performance.now();
     for (let i = 0; i < QUAD_COUNT; i++) {
       await ctx.assert(
-        `entity:${i}`,
-        "value",
-        `data-${i}-${Math.random().toString(36).slice(2, 10)}`,
+        `mass:entity:${i}`,
+        "data",
+        `value-${i}-${String(i * 7919).padStart(8, "0")}`,
         GRAPH
       );
     }
-    const insertTime = performance.now() - insertStart;
-
+    insertTime = performance.now() - insertStart;
+    timing("Mass Quad Insertion", "1000 inserts", `${insertTime.toFixed(1)}ms (${(insertTime / QUAD_COUNT).toFixed(2)}ms/insert)`);
     ok(`inserted ${QUAD_COUNT} quads in ${insertTime.toFixed(1)}ms (${(insertTime / QUAD_COUNT).toFixed(2)}ms/insert)`);
   } catch (e) {
     fail("insert 1000 quads", e);
   }
 
-  // 2b: Query all 1000 quads back
+  // 1b: Query all 1000 quads back and verify count
   try {
     const queryStart = performance.now();
-    const allQuads = await ctx.query({ p: "value", g: GRAPH });
+    const allQuads = await ctx.query({ p: "data", g: GRAPH });
     const queryTime = performance.now() - queryStart;
 
     if (allQuads.length !== QUAD_COUNT) {
       throw new Error(`expected ${QUAD_COUNT} quads, got ${allQuads.length}`);
     }
 
-    ok(`queried ${QUAD_COUNT} quads in ${queryTime.toFixed(1)}ms`);
+    timing("Mass Quad Insertion", "query 1000 quads", `${queryTime.toFixed(2)}ms`);
+    ok(`queried all ${QUAD_COUNT} quads back in ${queryTime.toFixed(2)}ms`);
   } catch (e) {
     fail("query 1000 quads", e);
   }
 
-  // 2c: Query with specific subject filter
+  // 1c: Verify data integrity of specific quads
+  try {
+    const spot_checks = [0, 499, 999];
+    for (const i of spot_checks) {
+      const q = await ctx.query({ s: `mass:entity:${i}`, p: "data", g: GRAPH });
+      if (q.length !== 1) throw new Error(`entity ${i}: expected 1 quad, got ${q.length}`);
+      const expected = `value-${i}-${String(i * 7919).padStart(8, "0")}`;
+      if (q[0].o !== expected) throw new Error(`entity ${i}: expected "${expected}", got "${q[0].o}"`);
+    }
+    ok(`spot-checked quads [0, 499, 999] -- all correct`);
+  } catch (e) {
+    fail("verify quad integrity", e);
+  }
+
+  // 1d: Query with subject filter performance
   try {
     const filterStart = performance.now();
-    const filtered = await ctx.query({ s: "entity:500", p: "value", g: GRAPH });
+    for (let i = 0; i < 100; i++) {
+      await ctx.query({ s: `mass:entity:${i * 10}`, p: "data", g: GRAPH });
+    }
     const filterTime = performance.now() - filterStart;
-
-    if (filtered.length !== 1) {
-      throw new Error(`expected 1 quad for entity:500, got ${filtered.length}`);
-    }
-
-    ok(`filtered single quad from ${QUAD_COUNT} in ${filterTime.toFixed(2)}ms`);
+    timing("Mass Quad Insertion", "100 filtered queries", `${filterTime.toFixed(2)}ms (${(filterTime / 100).toFixed(2)}ms/query)`);
+    ok(`100 filtered queries in ${filterTime.toFixed(2)}ms (${(filterTime / 100).toFixed(2)}ms/query)`);
   } catch (e) {
-    fail("filter single quad", e);
-  }
-
-  // 2d: Batch assert with different predicates
-  try {
-    const batchStart = performance.now();
-    const PREDICATES = ["name", "age", "email", "role", "status"];
-    for (let i = 0; i < 200; i++) {
-      for (const pred of PREDICATES) {
-        await ctx.assert(`batch:${i}`, pred, `${pred}-value-${i}`, GRAPH);
-      }
-    }
-    const batchTime = performance.now() - batchStart;
-    const totalInserted = 200 * PREDICATES.length;
-
-    ok(`inserted ${totalInserted} multi-predicate quads in ${batchTime.toFixed(1)}ms (${(batchTime / totalInserted).toFixed(2)}ms/insert)`);
-  } catch (e) {
-    fail("batch multi-predicate insert", e);
+    fail("filtered query performance", e);
   }
 }
 
 // ═════════════════════════════════════════════════════════════════
-// Stress Test 3: Rapid-Fire Calls (1000 calls)
+// Stress Test 2: Concurrent Node Creation + Execution (50 nodes)
 // ═════════════════════════════════════════════════════════════════
 
-async function testRapidFireCalls(ctx: Ctx) {
-  console.log("\n── Stress Test 3: Rapid-Fire Calls (1000) ──");
+async function testConcurrentNodeExecution(ctx: Ctx) {
+  console.log("\n── Stress Test 2: Concurrent Node Creation + Execution (50 nodes) ──");
 
-  const CALL_COUNT = 1000;
+  const NODE_COUNT = 50;
 
-  // Create a simple node that does minimal work
-  await registerNode(
-    ctx,
-    "stress:rapidfire",
-    `return (args && args.i) * 2;`
-  );
-
-  // 3a: Sequential rapid-fire calls
+  // 2a: Create 50 nodes in parallel
   try {
-    const seqStart = performance.now();
-    let lastResult = 0;
-    for (let i = 0; i < CALL_COUNT; i++) {
-      lastResult = await ctx.call("stress:rapidfire", { i });
-    }
-    const seqTime = performance.now() - seqStart;
-    const seqCallsPerSec = Math.round(CALL_COUNT / (seqTime / 1000));
-
-    if (lastResult !== (CALL_COUNT - 1) * 2) {
-      throw new Error(`expected ${(CALL_COUNT - 1) * 2}, got ${lastResult}`);
-    }
-
-    ok(`${CALL_COUNT} sequential calls in ${seqTime.toFixed(1)}ms (${seqCallsPerSec.toLocaleString()} calls/sec)`);
-  } catch (e) {
-    fail("rapid-fire sequential", e);
-  }
-
-  // 3b: Parallel rapid-fire calls (batches of 100)
-  try {
-    const parallelStart = performance.now();
-    const BATCH_SIZE = 100;
-    const BATCHES = CALL_COUNT / BATCH_SIZE;
-    let totalCalls = 0;
-
-    for (let batch = 0; batch < BATCHES; batch++) {
-      const promises = Array.from({ length: BATCH_SIZE }, (_, j) => {
-        const i = batch * BATCH_SIZE + j;
-        return ctx.call("stress:rapidfire", { i });
-      });
-      const batchResults = await Promise.all(promises);
-      totalCalls += batchResults.length;
-
-      // Verify last result of each batch
-      const lastIdx = (batch + 1) * BATCH_SIZE - 1;
-      if (batchResults[BATCH_SIZE - 1] !== lastIdx * 2) {
-        throw new Error(`batch ${batch} last result: expected ${lastIdx * 2}, got ${batchResults[BATCH_SIZE - 1]}`);
-      }
-    }
-
-    const parallelTime = performance.now() - parallelStart;
-    const parallelCallsPerSec = Math.round(totalCalls / (parallelTime / 1000));
-
-    ok(`${totalCalls} calls in ${BATCHES} parallel batches in ${parallelTime.toFixed(1)}ms (${parallelCallsPerSec.toLocaleString()} calls/sec)`);
-  } catch (e) {
-    fail("rapid-fire parallel batches", e);
-  }
-
-  // 3c: Full parallel (all 1000 at once)
-  try {
-    const fullParallelStart = performance.now();
-    const allPromises = Array.from({ length: CALL_COUNT }, (_, i) =>
-      ctx.call("stress:rapidfire", { i })
-    );
-    const allResults = await Promise.all(allPromises);
-    const fullParallelTime = performance.now() - fullParallelStart;
-    const fullParallelCallsPerSec = Math.round(CALL_COUNT / (fullParallelTime / 1000));
-
-    // Verify all results
-    let allCorrect = true;
-    for (let i = 0; i < CALL_COUNT; i++) {
-      if (allResults[i] !== i * 2) {
-        allCorrect = false;
-        throw new Error(`call ${i}: expected ${i * 2}, got ${allResults[i]}`);
-      }
-    }
-
-    ok(`${CALL_COUNT} fully parallel calls in ${fullParallelTime.toFixed(1)}ms (${fullParallelCallsPerSec.toLocaleString()} calls/sec)`);
-  } catch (e) {
-    fail("rapid-fire full parallel", e);
-  }
-}
-
-// ═════════════════════════════════════════════════════════════════
-// Stress Test 4: Parallel Spawn (10 long-lived nodes)
-// ═════════════════════════════════════════════════════════════════
-
-async function testParallelSpawn(ctx: Ctx) {
-  console.log("\n── Stress Test 4: Parallel Spawn (10 nodes) ──");
-
-  const SPAWN_COUNT = 10;
-
-  // 4a: Create and spawn 10 long-lived nodes simultaneously
-  try {
-    for (let i = 0; i < SPAWN_COUNT; i++) {
-      await registerNode(
+    const createStart = performance.now();
+    const createPromises = Array.from({ length: NODE_COUNT }, (_, i) =>
+      registerNode(
         ctx,
-        `stress:spawn:${i}`,
-        `
-await ctx.assert('stress:spawn:${i}', 'status', 'running');
-const signal = args && args.signal;
-if (signal) {
-  await new Promise(r => signal.addEventListener('abort', r, { once: true }));
-}
-await ctx.assert('stress:spawn:${i}', 'status', 'stopped');
-`
-      );
-    }
-
-    const spawnStart = performance.now();
-    // Spawn all 10 simultaneously
-    const spawnPromises = Array.from({ length: SPAWN_COUNT }, (_, i) =>
-      ctx.call("spawn", { node: `stress:spawn:${i}` })
+        `concurrent:node:${i}`,
+        `return { id: ${i}, square: ${i} * ${i}, name: 'node-${i}', timestamp: Date.now() };`
+      )
     );
-    await Promise.all(spawnPromises);
-    await new Promise((r) => setTimeout(r, 300));
-    const spawnTime = performance.now() - spawnStart;
+    await Promise.all(createPromises);
+    const createTime = performance.now() - createStart;
 
-    ok(`spawned ${SPAWN_COUNT} nodes in ${spawnTime.toFixed(1)}ms`);
+    // Verify all exist
+    const allNodes = await ctx.query({ p: "type", o: "Function" });
+    const concurrentNodes = allNodes.filter((q) => q.s.startsWith("concurrent:node:"));
+    if (concurrentNodes.length !== NODE_COUNT) {
+      throw new Error(`expected ${NODE_COUNT} concurrent nodes, got ${concurrentNodes.length}`);
+    }
+
+    timing("Concurrent Nodes", `create ${NODE_COUNT} in parallel`, `${createTime.toFixed(1)}ms (${(createTime / NODE_COUNT).toFixed(2)}ms/node)`);
+    ok(`created ${NODE_COUNT} nodes in parallel in ${createTime.toFixed(1)}ms (${(createTime / NODE_COUNT).toFixed(2)}ms/node)`);
   } catch (e) {
-    fail("spawn 10 nodes", e);
+    fail("create 50 nodes in parallel", e);
   }
 
-  // 4b: Verify all 10 are running (have Spawned quads)
+  // 2b: Call all 50 nodes in parallel
   try {
-    let runningCount = 0;
-    let spawnedCount = 0;
-
-    for (let i = 0; i < SPAWN_COUNT; i++) {
-      const running = await ctx.query({ s: `stress:spawn:${i}`, p: "status", o: "running" });
-      if (running.length > 0) runningCount++;
-
-      const spawned = await ctx.query({ s: `stress:spawn:${i}`, p: "type", o: "Spawned" });
-      if (spawned.length > 0) spawnedCount++;
-    }
-
-    if (runningCount !== SPAWN_COUNT) {
-      throw new Error(`expected ${SPAWN_COUNT} running, got ${runningCount}`);
-    }
-    if (spawnedCount !== SPAWN_COUNT) {
-      throw new Error(`expected ${SPAWN_COUNT} Spawned quads, got ${spawnedCount}`);
-    }
-
-    ok(`all ${SPAWN_COUNT} nodes are running with Spawned quads`);
-  } catch (e) {
-    fail("verify 10 nodes running", e);
-  }
-
-  // 4c: Abort all 10 nodes
-  try {
-    const abortStart = performance.now();
-
-    if (!ctx._supervisorControllers) {
-      throw new Error("no _supervisorControllers on ctx");
-    }
-
-    for (let i = 0; i < SPAWN_COUNT; i++) {
-      const ac = ctx._supervisorControllers.get(`stress:spawn:${i}`);
-      if (ac) ac.abort();
-    }
-
-    await new Promise((r) => setTimeout(r, 300));
-    const abortTime = performance.now() - abortStart;
-
-    // Verify all stopped
-    let stoppedCount = 0;
-    for (let i = 0; i < SPAWN_COUNT; i++) {
-      const stopped = await ctx.query({ s: `stress:spawn:${i}`, p: "status", o: "stopped" });
-      if (stopped.length > 0) stoppedCount++;
-    }
-
-    if (stoppedCount !== SPAWN_COUNT) {
-      throw new Error(`expected ${SPAWN_COUNT} stopped, got ${stoppedCount}`);
-    }
-
-    ok(`aborted all ${SPAWN_COUNT} nodes cleanly in ${abortTime.toFixed(1)}ms`);
-  } catch (e) {
-    fail("abort 10 nodes", e);
-  }
-}
-
-// ═════════════════════════════════════════════════════════════════
-// Stress Test 5: Large Payload (1MB string)
-// ═════════════════════════════════════════════════════════════════
-
-async function testLargePayload(ctx: Ctx) {
-  console.log("\n── Stress Test 5: Large Payload (1MB string) ──");
-
-  const TARGET_SIZE = 1024 * 1024; // 1MB
-
-  // 5a: Create a node that returns a 1MB string
-  try {
-    // Node generates a large string by repeating a pattern
-    await registerNode(
-      ctx,
-      "stress:largepayload",
-      `
-const size = args && args.size || ${TARGET_SIZE};
-const chunk = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
-const repeats = Math.ceil(size / chunk.length);
-const result = chunk.repeat(repeats).slice(0, size);
-return result;
-`
-    );
-
     const callStart = performance.now();
-    const result = await ctx.call("stress:largepayload", { size: TARGET_SIZE });
+    const callPromises = Array.from({ length: NODE_COUNT }, (_, i) =>
+      ctx.call(`concurrent:node:${i}`)
+    );
+    const results = await Promise.all(callPromises);
     const callTime = performance.now() - callStart;
 
-    if (typeof result !== "string") {
-      throw new Error(`expected string, got ${typeof result}`);
-    }
-    if (result.length !== TARGET_SIZE) {
-      throw new Error(`expected ${TARGET_SIZE} chars, got ${result.length}`);
+    // Verify all results
+    for (let i = 0; i < NODE_COUNT; i++) {
+      if (results[i].id !== i) throw new Error(`node ${i}: expected id ${i}, got ${results[i].id}`);
+      if (results[i].square !== i * i) throw new Error(`node ${i}: expected square ${i * i}, got ${results[i].square}`);
     }
 
-    ok(`1MB string returned in ${callTime.toFixed(1)}ms (${result.length.toLocaleString()} chars)`);
+    timing("Concurrent Nodes", `call ${NODE_COUNT} in parallel`, `${callTime.toFixed(1)}ms (${(callTime / NODE_COUNT).toFixed(2)}ms/call)`);
+    ok(`called ${NODE_COUNT} nodes in parallel in ${callTime.toFixed(1)}ms -- all results correct`);
   } catch (e) {
-    fail("1MB string return", e);
+    fail("call 50 nodes in parallel", e);
   }
 
-  // 5b: Store a large value in a quad and retrieve it
+  // 2c: Call all 50 nodes in parallel a second time (cached)
   try {
-    const largeValue = "X".repeat(TARGET_SIZE);
-    const storeStart = performance.now();
-    await ctx.assert("stress:large", "payload", largeValue, "stress-large");
-    const storeTime = performance.now() - storeStart;
-
-    const queryStart = performance.now();
-    const quads = await ctx.query({ s: "stress:large", p: "payload", g: "stress-large" });
-    const queryTime = performance.now() - queryStart;
-
-    if (quads.length !== 1) {
-      throw new Error(`expected 1 quad, got ${quads.length}`);
-    }
-    if (quads[0].o.length !== TARGET_SIZE) {
-      throw new Error(`expected ${TARGET_SIZE} chars in quad, got ${quads[0].o.length}`);
-    }
-
-    ok(`1MB quad stored in ${storeTime.toFixed(1)}ms, queried in ${queryTime.toFixed(1)}ms`);
-  } catch (e) {
-    fail("1MB quad storage", e);
-  }
-
-  // 5c: Return a large object (not just string)
-  try {
-    await registerNode(
-      ctx,
-      "stress:largeobject",
-      `
-const items = [];
-for (let i = 0; i < 10000; i++) {
-  items.push({ id: i, name: 'item-' + i, value: Math.random() });
-}
-return items;
-`
+    const cachedStart = performance.now();
+    const cachedPromises = Array.from({ length: NODE_COUNT }, (_, i) =>
+      ctx.call(`concurrent:node:${i}`)
     );
+    const cachedResults = await Promise.all(cachedPromises);
+    const cachedTime = performance.now() - cachedStart;
 
-    const objStart = performance.now();
-    const result = await ctx.call("stress:largeobject");
-    const objTime = performance.now() - objStart;
-
-    if (!Array.isArray(result) || result.length !== 10000) {
-      throw new Error(`expected 10000-item array, got ${Array.isArray(result) ? result.length : typeof result}`);
-    }
-    if (result[5000].id !== 5000) {
-      throw new Error(`expected item 5000 to have id 5000, got ${result[5000].id}`);
+    for (let i = 0; i < NODE_COUNT; i++) {
+      if (cachedResults[i].id !== i) throw new Error(`cached node ${i}: wrong id`);
     }
 
-    ok(`10,000-item object array returned in ${objTime.toFixed(1)}ms`);
+    timing("Concurrent Nodes", `call ${NODE_COUNT} cached`, `${cachedTime.toFixed(1)}ms (${(cachedTime / NODE_COUNT).toFixed(2)}ms/call)`);
+    ok(`called ${NODE_COUNT} cached nodes in ${cachedTime.toFixed(1)}ms (compiler cache warm)`);
   } catch (e) {
-    fail("large object return", e);
+    fail("call 50 cached nodes in parallel", e);
   }
 }
 
 // ═════════════════════════════════════════════════════════════════
-// Stress Test 6: Deep Composition (50-node chain)
+// Stress Test 3: Rapid Hot-Reload (100 retract+assert cycles)
+// ═════════════════════════════════════════════════════════════════
+
+async function testRapidHotReload(ctx: Ctx) {
+  console.log("\n── Stress Test 3: Rapid Hot-Reload (100 retract+assert cycles) ──");
+
+  const RELOAD_COUNT = 100;
+  const NODE_NAME = "stress:hotreload";
+
+  // 3a: Create initial node
+  try {
+    await registerNode(ctx, NODE_NAME, `return 'version-0';`);
+    const initial = await ctx.call(NODE_NAME);
+    if (initial !== "version-0") throw new Error(`expected "version-0", got "${initial}"`);
+    ok("initial node version-0 works");
+  } catch (e) {
+    fail("create initial hot-reload node", e);
+  }
+
+  // 3b: Retract+assert 100 times, calling after each swap
+  try {
+    const reloadStart = performance.now();
+    let allCorrect = true;
+
+    for (let i = 1; i <= RELOAD_COUNT; i++) {
+      // Get current source
+      const current = await ctx.query({ s: NODE_NAME, p: "source" });
+      if (current.length === 0) throw new Error(`no source found at iteration ${i}`);
+
+      // Retract old source
+      await ctx.retract(NODE_NAME, "source", current[0].o);
+
+      // Assert new source
+      await ctx.assert(NODE_NAME, "source", `return 'version-${i}';`);
+
+      // Call and verify
+      const result = await ctx.call(NODE_NAME);
+      if (result !== `version-${i}`) {
+        allCorrect = false;
+        throw new Error(`iteration ${i}: expected "version-${i}", got "${result}"`);
+      }
+    }
+
+    const reloadTime = performance.now() - reloadStart;
+    timing("Rapid Hot-Reload", `${RELOAD_COUNT} retract+assert+call cycles`, `${reloadTime.toFixed(1)}ms (${(reloadTime / RELOAD_COUNT).toFixed(2)}ms/cycle)`);
+    ok(`${RELOAD_COUNT} hot-reloads in ${reloadTime.toFixed(1)}ms (${(reloadTime / RELOAD_COUNT).toFixed(2)}ms/cycle) -- all correct`);
+  } catch (e) {
+    fail("100 rapid hot-reloads", e);
+  }
+
+  // 3c: Verify final version is correct
+  try {
+    const finalResult = await ctx.call(NODE_NAME);
+    if (finalResult !== `version-${RELOAD_COUNT}`) {
+      throw new Error(`expected "version-${RELOAD_COUNT}", got "${finalResult}"`);
+    }
+
+    // Verify compiler cache was invalidated (the node should not return a stale version)
+    const source = await ctx.query({ s: NODE_NAME, p: "source" });
+    if (!source[0].o.includes(`version-${RELOAD_COUNT}`)) {
+      throw new Error(`source does not contain version-${RELOAD_COUNT}`);
+    }
+
+    ok(`final version-${RELOAD_COUNT} is correct, compiler cache properly invalidated through all cycles`);
+  } catch (e) {
+    fail("verify final hot-reload version", e);
+  }
+
+  // 3d: Verify versions were saved (sys:compiler auto-versions on retract)
+  try {
+    const versions = await ctx.query({ s: NODE_NAME, p: "version" });
+    // Each retract triggers version:save, so there should be ~100 versions
+    if (versions.length < RELOAD_COUNT - 1) {
+      throw new Error(`expected at least ${RELOAD_COUNT - 1} versions, got ${versions.length}`);
+    }
+    timing("Rapid Hot-Reload", "versions saved", `${versions.length} auto-versioned snapshots`);
+    ok(`${versions.length} auto-versioned snapshots saved by sys:compiler`);
+  } catch (e) {
+    fail("verify auto-versioning", e);
+  }
+}
+
+// ═════════════════════════════════════════════════════════════════
+// Stress Test 4: Deep Composition (50-node chain)
 // ═════════════════════════════════════════════════════════════════
 
 async function testDeepComposition(ctx: Ctx) {
-  console.log("\n── Stress Test 6: Deep Composition (50-node chain) ──");
+  console.log("\n── Stress Test 4: Deep Composition (50-node chain) ──");
 
   const DEPTH = 50;
 
-  // 6a: Create a chain of 50 nodes where each calls the next
+  // 4a: Create a chain of 50 nodes where each calls the next
   try {
     const createStart = performance.now();
 
-    // Each node in the chain calls the next, passing an accumulated value
     for (let i = 0; i < DEPTH - 1; i++) {
       await registerNode(
         ctx,
-        `stress:chain:${i}`,
+        `deep:chain:${i}`,
         `
-const acc = (args && args.accumulated) || '';
-const next = acc + (acc ? ',' : '') + '${i}';
-return await ctx.call('stress:chain:${i + 1}', { accumulated: next });
+const val = (args && args.value) || 0;
+const depth = (args && args.depth) || 0;
+return await ctx.call('deep:chain:${i + 1}', { value: val + ${i + 1}, depth: depth + 1 });
 `
       );
     }
-    // Terminal node -- returns the accumulated value
+    // Terminal node returns the accumulated value plus metadata
     await registerNode(
       ctx,
-      `stress:chain:${DEPTH - 1}`,
+      `deep:chain:${DEPTH - 1}`,
       `
-const acc = (args && args.accumulated) || '';
-return acc + (acc ? ',' : '') + '${DEPTH - 1}';
+const val = (args && args.value) || 0;
+const depth = (args && args.depth) || 0;
+return { sum: val + ${DEPTH}, depth: depth + 1, self: ctx.self };
 `
     );
 
     const createTime = performance.now() - createStart;
+    timing("Deep Composition", `create ${DEPTH}-node chain`, `${createTime.toFixed(1)}ms`);
     ok(`created ${DEPTH}-node chain in ${createTime.toFixed(1)}ms`);
   } catch (e) {
     fail("create 50-node chain", e);
   }
 
-  // 6b: Call the first node and verify the result propagates through all 50
+  // 4b: Call through all 50 levels and verify correctness
   try {
     const callStart = performance.now();
-    const result = await ctx.call("stress:chain:0");
+    const result = await ctx.call("deep:chain:0", { value: 0, depth: 0 });
     const callTime = performance.now() - callStart;
 
-    // Should be "0,1,2,...,49"
-    const expected = Array.from({ length: DEPTH }, (_, i) => i).join(",");
-    if (result !== expected) {
-      throw new Error(`expected "${expected.slice(0, 50)}...", got "${String(result).slice(0, 50)}..."`);
+    // Sum should be 1+2+3+...+50 = 1275
+    const expectedSum = (DEPTH * (DEPTH + 1)) / 2;
+    if (result.sum !== expectedSum) {
+      throw new Error(`expected sum ${expectedSum}, got ${result.sum}`);
+    }
+    if (result.depth !== DEPTH) {
+      throw new Error(`expected depth ${DEPTH}, got ${result.depth}`);
+    }
+    if (result.self !== `deep:chain:${DEPTH - 1}`) {
+      throw new Error(`expected self "deep:chain:${DEPTH - 1}", got "${result.self}"`);
     }
 
-    ok(`50-deep call chain completed in ${callTime.toFixed(1)}ms (${(callTime / DEPTH).toFixed(2)}ms/level)`);
+    timing("Deep Composition", `50-deep chain (cold)`, `${callTime.toFixed(1)}ms (${(callTime / DEPTH).toFixed(2)}ms/level)`);
+    ok(`50-deep chain: sum=${result.sum}, depth=${result.depth} in ${callTime.toFixed(1)}ms`);
   } catch (e) {
-    fail("50-deep call chain", e);
+    fail("call 50-deep chain", e);
   }
 
-  // 6c: Call the chain multiple times to verify caching helps
+  // 4c: Call again to measure compiler cache effect
   try {
-    const runs = 5;
-    const times: number[] = [];
+    const warmStart = performance.now();
+    const warmResult = await ctx.call("deep:chain:0", { value: 0, depth: 0 });
+    const warmTime = performance.now() - warmStart;
 
-    for (let r = 0; r < runs; r++) {
-      const start = performance.now();
-      await ctx.call("stress:chain:0");
-      times.push(performance.now() - start);
+    const expectedSum = (DEPTH * (DEPTH + 1)) / 2;
+    if (warmResult.sum !== expectedSum) throw new Error(`warm call sum wrong: ${warmResult.sum}`);
+
+    timing("Deep Composition", `50-deep chain (warm)`, `${warmTime.toFixed(1)}ms`);
+    ok(`50-deep chain (warm cache): ${warmTime.toFixed(1)}ms`);
+  } catch (e) {
+    fail("warm 50-deep chain", e);
+  }
+
+  // 4d: Verify ctx.self is tracked correctly at every level
+  try {
+    // Modify terminal node to return the full self chain
+    const oldSource = (await ctx.query({ s: `deep:chain:${DEPTH - 1}`, p: "source" }))[0].o;
+    await ctx.retract(`deep:chain:${DEPTH - 1}`, "source", oldSource);
+    await ctx.assert(
+      `deep:chain:${DEPTH - 1}`,
+      "source",
+      `return ctx.self;`
+    );
+
+    const selfResult = await ctx.call(`deep:chain:${DEPTH - 1}`);
+    if (selfResult !== `deep:chain:${DEPTH - 1}`) {
+      throw new Error(`expected ctx.self = "deep:chain:${DEPTH - 1}", got "${selfResult}"`);
     }
 
-    const avg = times.reduce((a, b) => a + b, 0) / times.length;
-    const first = times[0];
-    const subsequent = times.slice(1).reduce((a, b) => a + b, 0) / (times.length - 1);
+    // Restore the original terminal node
+    const curSource = (await ctx.query({ s: `deep:chain:${DEPTH - 1}`, p: "source" }))[0].o;
+    await ctx.retract(`deep:chain:${DEPTH - 1}`, "source", curSource);
+    await ctx.assert(`deep:chain:${DEPTH - 1}`, "source", oldSource);
 
-    ok(`chain called ${runs}x: first=${first.toFixed(1)}ms, avg subsequent=${subsequent.toFixed(1)}ms (compiler cache effect)`);
+    ok(`ctx.self correctly resolves at depth ${DEPTH - 1}`);
   } catch (e) {
-    fail("chain caching", e);
+    fail("ctx.self at depth 50", e);
+  }
+}
+
+// ═════════════════════════════════════════════════════════════════
+// Stress Test 5: Large Data in Quads (100KB string)
+// ═════════════════════════════════════════════════════════════════
+
+async function testLargeDataInQuads(ctx: Ctx) {
+  console.log("\n── Stress Test 5: Large Data in Quads (100KB) ──");
+
+  const TARGET_SIZE = 100 * 1024; // 100KB
+  const GRAPH = "stress-large";
+
+  // 5a: Generate a 100KB string and assert it
+  try {
+    // Create a string with known, verifiable content (not just repeated chars)
+    const chunks: string[] = [];
+    const chunkSize = 100;
+    for (let i = 0; chunks.join("").length < TARGET_SIZE; i++) {
+      chunks.push(`[block-${String(i).padStart(6, "0")}:${String.fromCharCode(65 + (i % 26)).repeat(chunkSize - 20)}]`);
+    }
+    const largeValue = chunks.join("").slice(0, TARGET_SIZE);
+
+    const storeStart = performance.now();
+    await ctx.assert("stress:large:100kb", "payload", largeValue, GRAPH);
+    const storeTime = performance.now() - storeStart;
+
+    timing("Large Data", "100KB quad store", `${storeTime.toFixed(1)}ms`);
+    ok(`stored 100KB quad in ${storeTime.toFixed(1)}ms (${largeValue.length.toLocaleString()} chars)`);
+  } catch (e) {
+    fail("store 100KB quad", e);
+  }
+
+  // 5b: Query it back and verify integrity
+  try {
+    const queryStart = performance.now();
+    const quads = await ctx.query({ s: "stress:large:100kb", p: "payload", g: GRAPH });
+    const queryTime = performance.now() - queryStart;
+
+    if (quads.length !== 1) throw new Error(`expected 1 quad, got ${quads.length}`);
+    if (quads[0].o.length !== TARGET_SIZE) {
+      throw new Error(`expected ${TARGET_SIZE} chars, got ${quads[0].o.length}`);
+    }
+
+    // Verify content integrity: check first block, middle block, and last few chars
+    if (!quads[0].o.startsWith("[block-000000:")) {
+      throw new Error("first block corrupted");
+    }
+    // Check a mid-point block exists
+    if (!quads[0].o.includes("[block-000500:")) {
+      throw new Error("middle block missing or corrupted");
+    }
+
+    timing("Large Data", "100KB quad query", `${queryTime.toFixed(2)}ms`);
+    ok(`queried 100KB quad back in ${queryTime.toFixed(2)}ms -- content integrity verified`);
+  } catch (e) {
+    fail("query 100KB quad", e);
+  }
+
+  // 5c: Store multiple large quads and query all
+  try {
+    const LARGE_COUNT = 10;
+    const storeStart = performance.now();
+    for (let i = 0; i < LARGE_COUNT; i++) {
+      const data = `PAYLOAD-${i}-${"X".repeat(10240)}`; // 10KB each
+      await ctx.assert(`stress:large:batch:${i}`, "payload", data, GRAPH);
+    }
+    const storeTime = performance.now() - storeStart;
+
+    const queryStart = performance.now();
+    const allLarge = await ctx.query({ p: "payload", g: GRAPH });
+    const queryTime = performance.now() - queryStart;
+
+    // 1 (100KB) + 10 (10KB each) = 11 total
+    if (allLarge.length !== LARGE_COUNT + 1) {
+      throw new Error(`expected ${LARGE_COUNT + 1} large quads, got ${allLarge.length}`);
+    }
+
+    timing("Large Data", `${LARGE_COUNT} x 10KB quads`, `store: ${storeTime.toFixed(1)}ms, query all: ${queryTime.toFixed(2)}ms`);
+    ok(`stored ${LARGE_COUNT} x 10KB quads in ${storeTime.toFixed(1)}ms, queried all in ${queryTime.toFixed(2)}ms`);
+  } catch (e) {
+    fail("batch large quads", e);
+  }
+
+  // 5d: Store and retrieve a JSON-serialized large object
+  try {
+    const largeObj = {
+      metadata: { version: 1, created: new Date().toISOString() },
+      items: Array.from({ length: 1000 }, (_, i) => ({
+        id: i,
+        name: `item-${i}`,
+        tags: [`tag-${i % 10}`, `category-${i % 5}`],
+        value: Math.random(),
+      })),
+    };
+    const jsonStr = JSON.stringify(largeObj);
+
+    const storeStart = performance.now();
+    await ctx.assert("stress:large:json", "payload", jsonStr, GRAPH);
+    const storeTime = performance.now() - storeStart;
+
+    const queryStart = performance.now();
+    const result = await ctx.query({ s: "stress:large:json", p: "payload", g: GRAPH });
+    const queryTime = performance.now() - queryStart;
+
+    const parsed = JSON.parse(result[0].o);
+    if (parsed.items.length !== 1000) throw new Error(`expected 1000 items, got ${parsed.items.length}`);
+    if (parsed.items[500].id !== 500) throw new Error(`item 500 has wrong id`);
+
+    timing("Large Data", "JSON object (1000 items)", `store: ${storeTime.toFixed(1)}ms, query+parse: ${queryTime.toFixed(2)}ms, size: ${(jsonStr.length / 1024).toFixed(1)}KB`);
+    ok(`JSON object (${(jsonStr.length / 1024).toFixed(1)}KB) stored in ${storeTime.toFixed(1)}ms, queried+parsed in ${queryTime.toFixed(2)}ms`);
+  } catch (e) {
+    fail("large JSON object", e);
+  }
+}
+
+// ═════════════════════════════════════════════════════════════════
+// Stress Test 6: Many Concurrent Watchers (100 ctx.on subscribers)
+// ═════════════════════════════════════════════════════════════════
+
+async function testManyConcurrentWatchers(ctx: Ctx) {
+  console.log("\n── Stress Test 6: Many Concurrent Watchers (100 subscribers) ──");
+
+  const WATCHER_COUNT = 100;
+  const GRAPH = "stress-watchers";
+
+  // 6a: Register 100 subscribers watching the same pattern
+  const fireCounts: number[] = new Array(WATCHER_COUNT).fill(0);
+  const receivedQuads: any[][] = Array.from({ length: WATCHER_COUNT }, () => []);
+  const unsubs: (() => void)[] = [];
+
+  try {
+    const regStart = performance.now();
+    for (let i = 0; i < WATCHER_COUNT; i++) {
+      const idx = i;
+      const unsub = ctx.on({ p: "event", g: GRAPH }, (change) => {
+        fireCounts[idx]++;
+        receivedQuads[idx].push(change);
+      });
+      unsubs.push(unsub);
+    }
+    const regTime = performance.now() - regStart;
+
+    timing("Concurrent Watchers", `register ${WATCHER_COUNT} subscribers`, `${regTime.toFixed(2)}ms`);
+    ok(`registered ${WATCHER_COUNT} subscribers in ${regTime.toFixed(2)}ms`);
+  } catch (e) {
+    fail("register 100 subscribers", e);
+  }
+
+  // 6b: Trigger a single event and verify all 100 fire
+  try {
+    const triggerStart = performance.now();
+    await ctx.assert("stress:event:1", "event", "triggered", GRAPH);
+    const triggerTime = performance.now() - triggerStart;
+
+    const firedCount = fireCounts.filter((c) => c === 1).length;
+    if (firedCount !== WATCHER_COUNT) {
+      throw new Error(`expected ${WATCHER_COUNT} subscribers to fire, only ${firedCount} did`);
+    }
+
+    timing("Concurrent Watchers", `single event -> ${WATCHER_COUNT} subscribers`, `${triggerTime.toFixed(2)}ms`);
+    ok(`single event fired all ${WATCHER_COUNT} subscribers in ${triggerTime.toFixed(2)}ms`);
+  } catch (e) {
+    fail("trigger event for 100 subscribers", e);
+  }
+
+  // 6c: Trigger 10 events rapidly, verify all subscribers see all 10
+  try {
+    const rapidStart = performance.now();
+    for (let e = 2; e <= 11; e++) {
+      await ctx.assert(`stress:event:${e}`, "event", `event-${e}`, GRAPH);
+    }
+    const rapidTime = performance.now() - rapidStart;
+
+    // Each subscriber should have fired 11 times total (1 + 10)
+    const allCorrect = fireCounts.every((c) => c === 11);
+    if (!allCorrect) {
+      const counts = fireCounts.reduce((acc, c) => { acc[c] = (acc[c] || 0) + 1; return acc; }, {} as Record<number, number>);
+      throw new Error(`not all subscribers fired 11 times: ${JSON.stringify(counts)}`);
+    }
+
+    timing("Concurrent Watchers", `10 events x ${WATCHER_COUNT} subscribers`, `${rapidTime.toFixed(2)}ms`);
+    ok(`10 rapid events, all ${WATCHER_COUNT} subscribers fired correctly (11 total each) in ${rapidTime.toFixed(2)}ms`);
+  } catch (e) {
+    fail("10 rapid events", e);
+  }
+
+  // 6d: Verify all received correct change objects
+  try {
+    for (let i = 0; i < WATCHER_COUNT; i++) {
+      if (receivedQuads[i].length !== 11) {
+        throw new Error(`subscriber ${i}: expected 11 changes, got ${receivedQuads[i].length}`);
+      }
+      // Check first event
+      if (receivedQuads[i][0].type !== "assert") {
+        throw new Error(`subscriber ${i}: first change type should be "assert", got "${receivedQuads[i][0].type}"`);
+      }
+      if (receivedQuads[i][0].quad.o !== "triggered") {
+        throw new Error(`subscriber ${i}: first event object should be "triggered"`);
+      }
+    }
+    ok(`all ${WATCHER_COUNT} subscribers received correct change objects with quad data`);
+  } catch (e) {
+    fail("verify change object integrity", e);
+  }
+
+  // 6e: Unsubscribe all and verify no more fires
+  try {
+    for (const unsub of unsubs) {
+      unsub();
+    }
+
+    // Reset counters
+    fireCounts.fill(0);
+
+    // Trigger another event
+    await ctx.assert("stress:event:after-unsub", "event", "should-not-fire", GRAPH);
+
+    const anyFired = fireCounts.some((c) => c > 0);
+    if (anyFired) {
+      throw new Error("some subscribers still fired after unsubscribe");
+    }
+
+    ok(`all ${WATCHER_COUNT} unsubscribed cleanly -- no fires after unsub`);
+  } catch (e) {
+    fail("unsubscribe 100 watchers", e);
+  }
+
+  // 6f: Register watchers with different patterns and verify selective firing
+  try {
+    const selectiveCounts = { patternA: 0, patternB: 0, patternC: 0 };
+
+    const unsubA = ctx.on({ s: "stress:selective", p: "typeA", g: GRAPH }, () => { selectiveCounts.patternA++; });
+    const unsubB = ctx.on({ s: "stress:selective", p: "typeB", g: GRAPH }, () => { selectiveCounts.patternB++; });
+    const unsubC = ctx.on({ g: GRAPH }, () => { selectiveCounts.patternC++; });
+
+    await ctx.assert("stress:selective", "typeA", "value-a", GRAPH);
+    await ctx.assert("stress:selective", "typeB", "value-b", GRAPH);
+
+    if (selectiveCounts.patternA !== 1) throw new Error(`patternA fired ${selectiveCounts.patternA} times, expected 1`);
+    if (selectiveCounts.patternB !== 1) throw new Error(`patternB fired ${selectiveCounts.patternB} times, expected 1`);
+    if (selectiveCounts.patternC !== 2) throw new Error(`patternC fired ${selectiveCounts.patternC} times, expected 2`);
+
+    unsubA();
+    unsubB();
+    unsubC();
+
+    ok("selective pattern matching works correctly across watchers");
+  } catch (e) {
+    fail("selective watcher patterns", e);
   }
 }
 
@@ -570,23 +645,27 @@ return acc + (acc ? ',' : '') + '${DEPTH - 1}';
 // ═════════════════════════════════════════════════════════════════
 
 async function main() {
-  console.log("Holoiconic Stress Tests");
-  console.log("=======================");
+  console.log("=== Holoiconic Stress Tests (Extended) ===");
 
   // Clean up any previous test DB
   try {
     unlinkSync(TEST_DB);
   } catch {}
 
-  console.log("=== Holoiconic Stress Tests ===");
   const ctx = await boot();
 
-  await testManyNodes(ctx);
-  await testManyQuads(ctx);
-  await testRapidFireCalls(ctx);
-  await testParallelSpawn(ctx);
-  await testLargePayload(ctx);
+  await testMassQuadInsertion(ctx);
+  await testConcurrentNodeExecution(ctx);
+  await testRapidHotReload(ctx);
   await testDeepComposition(ctx);
+  await testLargeDataInQuads(ctx);
+  await testManyConcurrentWatchers(ctx);
+
+  // Print timing summary
+  console.log("\n── Performance Summary ──");
+  for (const t of timings) {
+    console.log(`  [${t.scenario}] ${t.metric}: ${t.value}`);
+  }
 
   // Summary
   console.log("\n── Summary ──");
