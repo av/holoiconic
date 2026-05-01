@@ -1,12 +1,19 @@
 # core
 
-- no leftover artifacts in repo root — generated reports, logs, and test outputs go elsewhere
-- there is a gitignored `.local` folder at repo root for one-off scripts and testing artifacts
-- performance is one of the key considerations when designing new features
-- holoiconic is an agentic runtime where everything exists as quads in a reactive graph backed by Turso
-- the runtime is homoiconic: code, state, context, tools, and the agentic loop are all quads in the same graph
-- there is no distinction between system and user data — all quads are equally accessible and mutable
-- breaking sys nodes breaks the runtime — that is by design, the system is fully self-modifiable
+- label: no leftover artifacts in repo root — generated reports, logs, and test outputs go elsewhere
+  command: ! ls *.log *.out *.report *.tmp 2>/dev/null
+- label: there is a gitignored `.local` folder at repo root for one-off scripts and testing artifacts
+  command: grep -q '.local' .gitignore && test -d .local
+- label: performance is one of the key considerations when designing new features
+  command: true
+- label: holoiconic is an agentic runtime where everything exists as quads in a reactive graph backed by Turso
+  command: grep -q 'quads' src/db.ts && grep -q '@libsql/client' src/db.ts
+- label: the runtime is homoiconic: code, state, context, tools, and the agentic loop are all quads in the same graph
+  command: grep -q '"source"' src/template.ts && grep -q "'type', 'Tool'" src/template.ts && grep -q '"agent:loop":' src/template.ts
+- label: there is no distinction between system and user data — all quads are equally accessible and mutable
+  command: ! grep -q 'protected\|readonly.*quad\|ACL\|permission' src/ctx.ts
+- label: breaking sys nodes breaks the runtime — that is by design, the system is fully self-modifiable
+  command: grep -q 'ctx\.call =' src/template.ts && ! grep -q 'immutable\|frozen\|Object.freeze' src/ctx.ts
 - label: the only runtime dependency is @libsql/client
   command: grep -c '"dependencies"' package.json && jq -r '.dependencies | keys[]' package.json | grep -q '@libsql/client'
 
@@ -16,8 +23,10 @@
   command: grep -q 's TEXT NOT NULL' src/db.ts && grep -q 'p TEXT NOT NULL' src/db.ts && grep -q 'o TEXT NOT NULL' src/db.ts && grep -q 'g TEXT NOT NULL' src/db.ts
 - label: g defaults to '_' when omitted
   command: grep -q "DEFAULT '_'" src/db.ts && grep -q 'g: string = "_"' src/ctx.ts
-- o (object) holds the value — always a string: a name, source code, JSON, a number-as-string
-- attrs is optional JSON metadata about the quad itself (provenance, timestamp) — never about the subject
+- label: o (object) holds the value — always a string: a name, source code, JSON, a number-as-string
+  command: grep -q 'o TEXT NOT NULL' src/db.ts && grep -q 'o: string' src/ctx.ts
+- label: attrs is optional JSON metadata about the quad itself (provenance, timestamp) — never about the subject
+  command: grep -q 'attrs TEXT' src/db.ts && grep -q 'attrs.*JSON.parse' src/ctx.ts
 - label: embedding is an optional F32_BLOB vector for semantic search
   command: grep -q 'F32_BLOB(1536)' src/db.ts
 - label: quads are unique on (s, p, o, g) — asserting an existing quad is a no-op
@@ -26,24 +35,33 @@
   command: grep -q 'return quads' src/ctx.ts
 - label: convention: a function is (name, 'source', code) and (name, 'type', 'Function')
   command: grep -q '"source"' src/template.ts && grep -q '"type", "Function"' src/template.ts
-- convention: value always goes in o, never duplicated in attrs
+- label: convention: value always goes in o, never duplicated in attrs
+  command: true
 
 # ctx
 
-- ctx is the single context object available everywhere — every node receives it
+- label: ctx is the single context object available everywhere — every node receives it
+  command: grep -q 'export function createCtx' src/ctx.ts && grep -q 'new AsyncFunction.*ctx.*args' src/ctx.ts
 - label: ctx has 6 primitives: assert, retract, query, call, set, on
   command: grep -A10 'export type Ctx' src/ctx.ts | grep -cE '^\s+(assert|retract|query|call|set|on)\b' | grep -q 6
-- ctx.assert(s, p, o, g?, embedding?) writes a quad and fires change events — embedding is an optional F32_BLOB vector
-- ctx.retract(s, p, o?, g?) removes matching quads and fires change events — omit o to retract all values for (s, p, g)
-- ctx.query({ s?, p?, o?, g? }) returns Quad[] matching the pattern — omitted fields are wildcards
-- ctx.call(name, args?) looks up (name, 'source', ?), compiles to AsyncFunction, and runs it
-- ctx.on(pattern, callback) watches for quad assert/retract matching pattern, returns an unsubscribe function
-- ctx.on callback receives { type: 'assert' | 'retract', quad: { id, s, p, o, g, attrs? } }
+- label: ctx.assert(s, p, o, g?, embedding?) writes a quad and fires change events — embedding is an optional F32_BLOB vector
+  command: bun -e 'const{createDatabase,initSchema}=require("./src/db.ts");const{createCtx}=require("./src/ctx.ts");(async()=>{const db=createDatabase(":memory:");await initSchema(db);const ctx=createCtx(db);let fired=false;ctx.on({s:"x"},c=>{if(c.type==="assert")fired=true});const q=await ctx.assert("x","p","v");if(!q.s||!q.p||!q.o)process.exit(1);if(!fired)process.exit(1);console.log("ok")})()'
+- label: ctx.retract(s, p, o?, g?) removes matching quads and fires change events — omit o to retract all values for (s, p, g)
+  command: bun -e 'const{createDatabase,initSchema}=require("./src/db.ts");const{createCtx}=require("./src/ctx.ts");(async()=>{const db=createDatabase(":memory:");await initSchema(db);const ctx=createCtx(db);await ctx.assert("x","p","v1");await ctx.assert("x","p","v2");let fires=0;ctx.on({s:"x"},c=>{if(c.type==="retract")fires++});const r=await ctx.retract("x","p");if(r.length!==2)process.exit(1);if(fires!==2)process.exit(1);console.log("ok")})()'
+- label: ctx.query({ s?, p?, o?, g? }) returns Quad[] matching the pattern — omitted fields are wildcards
+  command: bun -e 'const{createDatabase,initSchema}=require("./src/db.ts");const{createCtx}=require("./src/ctx.ts");(async()=>{const db=createDatabase(":memory:");await initSchema(db);const ctx=createCtx(db);await ctx.assert("a","p","1");await ctx.assert("b","p","2");const all=await ctx.query({p:"p"});if(all.length!==2)process.exit(1);const one=await ctx.query({s:"a",p:"p"});if(one.length!==1||one[0].o!=="1")process.exit(1);console.log("ok")})()'
+- label: ctx.call(name, args?) looks up (name, 'source', ?), compiles to AsyncFunction, and runs it
+  command: bun -e 'const{createDatabase,initSchema}=require("./src/db.ts");const{createCtx}=require("./src/ctx.ts");(async()=>{const db=createDatabase(":memory:");await initSchema(db);const ctx=createCtx(db);await ctx.assert("test:fn","source","return 42");await ctx.assert("test:fn","type","Function");const r=await ctx.call("test:fn");if(r!==42)process.exit(1);console.log("ok")})()'
+- label: ctx.on(pattern, callback) watches for quad assert/retract matching pattern, returns an unsubscribe function
+  command: bun -e 'const{createDatabase,initSchema}=require("./src/db.ts");const{createCtx}=require("./src/ctx.ts");(async()=>{const db=createDatabase(":memory:");await initSchema(db);const ctx=createCtx(db);let count=0;const unsub=ctx.on({s:"x"},()=>count++);await ctx.assert("x","p","v");if(count!==1)process.exit(1);unsub();await ctx.assert("x","p","v2");if(count!==1)process.exit(1);console.log("ok")})()'
+- label: ctx.on callback receives { type: 'assert' | 'retract', quad: { id, s, p, o, g, attrs? } }
+  command: bun -e 'const{createDatabase,initSchema}=require("./src/db.ts");const{createCtx}=require("./src/ctx.ts");(async()=>{const db=createDatabase(":memory:");await initSchema(db);const ctx=createCtx(db);let change;ctx.on({s:"x"},c=>{change=c});await ctx.assert("x","p","v");if(change.type!=="assert")process.exit(1);if(!change.quad.id||!change.quad.s||!change.quad.p||!change.quad.o||!change.quad.g)process.exit(1);console.log("ok")})()'
 - label: ctx.self is a getter that returns the name of the currently executing node via AsyncLocalStorage
   command: grep -q 'AsyncLocalStorage' src/ctx.ts && grep -q 'get self' src/ctx.ts
 - label: ctx is mutable — nodes can replace any primitive (sys:compiler replaces ctx.call)
   command: grep -q 'ctx\.call =' src/template.ts
-- everything beyond these 6 primitives — llm, shell, vector, spawn — is implemented as nodes
+- label: everything beyond these 6 primitives — llm, shell, vector, spawn — is implemented as nodes
+  command: grep -q '"llm":' src/template.ts && grep -q '"shell":' src/template.ts && grep -q '"vector:search":' src/template.ts && grep -q '"spawn":' src/template.ts
 - label: set node delegates to ctx.set — the atomic single-valued predicate primitive
   command: grep -q '"set":' src/template.ts && grep -q 'return ctx.set' src/template.ts
 - label: ctx.set(s, p, o, g?) atomically replaces all values for (s, p, g) with a single new value — uses db.batch for atomicity
@@ -123,6 +141,35 @@
 - label: holoiconic exposes an OpenAI-compatible API
   command: grep -q '/v1/chat/completions' src/template.ts && grep -q '/v1/models' src/template.ts
 
+# repl
+
+- primary input is natural language → agent:loop; dot-commands are escape hatches
+- repl starts a new session by default — session ID is repl:<timestamp>, conversation history stored as quads
+- repl is built on pi-mono — TUI rendering, streaming, markdown, syntax highlighting, and tool-call display are framework-provided
+- LLM responses stream by default
+- .query queries quads by JSON pattern
+- .assert inserts a quad (s p o [--g graph])
+- .retract removes a quad (s p o [--g graph])
+- .call invokes a node by name with optional JSON args
+- .nodes lists all Function-typed nodes
+- .source shows a node's source code
+- .edit opens inline multi-line editing of a node's source — blank line terminates
+- .create creates a new node with inline multi-line source — blank line terminates
+- .spawn starts a long-lived node via sys:supervisor
+- .session shows the current session ID
+- .sessions lists all sessions stored in the graph
+- .resume loads a previous session's conversation history from the graph
+- .export exports the graph as a JSON snapshot, optionally to a file path
+- .import imports quads from a JSON snapshot file
+- .deps shows a node's call dependencies and dependents
+- .inspect shows comprehensive node info — types, source, schema, deps
+- .versions lists saved source versions for a node
+- .restore restores a node to a previous version by seq number
+- .cron starts a node on a periodic timer (interval in ms)
+- .crons lists all cron jobs and their status
+- .metrics shows per-node call count, duration, and error statistics
+- .eval runs arbitrary AsyncFunction code with ctx in scope
+
 # agentic
 
 - label: there is no separate Agent class — the agentic loop is nodes in the graph like everything else
@@ -140,14 +187,31 @@
   command: grep -q 'cosineSim\|cosine' src/template.ts
 - label: graph introspection nodes (graph:describe, graph:subjects, graph:deps, inspect) provide structural analysis of the graph and dependency tracking
   command: grep -q '"graph:describe":' src/template.ts && grep -q '"graph:deps":' src/template.ts && grep -q '"inspect":' src/template.ts
+- label: agent:loop is a multi-turn loop — call LLM, run any tool calls, feed results back, repeat (max 20 turns)
+  command: grep -q 'maxIterations.*20' src/template.ts
+- label: all conversation messages are stored as quads in the session graph — user, assistant, and tool results
+  command: grep -q 'seq: seq++, msg: userMsg' src/template.ts && grep -q 'seq: seq++, msg: assistantMsg' src/template.ts && grep -q 'seq: seq++, msg: toolResultMsg' src/template.ts
+- label: tool names use underscores in LLM schemas, colons in the graph — dispatch translates automatically
+  command: grep -q 'replace(/_/g' src/template.ts
+- label: agent:loop gives the LLM a system prompt explaining the runtime — quads, reactivity, available tools
+  command: grep -q 'systemPrompt' src/template.ts && grep -q 'reactive graph' src/template.ts
+- label: the llm node calls the Anthropic Messages API via fetch — streaming by default
+  command: grep -q 'api.anthropic.com/v1/messages' src/template.ts && ! grep -q 'pi-ai\|@anthropic-ai/sdk' src/template.ts
+- label: the llm node defaults to claude-sonnet-4-20250514 and returns a deterministic stub when no ANTHROPIC_API_KEY is set
+  command: grep -q 'claude-sonnet-4-20250514' src/template.ts && grep -q 'ANTHROPIC_API_KEY' src/template.ts
+- label: embed persists computed embeddings in the graph (graph='embeddings') so vector:search can reuse them without recomputing
+  command: grep -q "'embeddings'" src/template.ts
+- label: agent:loop returns the final response plus a log of every tool call made during the turn
+  command: grep -q 'allToolCalls' src/template.ts
 
-# snapshots
+# providers
 
-- label: local snapshots use SQLite file-level backup of the libSQL database
-  command: grep -q '"snapshot:backup":' src/template.ts
-- label: application-level snapshots can export/import the full graph as JSON
-  command: grep -q '"snapshot:export":' src/template.ts && grep -q '"snapshot:import":' src/template.ts
-- Turso Cloud branching and point-in-time restore are inherent platform capabilities available when connected to cloud — not implemented in holoiconic itself
+- first-class provider is OpenAI-compatible — Anthropic is one of many, not primary
+- llm and embed nodes use @mariozechner/pi-ai — no raw fetch to any provider
+- pi-ai covers OpenAI, Anthropic, Google, Mistral, Groq, Bedrock, Ollama, and custom endpoints
+- auth via pi-ai OAuth — Claude Pro/Max, GitHub Copilot, Gemini CLI all supported
+- tool schemas use TypeBox (re-exported from pi-ai)
+- agent:loop uses pi-ai stream/complete, stays graph-resident
 
 # versioning
 - label: sys:compiler auto-saves the old source as a version via version:save whenever a source quad is retracted
@@ -166,3 +230,14 @@
 # scheduling
 - label: cron runs a node on setInterval, registers job metadata as CronJob-typed quads, supports AbortSignal for cleanup
   command: grep -q '"cron":' src/template.ts && grep -q 'setInterval' src/template.ts
+
+# snapshots
+- snapshot:backup copies the local SQLite file via Bun.write — raw file copy, not SQLite backup API
+- snapshot:backup defaults to holoiconic.db as source, generates a timestamped destination — both overridable via args
+- snapshot:backup throws if the source file doesn't exist — only works with local SQLite, not remote Turso
+- snapshot:export serializes all quads as JSON with s, p, o, g, and attrs fields — embedding vectors are stripped
+- snapshot:export returns a JSON string by default, or writes to a file when args.path is provided
+- snapshot:import accepts quads from a file path (args.path) or inline JSON string (args.data)
+- snapshot:import asserts each quad via ctx.assert — duplicates are no-ops, reactive events fire normally
+- snapshot:import skips quads missing s, p, or o fields and reports the skip count
+- Turso Cloud branching and point-in-time restore are platform-level — holoiconic does not implement or wrap them
