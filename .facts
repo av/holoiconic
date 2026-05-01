@@ -161,13 +161,13 @@
 # repl
 
 - label: primary input is natural language → agent:loop; dot-commands are escape hatches
-  command: grep -q "agent:loop.*prompt.*session" src/template.ts && grep -q "startsWith('.')" src/template.ts
+  command: grep -q "agent:loop" src/template.ts && grep -q "prompt.*trimmed" src/template.ts && grep -q "session.*sessionId" src/template.ts && grep -q "startsWith('.')" src/template.ts
 - label: repl starts a new session by default — session ID is repl:<timestamp>, conversation history stored as quads
   command: grep -q "repl:.*Date.now()" src/template.ts && grep -q "session: sessionId" src/template.ts
 - label: repl is built on pi-mono — TUI rendering, streaming, markdown, syntax highlighting, and tool-call display are framework-provided
   command: grep -q "pi-mono\|piMono" src/template.ts
 - label: LLM responses stream by default
-  command: grep -A5 "agent:loop.*prompt.*session" src/template.ts | grep -q "stream"
+  command: grep -q "stream.*true" src/template.ts && grep -q "onDelta" src/template.ts
 - label: .query queries quads by JSON pattern
   command: grep -q "\.query " src/template.ts && grep -q "ctx.query(pattern)" src/template.ts
 - label: .assert inserts a quad (s p o [--g graph])
@@ -263,7 +263,7 @@
 - label: tool schemas use TypeBox (re-exported from pi-ai)
   command: bun -e "const{Type}=require('@mariozechner/pi-ai');if(typeof Type.String!=='function')process.exit(1);if(typeof Type.Object!=='function')process.exit(1);console.log('ok')"
 - label: agent:loop uses pi-ai stream/complete, stays graph-resident
-  command: grep -A3 '"agent:loop":' src/template.ts | grep -q '@mariozechner/pi-ai' && grep -q 'complete(model, piContext' src/template.ts
+  command: grep -A3 '"agent:loop":' src/template.ts | grep -q '@mariozechner/pi-ai' && grep -q 'stream(model, piContext' src/template.ts && grep -q 'complete(model, piContext' src/template.ts
 
 # versioning
 - label: sys:compiler auto-saves the old source as a version via version:save whenever a source quad is retracted

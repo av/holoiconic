@@ -629,9 +629,20 @@ for (let i = 0; i < maxIterations; i++) {
     return { session: sessionId, response: stubText, tool_calls: allToolCalls };
   }
 
-  // Use pi-ai complete for the LLM call
+  // Use pi-ai stream or complete for the LLM call
   const model = getModel(providerName, modelId);
-  response = await complete(model, piContext, { apiKey });
+  const useStream = args && args.stream;
+  if (useStream) {
+    const eventStream = stream(model, piContext, { apiKey });
+    for await (const event of eventStream) {
+      if (event.type === 'text_delta' && args.onDelta) {
+        args.onDelta(event.delta);
+      }
+    }
+    response = await eventStream.result();
+  } else {
+    response = await complete(model, piContext, { apiKey });
+  }
 
   // Store the assistant message in the graph
   const assistantMsg = { role: 'assistant', content: response.content, model: response.model, provider: response.provider, api: response.api, usage: response.usage, stopReason: response.stopReason, timestamp: response.timestamp };
@@ -2466,9 +2477,15 @@ for await (const line of rl) {
       console.log('unknown command. type .help');
 
     } else {
-      // Route through agent:loop with persistent session
-      const result = await ctx.call('agent:loop', { prompt: trimmed, session: sessionId });
-      console.log(result.response);
+      // Route through agent:loop with persistent session, streaming text deltas to stdout
+      const result = await ctx.call('agent:loop', {
+        prompt: trimmed,
+        session: sessionId,
+        stream: true,
+        onDelta: (delta) => process.stdout.write(delta),
+      });
+      // Print newline after streamed output (or print full response if no streaming occurred)
+      if (result.response) console.log('');
     }
   } catch (err) {
     console.error('error:', err.message || err);

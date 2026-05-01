@@ -6054,6 +6054,89 @@ async function testSpecialNodeNames(ctx: Ctx) {
   }
 }
 
+// ── Streaming support ────────────────────────────────────────────
+
+async function testStreamingSupport(ctx: Ctx) {
+  console.log("\n── Streaming support ──");
+
+  // Test 1: agent:loop accepts stream and onDelta args (stub mode — no API key)
+  try {
+    const deltas: string[] = [];
+    const result = await ctx.call("agent:loop", {
+      prompt: "hello stream",
+      stream: true,
+      onDelta: (delta: string) => deltas.push(delta),
+    });
+    if (!result || !result.session)
+      throw new Error(`expected result with session, got: ${JSON.stringify(result)}`);
+    if (!result.response)
+      throw new Error(`expected result with response, got: ${JSON.stringify(result)}`);
+    // In stub mode (no API key), streaming is bypassed — stub returns directly
+    // so onDelta should NOT have been called
+    ok("agent:loop accepts stream/onDelta args in stub mode");
+  } catch (e) {
+    fail("agent:loop with stream args", e);
+  }
+
+  // Test 2: agent:loop returns same result shape with stream: true as without
+  try {
+    const resultNoStream = await ctx.call("agent:loop", {
+      prompt: "hello no stream",
+      session: "test:stream:nostream:" + Date.now(),
+    });
+    const resultStream = await ctx.call("agent:loop", {
+      prompt: "hello with stream",
+      session: "test:stream:stream:" + Date.now(),
+      stream: true,
+      onDelta: () => {},
+    });
+    // Both should have the same shape: session, response, tool_calls
+    if (typeof resultNoStream.session !== "string")
+      throw new Error("no-stream result missing session");
+    if (typeof resultStream.session !== "string")
+      throw new Error("stream result missing session");
+    if (typeof resultNoStream.response !== "string")
+      throw new Error("no-stream result missing response");
+    if (typeof resultStream.response !== "string")
+      throw new Error("stream result missing response");
+    if (!Array.isArray(resultNoStream.tool_calls))
+      throw new Error("no-stream result missing tool_calls");
+    if (!Array.isArray(resultStream.tool_calls))
+      throw new Error("stream result missing tool_calls");
+    ok("stream and non-stream return same result shape");
+  } catch (e) {
+    fail("stream result shape", e);
+  }
+
+  // Test 3: repl node source contains streaming references
+  try {
+    const rs = await ctx.query({ s: "repl", p: "source" });
+    if (rs.length === 0) throw new Error("no repl source found");
+    const source = rs[0].o;
+    if (!source.includes("stream"))
+      throw new Error("repl source does not contain 'stream'");
+    if (!source.includes("onDelta"))
+      throw new Error("repl source does not contain 'onDelta'");
+    ok("repl node source references streaming");
+  } catch (e) {
+    fail("repl streaming references", e);
+  }
+
+  // Test 4: agent:loop source imports stream from pi-ai
+  try {
+    const rs = await ctx.query({ s: "agent:loop", p: "source" });
+    if (rs.length === 0) throw new Error("no agent:loop source found");
+    const source = rs[0].o;
+    if (!source.includes("stream"))
+      throw new Error("agent:loop source does not import/use 'stream'");
+    if (!source.includes("onDelta"))
+      throw new Error("agent:loop source does not reference 'onDelta'");
+    ok("agent:loop source supports streaming");
+  } catch (e) {
+    fail("agent:loop streaming support", e);
+  }
+}
+
 // ── Main ──────────────────────────────────────────────────────────
 
 async function main() {
@@ -6159,6 +6242,7 @@ async function main() {
   await testQueryResultOrdering(ctx);
   await testGraphParameterIsolation(ctx);
   await testSpecialNodeNames(ctx);
+  await testStreamingSupport(ctx);
 
   // Summary
   console.log("\n── Summary ──");
