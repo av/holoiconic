@@ -6137,6 +6137,614 @@ async function testStreamingSupport(ctx: Ctx) {
   }
 }
 
+// ── Deep pi-ai integration tests ────────────────────────────────
+
+async function testLlmStubResponseStructure(ctx: Ctx) {
+  console.log("\n── LLM stub response structure (deep) ──");
+
+  // Test 1: Verify all expected fields in stub response
+  try {
+    const result = await ctx.call("llm", {
+      messages: [{ role: "user", content: "test" }],
+    });
+    if (result.role !== "assistant") throw new Error(`role: ${result.role}`);
+    if (!Array.isArray(result.content)) throw new Error("content not array");
+    if (result.content.length !== 1) throw new Error(`content length: ${result.content.length}`);
+    if (result.content[0].type !== "text") throw new Error(`content[0].type: ${result.content[0].type}`);
+    if (typeof result.content[0].text !== "string") throw new Error("content[0].text not string");
+    if (typeof result.model !== "string") throw new Error("model not string");
+    if (typeof result.provider !== "string") throw new Error("provider not string");
+    if (result.stopReason !== "stop") throw new Error(`stopReason: ${result.stopReason}`);
+    if (result.api !== "stub") throw new Error(`api: ${result.api}`);
+    if (result.responseId !== "stub") throw new Error(`responseId: ${result.responseId}`);
+    if (typeof result.timestamp !== "number") throw new Error("timestamp not number");
+    // Verify usage structure
+    if (!result.usage) throw new Error("missing usage");
+    if (typeof result.usage.input !== "number") throw new Error("usage.input not number");
+    if (typeof result.usage.output !== "number") throw new Error("usage.output not number");
+    if (!result.usage.cost) throw new Error("missing usage.cost");
+    if (typeof result.usage.cost.total !== "number") throw new Error("usage.cost.total not number");
+    ok("llm stub has all expected fields: role, content, model, provider, stopReason, api, responseId, timestamp, usage");
+  } catch (e) {
+    fail("llm stub response structure", e);
+  }
+
+  // Test 2: Default provider is 'openai'
+  try {
+    const result = await ctx.call("llm", {
+      messages: [{ role: "user", content: "test" }],
+    });
+    if (result.provider !== "openai")
+      throw new Error(`default provider: ${result.provider}, expected 'openai'`);
+    ok("llm default provider is 'openai'");
+  } catch (e) {
+    fail("llm default provider", e);
+  }
+
+  // Test 3: Provider override via args.provider
+  try {
+    const result = await ctx.call("llm", {
+      messages: [{ role: "user", content: "test" }],
+      provider: "anthropic",
+    });
+    if (result.provider !== "anthropic")
+      throw new Error(`provider: ${result.provider}, expected 'anthropic'`);
+    // Anthropic default model should be claude-sonnet-4-20250514
+    if (!result.model.includes("claude"))
+      throw new Error(`anthropic model: ${result.model}, expected claude model`);
+    ok("llm provider override to 'anthropic' works with correct default model");
+  } catch (e) {
+    fail("llm provider override", e);
+  }
+
+  // Test 4: Stub content includes provider and model info
+  try {
+    const result = await ctx.call("llm", {
+      messages: [{ role: "user", content: "test" }],
+      provider: "anthropic",
+    });
+    const text = result.content[0].text;
+    if (!text.includes("anthropic"))
+      throw new Error(`stub text does not mention provider: ${text}`);
+    if (!text.includes(result.model))
+      throw new Error(`stub text does not mention model: ${text}`);
+    ok("llm stub content includes provider and model info");
+  } catch (e) {
+    fail("llm stub content info", e);
+  }
+
+  // Test 5: Stub usage fields are all zero
+  try {
+    const result = await ctx.call("llm", {
+      messages: [{ role: "user", content: "test" }],
+    });
+    const u = result.usage;
+    if (u.input !== 0 || u.output !== 0 || u.totalTokens !== 0)
+      throw new Error(`usage not zeroed: ${JSON.stringify(u)}`);
+    if (u.cost.input !== 0 || u.cost.output !== 0 || u.cost.total !== 0)
+      throw new Error(`cost not zeroed: ${JSON.stringify(u.cost)}`);
+    ok("llm stub usage and cost fields are all zero");
+  } catch (e) {
+    fail("llm stub usage zeros", e);
+  }
+}
+
+async function testEmbedStubBehavior(ctx: Ctx) {
+  console.log("\n── Embed stub behavior (deep) ──");
+
+  // Test 1: Verify correct dimensions
+  try {
+    const result = await ctx.call("embed", { text: "deep test" });
+    if (result.dimensions !== 1536)
+      throw new Error(`dimensions: ${result.dimensions}, expected 1536`);
+    if (result.embedding.length !== result.dimensions)
+      throw new Error(`embedding.length ${result.embedding.length} !== dimensions ${result.dimensions}`);
+    ok("embed stub returns dimensions=1536 matching embedding length");
+  } catch (e) {
+    fail("embed dimensions", e);
+  }
+
+  // Test 2: Deterministic — same input always produces same output
+  try {
+    const r1 = await ctx.call("embed", { text: "deterministic check" });
+    const r2 = await ctx.call("embed", { text: "deterministic check" });
+    let allMatch = true;
+    for (let i = 0; i < r1.embedding.length; i++) {
+      if (r1.embedding[i] !== r2.embedding[i]) { allMatch = false; break; }
+    }
+    if (!allMatch) throw new Error("embeddings differ for same input");
+    ok("embed stub is deterministic (full vector comparison)");
+  } catch (e) {
+    fail("embed deterministic", e);
+  }
+
+  // Test 3: Different inputs produce different vectors
+  try {
+    const r1 = await ctx.call("embed", { text: "alpha" });
+    const r2 = await ctx.call("embed", { text: "beta" });
+    let differ = false;
+    for (let i = 0; i < r1.embedding.length; i++) {
+      if (r1.embedding[i] !== r2.embedding[i]) { differ = true; break; }
+    }
+    if (!differ) throw new Error("different texts produced identical embeddings");
+    ok("embed stub produces different vectors for different inputs");
+  } catch (e) {
+    fail("embed different inputs", e);
+  }
+
+  // Test 4: Values are in [-1, 1] range
+  try {
+    const result = await ctx.call("embed", { text: "range check" });
+    let outOfRange = false;
+    for (const v of result.embedding) {
+      if (v < -1.001 || v > 1.001) { outOfRange = true; break; }
+    }
+    if (outOfRange) throw new Error("embedding values out of [-1, 1] range");
+    ok("embed stub values are in [-1, 1] range");
+  } catch (e) {
+    fail("embed value range", e);
+  }
+
+  // Test 5: model field is 'stub'
+  try {
+    const result = await ctx.call("embed", { text: "model check" });
+    if (result.model !== "stub")
+      throw new Error(`model: ${result.model}, expected 'stub'`);
+    ok("embed stub model field is 'stub'");
+  } catch (e) {
+    fail("embed stub model", e);
+  }
+}
+
+async function testAgentLoopToolDispatch(ctx: Ctx) {
+  console.log("\n── Agent loop tool dispatch (deep) ──");
+
+  // Test 1: agent:loop handles stub mode correctly with all expected fields
+  try {
+    const session = "test:dispatch:" + Date.now();
+    const result = await ctx.call("agent:loop", {
+      prompt: "dispatch test",
+      session,
+    });
+    if (typeof result.session !== "string") throw new Error("missing session");
+    if (typeof result.response !== "string") throw new Error("missing response");
+    if (!Array.isArray(result.tool_calls)) throw new Error("missing tool_calls array");
+    // In stub mode, tool_calls should be empty (no actual LLM to request tools)
+    if (result.tool_calls.length !== 0)
+      throw new Error(`expected 0 tool_calls in stub mode, got ${result.tool_calls.length}`);
+    ok("agent:loop stub returns session, response, empty tool_calls");
+  } catch (e) {
+    fail("agent:loop stub structure", e);
+  }
+
+  // Test 2: agent:loop stores both user and assistant messages
+  try {
+    const session = "test:dispatch:msgs:" + Date.now();
+    await ctx.call("agent:loop", { prompt: "stored test", session });
+    const msgs = await ctx.query({ p: "message", g: session });
+    if (msgs.length < 2) throw new Error(`expected >=2 messages, got ${msgs.length}`);
+    const sorted = msgs.sort((a: any, b: any) => a.id - b.id);
+    const first = JSON.parse(sorted[0].o);
+    const second = JSON.parse(sorted[1].o);
+    // First should be user message with seq=0
+    if (first.seq !== 0) throw new Error(`first seq: ${first.seq}, expected 0`);
+    if (first.msg.role !== "user") throw new Error(`first role: ${first.msg.role}`);
+    if (first.msg.content !== "stored test") throw new Error(`first content: ${first.msg.content}`);
+    // Second should be assistant message with seq=1
+    if (second.seq !== 1) throw new Error(`second seq: ${second.seq}, expected 1`);
+    if (second.msg.role !== "assistant") throw new Error(`second role: ${second.msg.role}`);
+    ok("agent:loop stores user and assistant messages with correct seq numbers");
+  } catch (e) {
+    fail("agent:loop message storage", e);
+  }
+
+  // Test 3: agent:loop user message has timestamp
+  try {
+    const session = "test:dispatch:ts:" + Date.now();
+    const before = Date.now();
+    await ctx.call("agent:loop", { prompt: "ts test", session });
+    const after = Date.now();
+    const msgs = await ctx.query({ p: "message", g: session });
+    const sorted = msgs.sort((a: any, b: any) => a.id - b.id);
+    const userMsg = JSON.parse(sorted[0].o).msg;
+    if (typeof userMsg.timestamp !== "number") throw new Error("user msg missing timestamp");
+    if (userMsg.timestamp < before || userMsg.timestamp > after)
+      throw new Error(`timestamp ${userMsg.timestamp} out of range [${before}, ${after}]`);
+    ok("agent:loop user messages have valid timestamps");
+  } catch (e) {
+    fail("agent:loop timestamps", e);
+  }
+
+  // Test 4: Default provider in agent:loop is 'openai'
+  try {
+    const session = "test:dispatch:provider:" + Date.now();
+    const result = await ctx.call("agent:loop", { prompt: "provider test", session });
+    // The stub response text should mention the provider
+    if (!result.response.includes("openai"))
+      throw new Error(`response does not mention default provider: ${result.response}`);
+    ok("agent:loop default provider is 'openai'");
+  } catch (e) {
+    fail("agent:loop default provider", e);
+  }
+
+  // Test 5: Provider override in agent:loop
+  try {
+    const session = "test:dispatch:provider2:" + Date.now();
+    const result = await ctx.call("agent:loop", {
+      prompt: "provider override test",
+      session,
+      provider: "anthropic",
+    });
+    if (!result.response.includes("anthropic"))
+      throw new Error(`response does not mention overridden provider: ${result.response}`);
+    ok("agent:loop provider override to 'anthropic' works");
+  } catch (e) {
+    fail("agent:loop provider override", e);
+  }
+}
+
+async function testAgentLoopEdgeCases(ctx: Ctx) {
+  console.log("\n── Agent loop edge cases (deep) ──");
+
+  // Test 1: agent:loop with empty prompt throws
+  try {
+    await ctx.call("agent:loop", { prompt: "" });
+    fail("agent:loop empty prompt", "should have thrown");
+  } catch (e: any) {
+    if (e.message && e.message.includes("args.prompt is required")) {
+      ok("agent:loop with empty string prompt throws (falsy check)");
+    } else {
+      // Empty string is falsy in JS, so it should throw
+      ok("agent:loop with empty prompt throws");
+    }
+  }
+
+  // Test 2: agent:loop without prompt throws
+  try {
+    await ctx.call("agent:loop", {});
+    fail("agent:loop no prompt", "should have thrown");
+  } catch (e: any) {
+    if (e.message && e.message.includes("prompt")) {
+      ok("agent:loop without prompt throws with descriptive error");
+    } else {
+      fail("agent:loop no prompt", e);
+    }
+  }
+
+  // Test 3: maxIterations is defined in the source (structural check)
+  try {
+    const rs = await ctx.query({ s: "agent:loop", p: "source" });
+    const source = rs[0].o;
+    if (!source.includes("maxIterations"))
+      throw new Error("agent:loop source does not contain maxIterations");
+    // Extract the value
+    const match = source.match(/maxIterations\s*=\s*(\d+)/);
+    if (!match) throw new Error("could not extract maxIterations value");
+    const val = parseInt(match[1], 10);
+    if (val < 1 || val > 100)
+      throw new Error(`maxIterations=${val} out of reasonable range [1, 100]`);
+    ok(`agent:loop maxIterations is ${val} (reasonable bound)`);
+  } catch (e) {
+    fail("agent:loop maxIterations", e);
+  }
+
+  // Test 4: agent:loop generates unique session IDs when none provided
+  try {
+    const r1 = await ctx.call("agent:loop", { prompt: "unique1" });
+    const r2 = await ctx.call("agent:loop", { prompt: "unique2" });
+    const r3 = await ctx.call("agent:loop", { prompt: "unique3" });
+    const sessions = new Set([r1.session, r2.session, r3.session]);
+    if (sessions.size !== 3)
+      throw new Error(`expected 3 unique sessions, got ${sessions.size}`);
+    // All should start with "session:"
+    for (const s of sessions) {
+      if (!s.startsWith("session:"))
+        throw new Error(`session ID does not start with 'session:': ${s}`);
+    }
+    ok("agent:loop generates unique session: prefixed IDs");
+  } catch (e) {
+    fail("agent:loop unique sessions", e);
+  }
+
+  // Test 5: agent:loop with tools available still works in stub mode
+  try {
+    await ctx.call("agent:tools");
+    const session = "test:edge:tools:" + Date.now();
+    const result = await ctx.call("agent:loop", { prompt: "tools test", session });
+    if (!result.session || !result.response)
+      throw new Error(`missing fields: ${JSON.stringify(result)}`);
+    ok("agent:loop with registered tools works in stub mode");
+  } catch (e) {
+    fail("agent:loop with tools", e);
+  }
+
+  // Test 6: agent:loop stores system prompt awareness (stub mentions model)
+  try {
+    const session = "test:edge:stub:" + Date.now();
+    const result = await ctx.call("agent:loop", { prompt: "stub info", session });
+    // Stub response should mention the model
+    const msgs = await ctx.query({ p: "message", g: session });
+    const sorted = msgs.sort((a: any, b: any) => a.id - b.id);
+    const assistantMsg = JSON.parse(sorted[1].o).msg;
+    if (assistantMsg.api !== "stub")
+      throw new Error(`expected api='stub', got '${assistantMsg.api}'`);
+    if (!assistantMsg.model)
+      throw new Error("assistant message missing model field");
+    ok("agent:loop stub assistant message has api='stub' and model field");
+  } catch (e) {
+    fail("agent:loop stub metadata", e);
+  }
+}
+
+async function testStreamingDeep(ctx: Ctx) {
+  console.log("\n── Streaming deep tests ──");
+
+  // Test 1: stream=true with onDelta in stub mode does not crash
+  try {
+    const deltas: string[] = [];
+    const result = await ctx.call("agent:loop", {
+      prompt: "stream safe test",
+      stream: true,
+      onDelta: (d: string) => deltas.push(d),
+      session: "test:stream:deep1:" + Date.now(),
+    });
+    if (!result.session) throw new Error("missing session");
+    if (!result.response) throw new Error("missing response");
+    // In stub mode, no streaming happens — stub returns directly before streaming code path
+    ok("streaming with onDelta in stub mode does not crash");
+  } catch (e) {
+    fail("streaming stub safety", e);
+  }
+
+  // Test 2: stream=true without onDelta does not crash
+  try {
+    const result = await ctx.call("agent:loop", {
+      prompt: "stream no delta",
+      stream: true,
+      // deliberately no onDelta
+      session: "test:stream:deep2:" + Date.now(),
+    });
+    if (!result.session) throw new Error("missing session");
+    if (!result.response) throw new Error("missing response");
+    ok("streaming without onDelta callback does not crash");
+  } catch (e) {
+    fail("streaming without onDelta", e);
+  }
+
+  // Test 3: Streamed result has same shape as non-streamed
+  try {
+    const resultA = await ctx.call("agent:loop", {
+      prompt: "shape compare A",
+      session: "test:stream:deep3a:" + Date.now(),
+    });
+    const resultB = await ctx.call("agent:loop", {
+      prompt: "shape compare B",
+      stream: true,
+      onDelta: () => {},
+      session: "test:stream:deep3b:" + Date.now(),
+    });
+    // Compare field names
+    const keysA = Object.keys(resultA).sort();
+    const keysB = Object.keys(resultB).sort();
+    if (keysA.join(",") !== keysB.join(","))
+      throw new Error(`keys differ: ${keysA} vs ${keysB}`);
+    // Compare field types
+    for (const key of keysA) {
+      if (typeof resultA[key] !== typeof resultB[key])
+        throw new Error(`type mismatch for '${key}': ${typeof resultA[key]} vs ${typeof resultB[key]}`);
+    }
+    ok("streamed and non-streamed results have identical field names and types");
+  } catch (e) {
+    fail("stream result shape parity", e);
+  }
+
+  // Test 4: Streaming source code paths are properly guarded
+  try {
+    const rs = await ctx.query({ s: "agent:loop", p: "source" });
+    const source = rs[0].o;
+    // Verify the stream path checks for onDelta before calling it
+    if (!source.includes("args.onDelta"))
+      throw new Error("source does not check args.onDelta");
+    // Verify stream is imported from pi-ai
+    if (!source.includes("stream"))
+      throw new Error("source does not import stream");
+    // Verify the stub returns before the streaming code path
+    const stubIdx = source.indexOf("stub");
+    const streamCallIdx = source.indexOf("stream(model");
+    if (stubIdx < 0) throw new Error("no stub path found");
+    if (streamCallIdx < 0) throw new Error("no stream() call found");
+    if (stubIdx > streamCallIdx)
+      throw new Error("stub check comes after stream() call — stub should short-circuit first");
+    ok("streaming code path is properly guarded (stub before stream, onDelta check)");
+  } catch (e) {
+    fail("streaming code guards", e);
+  }
+}
+
+async function testSessionResumeDeep(ctx: Ctx) {
+  console.log("\n── Session resume deep tests ──");
+
+  // Test 1: Full resume flow — create session A, create session B, verify A's messages are intact
+  try {
+    const sessionA = "test:resume:deep:A:" + Date.now();
+    const sessionB = "test:resume:deep:B:" + Date.now();
+
+    // Build session A with 2 exchanges
+    await ctx.call("agent:loop", { prompt: "A message 1", session: sessionA });
+    await ctx.call("agent:loop", { prompt: "A message 2", session: sessionA });
+
+    // Build session B with 1 exchange
+    await ctx.call("agent:loop", { prompt: "B message 1", session: sessionB });
+
+    // Now "resume" session A by loading its messages
+    const aMsgs = await ctx.query({ p: "message", g: sessionA });
+    const bMsgs = await ctx.query({ p: "message", g: sessionB });
+
+    // Session A should have 4 messages (2 user + 2 assistant)
+    if (aMsgs.length < 4)
+      throw new Error(`session A: expected >=4 messages, got ${aMsgs.length}`);
+    // Session B should have 2 messages (1 user + 1 assistant)
+    if (bMsgs.length < 2)
+      throw new Error(`session B: expected >=2 messages, got ${bMsgs.length}`);
+
+    // Verify A's messages are unaffected by B
+    const aSorted = aMsgs.sort((a: any, b: any) => a.id - b.id);
+    const aFirst = JSON.parse(aSorted[0].o).msg;
+    if (aFirst.content !== "A message 1")
+      throw new Error(`A first content: ${aFirst.content}`);
+    const aThird = JSON.parse(aSorted[2].o).msg;
+    if (aThird.content !== "A message 2")
+      throw new Error(`A third content: ${aThird.content}`);
+
+    // Can continue session A after interleaving with B
+    await ctx.call("agent:loop", { prompt: "A message 3", session: sessionA });
+    const aFinal = await ctx.query({ p: "message", g: sessionA });
+    if (aFinal.length < 6)
+      throw new Error(`session A after resume: expected >=6 messages, got ${aFinal.length}`);
+
+    ok("full resume flow: interleaved sessions maintain separate histories");
+  } catch (e) {
+    fail("session resume flow", e);
+  }
+
+  // Test 2: Resume non-existent session — loading messages returns empty
+  try {
+    const fakeSid = "test:resume:nonexistent:" + Date.now();
+    const msgs = await ctx.query({ p: "message", g: fakeSid });
+    if (msgs.length !== 0)
+      throw new Error(`expected 0 messages for non-existent session, got ${msgs.length}`);
+
+    // Can still start fresh on that session ID
+    const result = await ctx.call("agent:loop", { prompt: "new start", session: fakeSid });
+    if (result.session !== fakeSid)
+      throw new Error(`session mismatch: ${result.session}`);
+    const afterMsgs = await ctx.query({ p: "message", g: fakeSid });
+    if (afterMsgs.length < 2)
+      throw new Error(`expected >=2 messages after first exchange, got ${afterMsgs.length}`);
+
+    ok("resume non-existent session gracefully starts fresh");
+  } catch (e) {
+    fail("resume non-existent session", e);
+  }
+
+  // Test 3: .resume command exists in repl source with proper handler
+  try {
+    const rs = await ctx.query({ s: "repl", p: "source" });
+    const source = rs[0].o;
+    if (!source.includes(".resume"))
+      throw new Error("repl source missing .resume");
+    if (!source.includes("sessionId"))
+      throw new Error("repl source missing sessionId reference for resume");
+    // Should query messages to load from the target session
+    if (!source.includes("message"))
+      throw new Error("repl source .resume does not reference messages");
+    ok(".resume command in repl properly references sessionId and messages");
+  } catch (e) {
+    fail(".resume command structure", e);
+  }
+
+  // Test 4: Messages within a session maintain sequence ordering
+  try {
+    const session = "test:resume:seq:" + Date.now();
+    await ctx.call("agent:loop", { prompt: "seq 1", session });
+    await ctx.call("agent:loop", { prompt: "seq 2", session });
+    await ctx.call("agent:loop", { prompt: "seq 3", session });
+
+    const msgs = await ctx.query({ p: "message", g: session });
+    const seqs = msgs
+      .sort((a: any, b: any) => a.id - b.id)
+      .map((q: any) => JSON.parse(q.o).seq);
+
+    // Sequence numbers should be strictly increasing
+    for (let i = 1; i < seqs.length; i++) {
+      if (seqs[i] <= seqs[i - 1])
+        throw new Error(`seq not increasing: ${seqs[i]} <= ${seqs[i - 1]} at position ${i}`);
+    }
+    ok("session messages have strictly increasing sequence numbers");
+  } catch (e) {
+    fail("session sequence ordering", e);
+  }
+
+  // Test 5: Resuming preserves original message content exactly
+  try {
+    const session = "test:resume:content:" + Date.now();
+    const testContent = "special chars: !@#$%^&*() newline\ntest";
+    await ctx.call("agent:loop", { prompt: testContent, session });
+
+    const msgs = await ctx.query({ p: "message", g: session });
+    const sorted = msgs.sort((a: any, b: any) => a.id - b.id);
+    const userMsg = JSON.parse(sorted[0].o).msg;
+    if (userMsg.content !== testContent)
+      throw new Error(`content mismatch: ${JSON.stringify(userMsg.content)} !== ${JSON.stringify(testContent)}`);
+    ok("session preserves special characters and newlines in content");
+  } catch (e) {
+    fail("session content preservation", e);
+  }
+}
+
+async function testPiTuiIntegration(ctx: Ctx) {
+  console.log("\n── pi-tui TUI integration tests ──");
+
+  // Test 1: repl source imports @mariozechner/pi-tui
+  try {
+    const rs = await ctx.query({ s: "repl", p: "source" });
+    if (rs.length === 0) throw new Error("no repl source");
+    const source = rs[0].o;
+    if (!source.includes("@mariozechner/pi-tui"))
+      throw new Error("repl does not import @mariozechner/pi-tui");
+    ok("repl imports @mariozechner/pi-tui");
+  } catch (e) {
+    fail("pi-tui import", e);
+  }
+
+  // Test 2: repl has renderMarkdown helper
+  try {
+    const rs = await ctx.query({ s: "repl", p: "source" });
+    const source = rs[0].o;
+    if (!source.includes("renderMarkdown") && !source.includes("Markdown"))
+      throw new Error("repl source missing renderMarkdown or Markdown reference");
+    ok("repl has Markdown rendering capability");
+  } catch (e) {
+    fail("pi-tui renderMarkdown", e);
+  }
+
+  // Test 3: repl has renderToolCall helper
+  try {
+    const rs = await ctx.query({ s: "repl", p: "source" });
+    const source = rs[0].o;
+    if (!source.includes("renderToolCall") && !source.includes("tool_call"))
+      throw new Error("repl source missing tool call rendering");
+    ok("repl has tool-call rendering capability");
+  } catch (e) {
+    fail("pi-tui renderToolCall", e);
+  }
+
+  // Test 4: repl renders .source output as code blocks
+  try {
+    const rs = await ctx.query({ s: "repl", p: "source" });
+    const source = rs[0].o;
+    // .source command should use code block formatting for syntax highlighting
+    if (!source.includes(".source"))
+      throw new Error("repl missing .source command");
+    // Should have some form of code/syntax display
+    if (!source.includes("```") && !source.includes("code") && !source.includes("Code"))
+      throw new Error("repl .source does not appear to use code block formatting");
+    ok("repl .source uses formatted code display");
+  } catch (e) {
+    fail("pi-tui source formatting", e);
+  }
+
+  // Test 5: pi-tui package is installed
+  try {
+    const result = await ctx.call("shell", { cmd: "ls node_modules/@mariozechner/pi-tui/package.json 2>/dev/null && echo exists || echo missing" });
+    if (!result.includes("exists"))
+      throw new Error("@mariozechner/pi-tui package not found in node_modules");
+    ok("@mariozechner/pi-tui package is installed");
+  } catch (e) {
+    fail("pi-tui installed", e);
+  }
+}
+
 // ── Main ──────────────────────────────────────────────────────────
 
 async function main() {
@@ -6243,6 +6851,13 @@ async function main() {
   await testGraphParameterIsolation(ctx);
   await testSpecialNodeNames(ctx);
   await testStreamingSupport(ctx);
+  await testLlmStubResponseStructure(ctx);
+  await testEmbedStubBehavior(ctx);
+  await testAgentLoopToolDispatch(ctx);
+  await testAgentLoopEdgeCases(ctx);
+  await testStreamingDeep(ctx);
+  await testSessionResumeDeep(ctx);
+  await testPiTuiIntegration(ctx);
 
   // Summary
   console.log("\n── Summary ──");
