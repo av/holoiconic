@@ -70,6 +70,20 @@ async function testBootChain(ctx: Ctx) {
   } catch (e) {
     fail("supervisor spawn", e);
   }
+
+  // Test 4: mock:llm spawns (provides faux LLM + HTTP embeddings when no API key)
+  try {
+    await ctx.call("spawn", { node: "mock:llm" });
+    await new Promise((r) => setTimeout(r, 100));
+    const status = await ctx.query({ s: "mock:llm", p: "status" });
+    if (status.length === 0 || status[0].o !== "running")
+      throw new Error("mock:llm not running");
+    if (!ctx._mockFaux)
+      throw new Error("_mockFaux not set on ctx");
+    ok("mock:llm spawned (faux provider + HTTP embeddings)");
+  } catch (e) {
+    fail("mock:llm spawn", e);
+  }
 }
 
 async function testShellNode(ctx: Ctx) {
@@ -103,13 +117,12 @@ async function testLlmNode(ctx: Ctx) {
   try {
     const result = await ctx.call("llm", {
       messages: [{ role: "user", content: "hi" }],
-      model: "test",
     });
     if (!result || result.role !== "assistant")
       throw new Error(`unexpected result: ${JSON.stringify(result)}`);
     if (!Array.isArray(result.content))
       throw new Error(`expected content array, got: ${typeof result.content}`);
-    ok("llm returns Anthropic-format assistant message");
+    ok("llm returns pi-ai assistant message (via mock:llm)");
   } catch (e) {
     fail("llm node", e);
   }
@@ -142,17 +155,16 @@ async function testAgentTools(ctx: Ctx) {
 }
 
 async function testAgentLoop(ctx: Ctx) {
-  console.log("\n── Agent loop (stub mode) ──");
+  console.log("\n── Agent loop (via mock:llm) ──");
 
   try {
-    // Without an API key, the LLM returns a stub response
-    // The agent:loop should handle the stub gracefully
+    // Without a real API key, the agent:loop uses mock:llm's faux provider
     const result = await ctx.call("agent:loop", { prompt: "hello" });
     if (!result || !result.session)
       throw new Error(`expected result with session, got: ${JSON.stringify(result)}`);
     if (!result.response)
       throw new Error(`expected result with response, got: ${JSON.stringify(result)}`);
-    ok("agent:loop returns session + response (stub mode)");
+    ok("agent:loop returns session + response (via mock:llm)");
 
     // Verify conversation was stored in graph
     const msgs = await ctx.query({ p: "message", g: result.session });
@@ -809,14 +821,14 @@ async function testEmbedNode(ctx: Ctx) {
   console.log("\n── Embed node ──");
 
   try {
-    // Without API key, uses stub
+    // Without API key, uses mock:llm HTTP embeddings endpoint
     const result = await ctx.call("embed", { text: "hello world" });
     if (!result.embedding || !Array.isArray(result.embedding))
       throw new Error(`expected embedding array, got ${typeof result.embedding}`);
     if (result.embedding.length !== 1536)
       throw new Error(`expected 1536 dimensions, got ${result.embedding.length}`);
-    if (result.model !== "stub")
-      throw new Error(`expected model='stub', got '${result.model}'`);
+    if (result.model !== "text-embedding-3-small")
+      throw new Error(`expected model='text-embedding-3-small', got '${result.model}'`);
 
     // Verify it's normalized (unit vector)
     let norm = 0;
@@ -828,9 +840,9 @@ async function testEmbedNode(ctx: Ctx) {
     // Verify deterministic: same text gives same embedding
     const result2 = await ctx.call("embed", { text: "hello world" });
     if (result.embedding[0] !== result2.embedding[0] || result.embedding[100] !== result2.embedding[100])
-      throw new Error("stub embedding is not deterministic");
+      throw new Error("mock embedding is not deterministic");
 
-    ok("embed returns 1536-dim normalized stub vector (deterministic)");
+    ok("embed returns 1536-dim normalized vector via mock:llm (deterministic)");
   } catch (e) {
     fail("embed node", e);
   }
@@ -840,7 +852,7 @@ async function testVectorSearch(ctx: Ctx) {
   console.log("\n── Vector search ──");
 
   try {
-    // Search by text — uses stub embeddings
+    // Search by text — uses mock embeddings
     const results = await ctx.call("vector:search", { text: "shell command", k: 3 });
     if (!Array.isArray(results))
       throw new Error(`expected array, got ${typeof results}`);
@@ -915,7 +927,7 @@ async function testEmbeddingPersistence(ctx: Ctx) {
 async function testToolCallVisibility(ctx: Ctx) {
   console.log("\n── Tool call visibility ──");
 
-  // Test that agent:loop returns tool_calls array (even when empty in stub mode)
+  // Test that agent:loop returns tool_calls array (even when empty in mock mode)
   try {
     const result = await ctx.call("agent:loop", { prompt: "what tools exist" });
     if (!result.hasOwnProperty("tool_calls"))
@@ -3122,23 +3134,23 @@ async function testMalformedMessageQuads(ctx: Ctx) {
 async function testLlmEdgeCases(ctx: Ctx) {
   console.log("\n── LLM node edge cases ──");
 
-  // No args
+  // No args — should throw because messages is required
   try {
-    const result = await ctx.call("llm");
-    if (result && result.role === "assistant") {
-      ok("llm: no args => stub returns assistant message");
+    await ctx.call("llm");
+    fail("llm: no args", "should have thrown");
+  } catch (e: any) {
+    if (e.message && e.message.includes("messages")) {
+      ok("llm: no args => throws requiring messages");
     } else {
-      fail("llm: no args", `unexpected: ${JSON.stringify(result)}`);
+      fail("llm: no args", e);
     }
-  } catch (e) {
-    fail("llm: no args", e);
   }
 
-  // Empty messages array
+  // Empty messages array — still valid, mock provider handles it
   try {
     const result = await ctx.call("llm", { messages: [] });
     if (result && result.role === "assistant") {
-      ok("llm: empty messages => stub returns assistant message");
+      ok("llm: empty messages => mock returns assistant message");
     } else {
       fail("llm: empty messages", `unexpected: ${JSON.stringify(result)}`);
     }
@@ -3153,7 +3165,7 @@ async function testLlmEdgeCases(ctx: Ctx) {
       tools: [{ name: "test", description: "test", input_schema: { type: "object", properties: {} } }],
     });
     if (result && Array.isArray(result.content)) {
-      ok("llm: stub with tools param returns content array");
+      ok("llm: mock with tools param returns content array");
     } else {
       fail("llm: tools param", `unexpected: ${JSON.stringify(result)}`);
     }
@@ -3839,7 +3851,7 @@ async function testEmbedDeep(ctx: Ctx) {
     // Different texts should produce different embeddings
     if (r1.embedding[0] === r2.embedding[0] && r1.embedding[100] === r2.embedding[100])
       throw new Error("different texts produced identical embeddings");
-    ok("embed: different texts produce different stub embeddings");
+    ok("embed: different texts produce different mock embeddings");
   } catch (e) {
     fail("embed determinism", e);
   }
@@ -4991,18 +5003,7 @@ async function testErrorMessageQuality(ctx: Ctx) {
 
   // 18. llm with missing messages
   try {
-    // Temporarily set a fake API key to avoid stub path
-    const origKey = process.env.OPENAI_API_KEY;
-    process.env.OPENAI_API_KEY = "test-key-for-validation";
-    try {
-      await ctx.call("llm", {});
-    } finally {
-      if (origKey) {
-        process.env.OPENAI_API_KEY = origKey;
-      } else {
-        delete process.env.OPENAI_API_KEY;
-      }
-    }
+    await ctx.call("llm", {});
     fail("error: llm missing messages", "should have thrown");
   } catch (e: any) {
     if (
@@ -5047,7 +5048,7 @@ async function testErrorMessageQuality(ctx: Ctx) {
 
   // 21. Verify error messages don't leak sensitive info (no API keys in errors)
   try {
-    // The LLM stub path doesn't leak the key; the real path might
+    // The LLM mock path doesn't leak the key; the real path might
     // Check that error messages don't contain common sensitive patterns
     const sensitivePatterns = [
       /sk-[a-zA-Z0-9]{20,}/,
@@ -5482,7 +5483,7 @@ async function testHttpStatusCodeAudit(ctx: Ctx) {
 async function testGracefulDegradation(ctx: Ctx) {
   console.log("\n── Graceful degradation audit ──");
 
-  // 1. No API key: LLM returns stub
+  // 1. No API key: LLM routes through mock:llm faux provider
   try {
     const origKey = process.env.OPENAI_API_KEY;
     delete process.env.OPENAI_API_KEY;
@@ -5490,36 +5491,35 @@ async function testGracefulDegradation(ctx: Ctx) {
       const result = await ctx.call("llm", {
         messages: [{ role: "user", content: "test" }],
       });
-      if (result.api !== "stub")
-        throw new Error(`expected stub api, got ${result.api}`);
       if (result.role !== "assistant")
         throw new Error(`expected assistant role, got ${result.role}`);
-      if (
-        !result.content[0].text.includes(
-          "No API key set"
-        )
-      )
+      if (!Array.isArray(result.content))
+        throw new Error("expected content array");
+      if (result.content[0].type !== "text")
+        throw new Error(`expected text content, got ${result.content[0].type}`);
+      // Mock provider returns [mock] prefixed response
+      if (!result.content[0].text.includes("[mock]"))
         throw new Error(
-          "stub response doesn't mention missing key"
+          "mock response not detected — expected [mock] prefix"
         );
       ok(
-        "graceful: no API key returns stub response with clear message"
+        "graceful: no API key routes through mock:llm faux provider"
       );
     } finally {
       if (origKey) process.env.OPENAI_API_KEY = origKey;
     }
   } catch (e) {
-    fail("graceful: no ANTHROPIC_API_KEY", e);
+    fail("graceful: no API key mock:llm", e);
   }
 
-  // 2. No OPENAI_API_KEY: embed returns deterministic stub
+  // 2. No OPENAI_API_KEY: embed routes through mock:llm HTTP endpoint
   try {
     const origKey = process.env.OPENAI_API_KEY;
     delete process.env.OPENAI_API_KEY;
     try {
       const result = await ctx.call("embed", { text: "test phrase" });
-      if (result.model !== "stub")
-        throw new Error(`expected stub model, got ${result.model}`);
+      if (result.model !== "text-embedding-3-small")
+        throw new Error(`expected model 'text-embedding-3-small', got ${result.model}`);
       if (result.dimensions !== 1536)
         throw new Error(
           `expected 1536 dimensions, got ${result.dimensions}`
@@ -5540,7 +5540,7 @@ async function testGracefulDegradation(ctx: Ctx) {
       );
       if (!match)
         throw new Error(
-          "stub embedding is not deterministic for same input"
+          "mock embedding is not deterministic for same input"
         );
 
       // Different text should produce different embedding
@@ -5552,11 +5552,11 @@ async function testGracefulDegradation(ctx: Ctx) {
       );
       if (sameAsFirst)
         throw new Error(
-          "stub embedding returns identical vectors for different inputs"
+          "mock embedding returns identical vectors for different inputs"
         );
 
       ok(
-        "graceful: no OPENAI_API_KEY returns deterministic stub embedding (1536d)"
+        "graceful: no OPENAI_API_KEY returns deterministic embedding via mock:llm (1536d)"
       );
     } finally {
       if (origKey) process.env.OPENAI_API_KEY = origKey;
@@ -5604,7 +5604,7 @@ async function testGracefulDegradation(ctx: Ctx) {
     fail("graceful: vector support", e);
   }
 
-  // 5. Agent loop works in stub mode (no API key)
+  // 5. Agent loop works via mock:llm (no API key)
   try {
     const origKey = process.env.OPENAI_API_KEY;
     delete process.env.OPENAI_API_KEY;
@@ -5616,21 +5616,21 @@ async function testGracefulDegradation(ctx: Ctx) {
         throw new Error("missing session");
       if (!result.response)
         throw new Error("missing response");
-      // Response should mention the stub
+      // Response should come from mock provider
       if (
-        !result.response.includes("No API key")
+        !result.response.includes("[mock]")
       )
         throw new Error(
-          "stub response not propagated through agent:loop"
+          "mock response not detected — expected [mock] prefix"
         );
       ok(
-        "graceful: agent:loop works end-to-end in stub mode without API key"
+        "graceful: agent:loop works end-to-end via mock:llm without API key"
       );
     } finally {
       if (origKey) process.env.OPENAI_API_KEY = origKey;
     }
   } catch (e) {
-    fail("graceful: agent:loop stub mode", e);
+    fail("graceful: agent:loop mock:llm", e);
   }
 
   // 6. Embed silently skips vector storage when vector column unavailable
@@ -6059,7 +6059,7 @@ async function testSpecialNodeNames(ctx: Ctx) {
 async function testStreamingSupport(ctx: Ctx) {
   console.log("\n── Streaming support ──");
 
-  // Test 1: agent:loop accepts stream and onDelta args (stub mode — no API key)
+  // Test 1: agent:loop accepts stream and onDelta args (via mock:llm)
   try {
     const deltas: string[] = [];
     const result = await ctx.call("agent:loop", {
@@ -6071,9 +6071,8 @@ async function testStreamingSupport(ctx: Ctx) {
       throw new Error(`expected result with session, got: ${JSON.stringify(result)}`);
     if (!result.response)
       throw new Error(`expected result with response, got: ${JSON.stringify(result)}`);
-    // In stub mode (no API key), streaming is bypassed — stub returns directly
-    // so onDelta should NOT have been called
-    ok("agent:loop accepts stream/onDelta args in stub mode");
+    // With mock:llm faux provider, streaming works — deltas should be collected
+    ok("agent:loop accepts stream/onDelta args via mock:llm");
   } catch (e) {
     fail("agent:loop with stream args", e);
   }
@@ -6139,10 +6138,10 @@ async function testStreamingSupport(ctx: Ctx) {
 
 // ── Deep pi-ai integration tests ────────────────────────────────
 
-async function testLlmStubResponseStructure(ctx: Ctx) {
-  console.log("\n── LLM stub response structure (deep) ──");
+async function testLlmMockResponseStructure(ctx: Ctx) {
+  console.log("\n── LLM mock response structure (deep) ──");
 
-  // Test 1: Verify all expected fields in stub response
+  // Test 1: Verify all expected fields in mock:llm response
   try {
     const result = await ctx.call("llm", {
       messages: [{ role: "user", content: "test" }],
@@ -6155,8 +6154,7 @@ async function testLlmStubResponseStructure(ctx: Ctx) {
     if (typeof result.model !== "string") throw new Error("model not string");
     if (typeof result.provider !== "string") throw new Error("provider not string");
     if (result.stopReason !== "stop") throw new Error(`stopReason: ${result.stopReason}`);
-    if (result.api !== "stub") throw new Error(`api: ${result.api}`);
-    if (result.responseId !== "stub") throw new Error(`responseId: ${result.responseId}`);
+    if (typeof result.api !== "string") throw new Error("api not string");
     if (typeof result.timestamp !== "number") throw new Error("timestamp not number");
     // Verify usage structure
     if (!result.usage) throw new Error("missing usage");
@@ -6164,73 +6162,66 @@ async function testLlmStubResponseStructure(ctx: Ctx) {
     if (typeof result.usage.output !== "number") throw new Error("usage.output not number");
     if (!result.usage.cost) throw new Error("missing usage.cost");
     if (typeof result.usage.cost.total !== "number") throw new Error("usage.cost.total not number");
-    ok("llm stub has all expected fields: role, content, model, provider, stopReason, api, responseId, timestamp, usage");
+    ok("llm mock has all expected fields: role, content, model, provider, stopReason, api, timestamp, usage");
   } catch (e) {
-    fail("llm stub response structure", e);
+    fail("llm mock response structure", e);
   }
 
-  // Test 2: Default provider is 'openai'
+  // Test 2: Mock provider is 'mock' (not 'openai' — mock:llm overrides)
   try {
     const result = await ctx.call("llm", {
       messages: [{ role: "user", content: "test" }],
     });
-    if (result.provider !== "openai")
-      throw new Error(`default provider: ${result.provider}, expected 'openai'`);
-    ok("llm default provider is 'openai'");
+    if (result.provider !== "mock")
+      throw new Error(`mock provider: ${result.provider}, expected 'mock'`);
+    ok("llm mock provider is 'mock'");
   } catch (e) {
-    fail("llm default provider", e);
+    fail("llm mock provider", e);
   }
 
-  // Test 3: Provider override via args.provider
+  // Test 3: Mock model is 'mock-1'
   try {
     const result = await ctx.call("llm", {
       messages: [{ role: "user", content: "test" }],
-      provider: "anthropic",
     });
-    if (result.provider !== "anthropic")
-      throw new Error(`provider: ${result.provider}, expected 'anthropic'`);
-    // Anthropic default model should be claude-sonnet-4-20250514
-    if (!result.model.includes("claude"))
-      throw new Error(`anthropic model: ${result.model}, expected claude model`);
-    ok("llm provider override to 'anthropic' works with correct default model");
+    if (result.model !== "mock-1")
+      throw new Error(`model: ${result.model}, expected 'mock-1'`);
+    ok("llm mock model is 'mock-1'");
   } catch (e) {
-    fail("llm provider override", e);
+    fail("llm mock model", e);
   }
 
-  // Test 4: Stub content includes provider and model info
+  // Test 4: Mock content includes [mock] prefix and prompt info
   try {
     const result = await ctx.call("llm", {
-      messages: [{ role: "user", content: "test" }],
-      provider: "anthropic",
+      messages: [{ role: "user", content: "test prompt here" }],
     });
     const text = result.content[0].text;
-    if (!text.includes("anthropic"))
-      throw new Error(`stub text does not mention provider: ${text}`);
-    if (!text.includes(result.model))
-      throw new Error(`stub text does not mention model: ${text}`);
-    ok("llm stub content includes provider and model info");
+    if (!text.includes("[mock]"))
+      throw new Error(`mock text does not contain [mock]: ${text}`);
+    if (!text.includes("test prompt here"))
+      throw new Error(`mock text does not echo the prompt: ${text}`);
+    ok("llm mock content includes [mock] prefix and echoes prompt");
   } catch (e) {
-    fail("llm stub content info", e);
+    fail("llm mock content info", e);
   }
 
-  // Test 5: Stub usage fields are all zero
+  // Test 5: Mock usage cost fields are all zero
   try {
     const result = await ctx.call("llm", {
       messages: [{ role: "user", content: "test" }],
     });
     const u = result.usage;
-    if (u.input !== 0 || u.output !== 0 || u.totalTokens !== 0)
-      throw new Error(`usage not zeroed: ${JSON.stringify(u)}`);
     if (u.cost.input !== 0 || u.cost.output !== 0 || u.cost.total !== 0)
       throw new Error(`cost not zeroed: ${JSON.stringify(u.cost)}`);
-    ok("llm stub usage and cost fields are all zero");
+    ok("llm mock usage cost fields are all zero");
   } catch (e) {
-    fail("llm stub usage zeros", e);
+    fail("llm mock usage zeros", e);
   }
 }
 
-async function testEmbedStubBehavior(ctx: Ctx) {
-  console.log("\n── Embed stub behavior (deep) ──");
+async function testEmbedMockBehavior(ctx: Ctx) {
+  console.log("\n── Embed mock behavior (deep) ──");
 
   // Test 1: Verify correct dimensions
   try {
@@ -6239,7 +6230,7 @@ async function testEmbedStubBehavior(ctx: Ctx) {
       throw new Error(`dimensions: ${result.dimensions}, expected 1536`);
     if (result.embedding.length !== result.dimensions)
       throw new Error(`embedding.length ${result.embedding.length} !== dimensions ${result.dimensions}`);
-    ok("embed stub returns dimensions=1536 matching embedding length");
+    ok("embed mock returns dimensions=1536 matching embedding length");
   } catch (e) {
     fail("embed dimensions", e);
   }
@@ -6253,7 +6244,7 @@ async function testEmbedStubBehavior(ctx: Ctx) {
       if (r1.embedding[i] !== r2.embedding[i]) { allMatch = false; break; }
     }
     if (!allMatch) throw new Error("embeddings differ for same input");
-    ok("embed stub is deterministic (full vector comparison)");
+    ok("embed mock is deterministic (full vector comparison)");
   } catch (e) {
     fail("embed deterministic", e);
   }
@@ -6267,7 +6258,7 @@ async function testEmbedStubBehavior(ctx: Ctx) {
       if (r1.embedding[i] !== r2.embedding[i]) { differ = true; break; }
     }
     if (!differ) throw new Error("different texts produced identical embeddings");
-    ok("embed stub produces different vectors for different inputs");
+    ok("embed mock produces different vectors for different inputs");
   } catch (e) {
     fail("embed different inputs", e);
   }
@@ -6280,26 +6271,26 @@ async function testEmbedStubBehavior(ctx: Ctx) {
       if (v < -1.001 || v > 1.001) { outOfRange = true; break; }
     }
     if (outOfRange) throw new Error("embedding values out of [-1, 1] range");
-    ok("embed stub values are in [-1, 1] range");
+    ok("embed mock values are in [-1, 1] range");
   } catch (e) {
     fail("embed value range", e);
   }
 
-  // Test 5: model field is 'stub'
+  // Test 5: model field is 'text-embedding-3-small' (via mock:llm HTTP endpoint)
   try {
     const result = await ctx.call("embed", { text: "model check" });
-    if (result.model !== "stub")
-      throw new Error(`model: ${result.model}, expected 'stub'`);
-    ok("embed stub model field is 'stub'");
+    if (result.model !== "text-embedding-3-small")
+      throw new Error(`model: ${result.model}, expected 'text-embedding-3-small'`);
+    ok("embed mock model field is 'text-embedding-3-small'");
   } catch (e) {
-    fail("embed stub model", e);
+    fail("embed mock model", e);
   }
 }
 
 async function testAgentLoopToolDispatch(ctx: Ctx) {
   console.log("\n── Agent loop tool dispatch (deep) ──");
 
-  // Test 1: agent:loop handles stub mode correctly with all expected fields
+  // Test 1: agent:loop handles mock mode correctly with all expected fields
   try {
     const session = "test:dispatch:" + Date.now();
     const result = await ctx.call("agent:loop", {
@@ -6309,12 +6300,12 @@ async function testAgentLoopToolDispatch(ctx: Ctx) {
     if (typeof result.session !== "string") throw new Error("missing session");
     if (typeof result.response !== "string") throw new Error("missing response");
     if (!Array.isArray(result.tool_calls)) throw new Error("missing tool_calls array");
-    // In stub mode, tool_calls should be empty (no actual LLM to request tools)
+    // Mock provider returns text responses, no tool calls
     if (result.tool_calls.length !== 0)
-      throw new Error(`expected 0 tool_calls in stub mode, got ${result.tool_calls.length}`);
-    ok("agent:loop stub returns session, response, empty tool_calls");
+      throw new Error(`expected 0 tool_calls in mock mode, got ${result.tool_calls.length}`);
+    ok("agent:loop mock returns session, response, empty tool_calls");
   } catch (e) {
-    fail("agent:loop stub structure", e);
+    fail("agent:loop mock structure", e);
   }
 
   // Test 2: agent:loop stores both user and assistant messages
@@ -6355,31 +6346,30 @@ async function testAgentLoopToolDispatch(ctx: Ctx) {
     fail("agent:loop timestamps", e);
   }
 
-  // Test 4: Default provider in agent:loop is 'openai'
+  // Test 4: Mock response includes provider=mock
   try {
     const session = "test:dispatch:provider:" + Date.now();
     const result = await ctx.call("agent:loop", { prompt: "provider test", session });
-    // The stub response text should mention the provider
-    if (!result.response.includes("openai"))
-      throw new Error(`response does not mention default provider: ${result.response}`);
-    ok("agent:loop default provider is 'openai'");
+    // The mock response text should mention 'mock' provider
+    if (!result.response.includes("mock"))
+      throw new Error(`response does not mention mock provider: ${result.response}`);
+    ok("agent:loop mock response mentions provider");
   } catch (e) {
-    fail("agent:loop default provider", e);
+    fail("agent:loop mock provider", e);
   }
 
-  // Test 5: Provider override in agent:loop
+  // Test 5: Mock response echoes the prompt
   try {
-    const session = "test:dispatch:provider2:" + Date.now();
+    const session = "test:dispatch:echo:" + Date.now();
     const result = await ctx.call("agent:loop", {
-      prompt: "provider override test",
+      prompt: "echo this unique string 12345",
       session,
-      provider: "anthropic",
     });
-    if (!result.response.includes("anthropic"))
-      throw new Error(`response does not mention overridden provider: ${result.response}`);
-    ok("agent:loop provider override to 'anthropic' works");
+    if (!result.response.includes("echo this unique string 12345"))
+      throw new Error(`response does not echo the prompt: ${result.response}`);
+    ok("agent:loop mock response echoes the user prompt");
   } catch (e) {
-    fail("agent:loop provider override", e);
+    fail("agent:loop mock echo", e);
   }
 }
 
@@ -6446,40 +6436,39 @@ async function testAgentLoopEdgeCases(ctx: Ctx) {
     fail("agent:loop unique sessions", e);
   }
 
-  // Test 5: agent:loop with tools available still works in stub mode
+  // Test 5: agent:loop with tools available still works in mock mode
   try {
     await ctx.call("agent:tools");
     const session = "test:edge:tools:" + Date.now();
     const result = await ctx.call("agent:loop", { prompt: "tools test", session });
     if (!result.session || !result.response)
       throw new Error(`missing fields: ${JSON.stringify(result)}`);
-    ok("agent:loop with registered tools works in stub mode");
+    ok("agent:loop with registered tools works in mock mode");
   } catch (e) {
     fail("agent:loop with tools", e);
   }
 
-  // Test 6: agent:loop stores system prompt awareness (stub mentions model)
+  // Test 6: agent:loop stores mock assistant message with model field
   try {
-    const session = "test:edge:stub:" + Date.now();
-    const result = await ctx.call("agent:loop", { prompt: "stub info", session });
-    // Stub response should mention the model
+    const session = "test:edge:mock:" + Date.now();
+    const result = await ctx.call("agent:loop", { prompt: "mock info", session });
     const msgs = await ctx.query({ p: "message", g: session });
     const sorted = msgs.sort((a: any, b: any) => a.id - b.id);
     const assistantMsg = JSON.parse(sorted[1].o).msg;
-    if (assistantMsg.api !== "stub")
-      throw new Error(`expected api='stub', got '${assistantMsg.api}'`);
+    if (typeof assistantMsg.api !== "string")
+      throw new Error(`expected api to be a string, got '${typeof assistantMsg.api}'`);
     if (!assistantMsg.model)
       throw new Error("assistant message missing model field");
-    ok("agent:loop stub assistant message has api='stub' and model field");
+    ok("agent:loop mock assistant message has api and model fields");
   } catch (e) {
-    fail("agent:loop stub metadata", e);
+    fail("agent:loop mock metadata", e);
   }
 }
 
 async function testStreamingDeep(ctx: Ctx) {
   console.log("\n── Streaming deep tests ──");
 
-  // Test 1: stream=true with onDelta in stub mode does not crash
+  // Test 1: stream=true with onDelta in mock mode works and collects deltas
   try {
     const deltas: string[] = [];
     const result = await ctx.call("agent:loop", {
@@ -6490,10 +6479,11 @@ async function testStreamingDeep(ctx: Ctx) {
     });
     if (!result.session) throw new Error("missing session");
     if (!result.response) throw new Error("missing response");
-    // In stub mode, no streaming happens — stub returns directly before streaming code path
-    ok("streaming with onDelta in stub mode does not crash");
+    // With mock:llm faux provider, streaming does work — deltas should be collected
+    if (deltas.length === 0) throw new Error("expected deltas from faux provider streaming");
+    ok("streaming with onDelta in mock mode collects deltas");
   } catch (e) {
-    fail("streaming stub safety", e);
+    fail("streaming mock safety", e);
   }
 
   // Test 2: stream=true without onDelta does not crash
@@ -6548,14 +6538,14 @@ async function testStreamingDeep(ctx: Ctx) {
     // Verify stream is imported from pi-ai
     if (!source.includes("stream"))
       throw new Error("source does not import stream");
-    // Verify the stub returns before the streaming code path
-    const stubIdx = source.indexOf("stub");
+    // Verify the mock fallback comes before the streaming code path
+    const mockIdx = source.indexOf("_mockFaux");
     const streamCallIdx = source.indexOf("stream(model");
-    if (stubIdx < 0) throw new Error("no stub path found");
+    if (mockIdx < 0) throw new Error("no mock fallback path found");
     if (streamCallIdx < 0) throw new Error("no stream() call found");
-    if (stubIdx > streamCallIdx)
-      throw new Error("stub check comes after stream() call — stub should short-circuit first");
-    ok("streaming code path is properly guarded (stub before stream, onDelta check)");
+    if (mockIdx > streamCallIdx)
+      throw new Error("mock check comes after stream() call — mock should resolve first");
+    ok("streaming code path is properly guarded (mock before stream, onDelta check)");
   } catch (e) {
     fail("streaming code guards", e);
   }
@@ -9078,7 +9068,7 @@ async function testApiServerStreamingDeep(ctx: Ctx) {
       // Both should contain the stub text (same prompt => same stub output)
       if (assembled.length === 0) throw new Error("assembled text is empty");
       if (fullText.length === 0) throw new Error("full text is empty");
-      // The stub produces deterministic output for the same provider, so both should be equal
+      // The mock produces deterministic output for the same provider, so both should be equal
       if (assembled !== fullText)
         throw new Error(`streaming assembled '${assembled.slice(0,60)}...' !== non-streaming '${fullText.slice(0,60)}...'`);
       ok("assembled streaming chunks equal non-streaming response text");
@@ -9943,7 +9933,7 @@ async function testEmbedVectorSearchDeep(ctx: Ctx) {
     const result = await ctx.call("embed", { text: "a" });
     if (result.embedding.length !== 1536)
       throw new Error(`dimensions: ${result.embedding.length}`);
-    if (result.model !== "stub")
+    if (result.model !== "text-embedding-3-small")
       throw new Error(`model: ${result.model}`);
     ok("embed: single character text produces valid 1536-dim vector");
   } catch (e) {
@@ -9979,7 +9969,7 @@ async function testEmbedVectorSearchDeep(ctx: Ctx) {
     fail("embed graph storage", e);
   }
 
-  // Test 5: Embed is deterministic in stub mode (same input = same output)
+  // Test 5: Embed is deterministic in mock mode (same input = same output)
   try {
     const r1 = await ctx.call("embed", { text: "determinism redux" });
     const r2 = await ctx.call("embed", { text: "determinism redux" });
@@ -10246,8 +10236,8 @@ async function main() {
   await testGraphParameterIsolation(ctx);
   await testSpecialNodeNames(ctx);
   await testStreamingSupport(ctx);
-  await testLlmStubResponseStructure(ctx);
-  await testEmbedStubBehavior(ctx);
+  await testLlmMockResponseStructure(ctx);
+  await testEmbedMockBehavior(ctx);
   await testAgentLoopToolDispatch(ctx);
   await testAgentLoopEdgeCases(ctx);
   await testStreamingDeep(ctx);

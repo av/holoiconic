@@ -39,7 +39,7 @@ Everything is an RDF quad: `(subject, predicate, object, graph)` — all strings
 | `src/boot.ts` | Kernel entry point. Connects DB, creates ctx, seeds if empty, calls main. |
 | `src/ctx.ts` | The 6 primitives: assert, retract, query, call, set, on. Plus ctx.self via AsyncLocalStorage. |
 | `src/db.ts` | Turso/libSQL connection factory + schema init (quads table + optional vector column). |
-| `src/template.ts` | All 28 node source strings in the `nodes` record + `seedTemplate()` function. This is the largest and most-edited file. |
+| `src/template.ts` | All 29 node source strings in the `nodes` record + `seedTemplate()` function. This is the largest and most-edited file. |
 | `src/test-boot.ts` | Integration tests with custom harness (no framework). |
 | `index.ts` | Re-exports public API. |
 
@@ -98,4 +98,21 @@ Tests boot the full system against a local file DB — no mocking. Each test fun
 
 ## Environment variables
 
-Without `ANTHROPIC_API_KEY` or `OPENAI_API_KEY`, the LLM and embed nodes use deterministic stubs. Without `TURSO_URL`/`TURSO_AUTH_TOKEN`, data is stored locally in `holoiconic.db`.
+Without `ANTHROPIC_API_KEY` or `OPENAI_API_KEY`, `main` spawns the `mock:llm` node — a graph-resident mock server that registers a pi-ai faux provider for LLM completions and runs an HTTP server for OpenAI-compatible embeddings. The `llm`, `agent:loop`, and `embed` nodes route through it automatically. Without `TURSO_URL`/`TURSO_AUTH_TOKEN`, data is stored locally in `holoiconic.db`.
+
+<!-- facts:start -->
+## Fact-driven development
+
+This project uses [facts](https://github.com/av/facts) — a CLI that manages `.facts` files containing atomic, validatable truth statements about the project. The fact sheet is both the spec and the documentation.
+
+**Start of work:** Run `facts list` to read the project spec. Run `facts check` to see what holds and what doesn't. Use this to orient before writing code.
+
+**During work:** Keep the fact sheet in sync. When you add a feature, add corresponding facts. When you fix a bug, verify related facts still hold. When you remove code, remove obsolete facts. Run `facts check` after significant changes.
+
+**Three distinct workflows — do not confuse them:**
+- **Define** — write new facts as specification. The user says "add facts", "define the spec", "work on facts". Do NOT remove unimplemented facts — they represent intended work.
+- **Discover** (`facts-discover` skill) — scan the codebase and sync the fact sheet to match reality. Only when the user explicitly asks to discover, audit, or sync.
+- **Implement** (`facts-implement` skill) — make unimplemented facts true in code. Only when the user explicitly asks to implement.
+
+When in doubt about which workflow the user wants, ask.
+<!-- facts:end -->

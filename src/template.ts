@@ -229,21 +229,8 @@ const { getModel, complete, getEnvApiKey } = piAi;
 const providerName = (args && args.provider) || 'openai';
 const modelId = (args && args.model) || (providerName === 'anthropic' ? 'claude-sonnet-4-20250514' : 'gpt-4o');
 
-// Check for API key — fall back to deterministic stub
+// Check for API key — if none, route through mock:llm faux provider
 const apiKey = (args && args.apiKey) || getEnvApiKey(providerName);
-if (!apiKey) {
-  return {
-    role: 'assistant',
-    content: [{ type: 'text', text: '[llm] No API key set for provider ' + providerName + '. Model: ' + modelId }],
-    model: modelId,
-    provider: providerName,
-    stopReason: 'stop',
-    usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
-    api: 'stub',
-    responseId: 'stub',
-    timestamp: Date.now(),
-  };
-}
 
 const messages = args && args.messages;
 if (!messages || !Array.isArray(messages)) {
@@ -255,12 +242,21 @@ const piContext = { messages };
 if (args && args.system) piContext.systemPrompt = args.system;
 if (args && args.tools && args.tools.length > 0) piContext.tools = args.tools;
 
-// Get the pi-ai model descriptor
-const model = getModel(providerName, modelId);
-if (!model) throw new Error('[llm] unknown model: ' + providerName + '/' + modelId);
+let model;
+let opts = {};
 
-// Options
-const opts = { apiKey };
+if (apiKey) {
+  // Real provider path
+  model = getModel(providerName, modelId);
+  if (!model) throw new Error('[llm] unknown model: ' + providerName + '/' + modelId);
+  opts.apiKey = apiKey;
+} else {
+  // Mock provider path — use the faux provider registered by mock:llm
+  const faux = ctx._mockFaux;
+  if (!faux) throw new Error('[llm] no API key for ' + providerName + ' and mock:llm is not running');
+  model = faux.getModel('mock-1');
+}
+
 if (args && args.max_tokens) opts.maxTokens = args.max_tokens;
 if (args && args.temperature !== undefined) opts.temperature = args.temperature;
 
@@ -606,19 +602,21 @@ const modelId = (args && args.model) || (providerName === 'anthropic' ? 'claude-
 // Track all tool calls for visibility
 const allToolCalls = [];
 
-// Check for API key — use stub if none available
+// Resolve model: real provider if API key available, mock:llm faux provider otherwise
 const apiKey = (args && args.apiKey) || getEnvApiKey(providerName);
-if (!apiKey) {
-  // Deterministic stub when no API key is set
-  const stubText = '[agent:loop] No API key for provider ' + providerName + '. Model: ' + modelId;
-  const stubAssistantMsg = { role: 'assistant', content: [{ type: 'text', text: stubText }], model: modelId, provider: providerName, api: 'stub', stopReason: 'stop', timestamp: Date.now() };
-  await ctx.assert(sessionId, 'message', JSON.stringify({ seq: seq++, msg: stubAssistantMsg }), sessionId);
-  return { session: sessionId, response: stubText, tool_calls: allToolCalls };
+let model;
+let callOpts = {};
+
+if (apiKey) {
+  model = getModel(providerName, modelId);
+  if (!model) throw new Error('[agent:loop] unknown model: ' + providerName + '/' + modelId);
+  callOpts.apiKey = apiKey;
+} else {
+  const faux = ctx._mockFaux;
+  if (!faux) throw new Error('[agent:loop] no API key for ' + providerName + ' and mock:llm is not running');
+  model = faux.getModel('mock-1');
 }
 
-// Resolve model descriptor once (invariant across loop iterations)
-const model = getModel(providerName, modelId);
-if (!model) throw new Error('[agent:loop] unknown model: ' + providerName + '/' + modelId);
 const useStream = args && args.stream;
 
 // Agentic loop — keep calling LLM until we get a text response (no tool calls)
@@ -635,7 +633,7 @@ for (let i = 0; i < maxIterations; i++) {
 
   let response;
   if (useStream) {
-    const eventStream = stream(model, piContext, { apiKey });
+    const eventStream = stream(model, piContext, callOpts);
     for await (const event of eventStream) {
       if (event.type === 'text_delta' && args.onDelta) {
         args.onDelta(event.delta);
@@ -643,7 +641,7 @@ for (let i = 0; i < maxIterations; i++) {
     }
     response = await eventStream.result();
   } else {
-    response = await complete(model, piContext, { apiKey });
+    response = await complete(model, piContext, callOpts);
   }
 
   // Store the assistant message in the graph
@@ -1626,38 +1624,21 @@ if (!text) throw new Error('[embed] args.text is required');
 const { getEnvApiKey } = await import('@mariozechner/pi-ai');
 const apiKey = (args && args.apiKey) || getEnvApiKey('openai');
 
+// Resolve base URL: real OpenAI if key available, mock:llm HTTP server otherwise
+let baseURL = undefined;
+let effectiveKey = apiKey;
 if (!apiKey) {
-  // Stub: deterministic-ish random vector based on text hash
-  const dim = 1536;
-  const vec = new Array(dim);
-  let hash = 0;
-  for (let i = 0; i < text.length; i++) {
-    hash = ((hash << 5) - hash + text.charCodeAt(i)) | 0;
-  }
-  for (let i = 0; i < dim; i++) {
-    hash = ((hash << 5) - hash + i) | 0;
-    vec[i] = ((hash & 0xffff) / 0xffff) * 2 - 1;
-  }
-  // Normalize
-  let norm = 0;
-  for (let i = 0; i < dim; i++) norm += vec[i] * vec[i];
-  norm = Math.sqrt(norm);
-  for (let i = 0; i < dim; i++) vec[i] /= norm;
-
-  // Persist the embedding in the graph for future lookup
-  try {
-    const textId = 'emb:' + Math.abs(hash).toString(36);
-    await ctx.assert(textId, 'embedding', text, 'embeddings', vec);
-  } catch (e) {
-    // Silently skip if vector column is unavailable
-  }
-
-  return { embedding: vec, model: 'stub', dimensions: dim };
+  // Route through mock:llm's HTTP embeddings endpoint
+  const urlQuads = await ctx.query({ s: 'mock:llm', p: 'url' });
+  if (urlQuads.length === 0) throw new Error('[embed] no API key and mock:llm is not running');
+  baseURL = urlQuads[0].o + '/v1';
+  effectiveKey = 'mock-key'; // OpenAI SDK requires a key, mock server ignores it
 }
 
-// Use the openai SDK (bundled with pi-ai) instead of raw fetch
 const OpenAI = (await import('openai')).default;
-const client = new OpenAI({ apiKey });
+const clientOpts = { apiKey: effectiveKey };
+if (baseURL) clientOpts.baseURL = baseURL;
+const client = new OpenAI(clientOpts);
 const embModel = (args && args.model) || 'text-embedding-3-small';
 
 const result = await client.embeddings.create({
@@ -2167,6 +2148,189 @@ return report;
   // ── set ─────────────────────────────────────────────────────────
   // Convenience: retracts all quads matching (s, p, *, g) then asserts (s, p, o, g).
   // Useful for single-valued predicates like 'source', 'status', etc.
+  // ── mock:llm ────────────────────────────────────────────────────
+  // Graph-resident mock LLM provider. Registers a pi-ai faux provider for
+  // LLM completions and starts a minimal HTTP server for OpenAI-compatible
+  // embeddings. When no real API key is set, llm/agent:loop/embed use this
+  // instead of inline stubs. Long-lived: receives args.signal for cleanup.
+  "mock:llm": `
+const signal = args && args.signal;
+const piAi = await import('@mariozechner/pi-ai');
+const { registerFauxProvider, fauxAssistantMessage, fauxText } = piAi;
+
+// ── Deterministic embedding generator (hash-based) ──
+function hashEmbed(text) {
+  const dim = 1536;
+  const vec = new Array(dim);
+  let hash = 0;
+  for (let i = 0; i < text.length; i++) {
+    hash = ((hash << 5) - hash + text.charCodeAt(i)) | 0;
+  }
+  for (let i = 0; i < dim; i++) {
+    hash = ((hash << 5) - hash + i) | 0;
+    vec[i] = ((hash & 0xffff) / 0xffff) * 2 - 1;
+  }
+  let norm = 0;
+  for (let i = 0; i < dim; i++) norm += vec[i] * vec[i];
+  norm = Math.sqrt(norm);
+  for (let i = 0; i < dim; i++) vec[i] /= norm;
+  return vec;
+}
+
+// ── Register faux provider for LLM completions ──
+// The response factory receives the full context and generates contextual responses.
+const faux = registerFauxProvider({
+  provider: 'mock',
+  models: [
+    { id: 'mock-1', name: 'Mock Model', reasoning: false, input: ['text', 'image'] },
+  ],
+});
+
+// Dynamic response factory that echoes context info
+const responseFactory = (context, options, state, model) => {
+  const lastMsg = context.messages[context.messages.length - 1];
+  let prompt = '';
+  if (lastMsg && lastMsg.role === 'user') {
+    prompt = typeof lastMsg.content === 'string' ? lastMsg.content : lastMsg.content.map(b => b.type === 'text' ? b.text : '').join(' ');
+  }
+  const text = '[mock] provider=mock model=' + model.id + ' prompt=' + JSON.stringify(prompt);
+  return fauxAssistantMessage(text);
+};
+
+// Seed unlimited responses via the factory
+// The faux provider calls factories in order — one infinite factory suffices
+const infiniteResponses = Array.from({ length: 10000 }, () => responseFactory);
+faux.setResponses(infiniteResponses);
+
+// Store the faux registration on ctx for other nodes to discover
+ctx._mockFaux = faux;
+
+// ── HTTP server for OpenAI-compatible embeddings ──
+const port = (args && args.port) || 0; // 0 = auto-assign
+const server = Bun.serve({
+  port,
+  signal,
+  fetch(req) {
+    const url = new URL(req.url);
+
+    // CORS
+    if (req.method === 'OPTIONS') {
+      return new Response(null, {
+        headers: {
+          'Access-Control-Allow-Origin': '*',
+          'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
+          'Access-Control-Allow-Headers': 'Content-Type, Authorization',
+        },
+      });
+    }
+
+    const corsHeaders = {
+      'Access-Control-Allow-Origin': '*',
+      'Content-Type': 'application/json',
+    };
+
+    // GET /v1/models
+    if (url.pathname === '/v1/models' && req.method === 'GET') {
+      return Response.json({
+        object: 'list',
+        data: [
+          { id: 'mock-1', object: 'model', created: Math.floor(Date.now() / 1000), owned_by: 'mock' },
+          { id: 'text-embedding-3-small', object: 'model', created: Math.floor(Date.now() / 1000), owned_by: 'mock' },
+        ],
+      }, { headers: corsHeaders });
+    }
+
+    // POST /v1/embeddings
+    if (url.pathname === '/v1/embeddings' && req.method === 'POST') {
+      return (async () => {
+        const body = await req.json();
+        const input = body.input;
+        const useBase64 = body.encoding_format === 'base64';
+        const texts = Array.isArray(input) ? input : [input];
+        const data = texts.map((t, i) => {
+          const vec = hashEmbed(String(t));
+          let embedding;
+          if (useBase64) {
+            // Encode as base64 Float32Array (OpenAI SDK default)
+            const buf = new Float32Array(vec);
+            const bytes = new Uint8Array(buf.buffer);
+            let binary = '';
+            for (let j = 0; j < bytes.length; j++) binary += String.fromCharCode(bytes[j]);
+            embedding = btoa(binary);
+          } else {
+            embedding = vec;
+          }
+          return { object: 'embedding', embedding, index: i };
+        });
+        return Response.json({
+          object: 'list',
+          data,
+          model: body.model || 'text-embedding-3-small',
+          usage: { prompt_tokens: 0, total_tokens: 0 },
+        }, { headers: corsHeaders });
+      })();
+    }
+
+    // POST /v1/chat/completions
+    if (url.pathname === '/v1/chat/completions' && req.method === 'POST') {
+      return (async () => {
+        const body = await req.json();
+        const msgs = body.messages || [];
+        const lastMsg = msgs[msgs.length - 1];
+        const prompt = lastMsg ? (lastMsg.content || '') : '';
+        const text = '[mock] model=' + (body.model || 'mock-1') + ' prompt=' + JSON.stringify(prompt);
+        return Response.json({
+          id: 'chatcmpl-mock-' + Date.now(),
+          object: 'chat.completion',
+          created: Math.floor(Date.now() / 1000),
+          model: body.model || 'mock-1',
+          choices: [{
+            index: 0,
+            message: { role: 'assistant', content: text },
+            finish_reason: 'stop',
+          }],
+          usage: { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 },
+        }, { headers: corsHeaders });
+      })();
+    }
+
+    // Health check
+    if (url.pathname === '/health') {
+      return Response.json({ status: 'ok' }, { headers: corsHeaders });
+    }
+
+    return Response.json({ error: 'not found' }, { status: 404, headers: corsHeaders });
+  },
+});
+
+const actualPort = server.port;
+const mockUrl = 'http://localhost:' + actualPort;
+
+// Store config in the graph so other nodes can discover the mock
+await ctx.set('mock:llm', 'port', String(actualPort));
+await ctx.set('mock:llm', 'url', mockUrl);
+await ctx.set('mock:llm', 'status', 'running');
+console.log('[mock:llm] running on ' + mockUrl + ' (faux provider + embeddings HTTP)');
+
+// Keep alive until signal
+if (signal) {
+  await new Promise(resolve => {
+    signal.addEventListener('abort', () => {
+      faux.unregister();
+      resolve(undefined);
+    }, { once: true });
+    if (signal.aborted) {
+      faux.unregister();
+      resolve(undefined);
+    }
+  });
+  await ctx.set('mock:llm', 'status', 'stopped');
+} else {
+  // Non-spawned call: just return the config
+  return { port: actualPort, url: mockUrl, fauxApi: faux.api };
+}
+`,
+
   "set": `
 const s = args && args.s;
 const p = args && args.p;
@@ -2562,16 +2726,25 @@ try {
   // Small delay to let supervisor initialize
   await new Promise(r => setTimeout(r, 50));
 
-  // 3. Register agent tools
+  // 3. If no LLM API key is detected, spawn mock:llm for local development
+  const { getEnvApiKey } = await import('@mariozechner/pi-ai');
+  const hasKey = getEnvApiKey('openai') || getEnvApiKey('anthropic');
+  if (!hasKey) {
+    console.log('[main] no API key detected — spawning mock:llm');
+    await ctx.call('spawn', { node: 'mock:llm' });
+    await new Promise(r => setTimeout(r, 50));
+  }
+
+  // 4. Register agent tools
   await ctx.call('agent:tools');
 
-  // 4. Start the API server
+  // 5. Start the API server
   await ctx.call('spawn', { node: 'api:server' });
 
-  // 5. Start the WebUI
+  // 6. Start the WebUI
   await ctx.call('spawn', { node: 'web:ui' });
 
-  // 6. Start the REPL
+  // 7. Start the REPL
   console.log('[main] holoiconic ready — REPL, API (3001), WebUI (3002)');
   await ctx.call('spawn', { node: 'repl' });
 } catch (err) {

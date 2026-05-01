@@ -136,8 +136,8 @@
   command: grep -q 'function fire' src/ctx.ts && grep -q 'fire({ type: "assert"' src/ctx.ts && grep -q 'fire({ type: "retract"' src/ctx.ts
 - label: if the graph is empty on boot, the kernel seeds it from a template
   command: grep -q 'length === 0' src/boot.ts && grep -q 'seedTemplate' src/boot.ts
-- label: the template seeds 28 nodes: sys:compiler, sys:supervisor, main, spawn, shell, llm, agent:tools, agent:loop, api:server, web:ui, repl, set, snapshots, embed, vector:search, graph introspection, versioning, cron, and metrics
-  command: test $(grep -c '^  "' src/template.ts) -ge 28
+- label: the template seeds 29 nodes: sys:compiler, sys:supervisor, main, spawn, shell, llm, agent:tools, agent:loop, api:server, web:ui, repl, set, mock:llm, snapshots, embed, vector:search, graph introspection, versioning, cron, and metrics
+  command: test $(grep -c '^  "' src/template.ts) -ge 29
 - label: main calls sys:compiler first — which replaces ctx.call with a cached, reactively-invalidated version
   command: grep -q 'sys:compiler' src/template.ts
 - label: main then calls spawn for sys:supervisor and the application
@@ -227,8 +227,8 @@
   command: grep -q 'export function createCtx' src/ctx.ts && grep -q '/v1/chat/completions' src/template.ts
 - label: agent:tools registers 18 tools for the LLM agent, each stored as a Tool-typed quad with an input_schema
   command: test $(grep -c "'type', 'Tool'" src/template.ts) -eq 18 && grep -q "console.log.*registered 18 tools" src/template.ts
-- label: embed generates vector embeddings via OpenAI SDK (text-embedding-3-small) with deterministic stub fallback when no API key is set
-  command: grep -A50 '"embed":' src/template.ts | grep -q 'text-embedding-3-small' && grep -A50 '"embed":' src/template.ts | grep -q "import('openai')" && grep -A20 '"embed":' src/template.ts | grep -q 'Stub\|stub'
+- label: embed generates vector embeddings via OpenAI SDK (text-embedding-3-small), routing through mock:llm when no API key is set
+  command: grep -A50 '"embed":' src/template.ts | grep -q 'text-embedding-3-small' && grep -A50 '"embed":' src/template.ts | grep -q "import('openai')" && grep -A30 '"embed":' src/template.ts | grep -q "mock:llm"
 - label: vector:search performs semantic search using cosine similarity over stored embeddings, with brute-force fallback
   command: grep -A60 '"vector:search":' src/template.ts | grep -q 'cosine similarity' && grep -A60 '"vector:search":' src/template.ts | grep -q 'brute-force\|Fallback'
 - label: graph introspection nodes (graph:describe, graph:subjects, graph:deps, inspect) provide structural analysis of the graph and dependency tracking
@@ -243,8 +243,8 @@
   command: grep -A40 '"agent:loop":' src/template.ts | grep -q 'systemPrompt' && grep -A40 '"agent:loop":' src/template.ts | grep -q 'reactive graph'
 - label: the llm node uses pi-ai complete/stream — provider-agnostic, defaults to OpenAI-compatible
   command: grep -A45 '"llm":' src/template.ts | grep -q "import('@mariozechner/pi-ai')" && grep -A45 '"llm":' src/template.ts | grep -q "complete(model, piContext"
-- label: the llm node defaults to openai provider with gpt-4o, and returns a deterministic stub when no API key is set
-  command: grep -A10 '"llm":' src/template.ts | grep -q "|| 'openai'" && grep -A10 '"llm":' src/template.ts | grep -q "'gpt-4o'" && grep -A30 '"llm":' src/template.ts | grep -q 'No API key'
+- label: the llm node defaults to openai provider with gpt-4o, and routes through mock:llm faux provider when no API key is set
+  command: grep -A10 '"llm":' src/template.ts | grep -q "|| 'openai'" && grep -A10 '"llm":' src/template.ts | grep -q "'gpt-4o'" && grep -A40 '"llm":' src/template.ts | grep -q '_mockFaux'
 - label: embed persists computed embeddings in the graph (graph='embeddings') so vector:search can reuse them without recomputing
   command: grep -q "'embeddings'" src/template.ts
 - label: agent:loop returns the final response plus a log of every tool call made during the turn
