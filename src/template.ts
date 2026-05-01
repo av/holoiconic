@@ -257,6 +257,7 @@ if (args && args.tools && args.tools.length > 0) piContext.tools = args.tools;
 
 // Get the pi-ai model descriptor
 const model = getModel(providerName, modelId);
+if (!model) throw new Error('[llm] unknown model: ' + providerName + '/' + modelId);
 
 // Options
 const opts = { apiKey };
@@ -605,6 +606,21 @@ const modelId = (args && args.model) || (providerName === 'anthropic' ? 'claude-
 // Track all tool calls for visibility
 const allToolCalls = [];
 
+// Check for API key — use stub if none available
+const apiKey = (args && args.apiKey) || getEnvApiKey(providerName);
+if (!apiKey) {
+  // Deterministic stub when no API key is set
+  const stubText = '[agent:loop] No API key for provider ' + providerName + '. Model: ' + modelId;
+  const stubAssistantMsg = { role: 'assistant', content: [{ type: 'text', text: stubText }], model: modelId, provider: providerName, api: 'stub', stopReason: 'stop', timestamp: Date.now() };
+  await ctx.assert(sessionId, 'message', JSON.stringify({ seq: seq++, msg: stubAssistantMsg }), sessionId);
+  return { session: sessionId, response: stubText, tool_calls: allToolCalls };
+}
+
+// Resolve model descriptor once (invariant across loop iterations)
+const model = getModel(providerName, modelId);
+if (!model) throw new Error('[agent:loop] unknown model: ' + providerName + '/' + modelId);
+const useStream = args && args.stream;
+
 // Agentic loop — keep calling LLM until we get a text response (no tool calls)
 let messages = [...history];
 const maxIterations = 20;
@@ -617,21 +633,7 @@ for (let i = 0; i < maxIterations; i++) {
     tools: tools.length > 0 ? tools : undefined,
   };
 
-  // Check for API key — use stub if none available
-  const apiKey = (args && args.apiKey) || getEnvApiKey(providerName);
   let response;
-
-  if (!apiKey) {
-    // Deterministic stub when no API key is set
-    const stubText = '[agent:loop] No API key for provider ' + providerName + '. Model: ' + modelId;
-    const stubAssistantMsg = { role: 'assistant', content: [{ type: 'text', text: stubText }], model: modelId, provider: providerName, api: 'stub', stopReason: 'stop', timestamp: Date.now() };
-    await ctx.assert(sessionId, 'message', JSON.stringify({ seq: seq++, msg: stubAssistantMsg }), sessionId);
-    return { session: sessionId, response: stubText, tool_calls: allToolCalls };
-  }
-
-  // Use pi-ai stream or complete for the LLM call
-  const model = getModel(providerName, modelId);
-  const useStream = args && args.stream;
   if (useStream) {
     const eventStream = stream(model, piContext, { apiKey });
     for await (const event of eventStream) {
