@@ -8693,6 +8693,813 @@ async function testSpawnRequiresNodeArg(ctx: Ctx) {
   }
 }
 
+// ── API server deep tests ────────────────────────────────────────
+
+async function testApiServerOpenAISchema(ctx: Ctx) {
+  console.log("\n── API server: OpenAI schema compliance ──");
+
+  const port = 15001 + Math.floor(Math.random() * 500);
+  const ac = new AbortController();
+
+  try {
+    ctx.call("api:server", { port, signal: ac.signal }).catch(() => {});
+    await new Promise((r) => setTimeout(r, 200));
+
+    // Test: /v1/models response has all required OpenAI fields
+    try {
+      const res = await fetch(`http://localhost:${port}/v1/models`);
+      const data = await res.json() as any;
+      if (data.object !== "list") throw new Error(`object should be 'list', got '${data.object}'`);
+      if (!Array.isArray(data.data)) throw new Error("data should be an array");
+      const model = data.data[0];
+      if (typeof model.id !== "string") throw new Error(`model.id should be string, got ${typeof model.id}`);
+      if (model.object !== "model") throw new Error(`model.object should be 'model', got '${model.object}'`);
+      if (typeof model.created !== "number") throw new Error(`model.created should be number, got ${typeof model.created}`);
+      if (typeof model.owned_by !== "string") throw new Error(`model.owned_by should be string, got ${typeof model.owned_by}`);
+      ok("GET /v1/models response has all OpenAI-required fields (id, object, created, owned_by)");
+    } catch (e) {
+      fail("models schema fields", e);
+    }
+
+    // Test: /v1/chat/completions has full OpenAI schema (id, object, created, model, choices, usage)
+    try {
+      const res = await fetch(`http://localhost:${port}/v1/chat/completions`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          model: "holoiconic",
+          messages: [{ role: "user", content: "schema test" }],
+        }),
+      });
+      const data = await res.json() as any;
+      // Validate top-level fields
+      if (typeof data.id !== "string" || !data.id.startsWith("chatcmpl-"))
+        throw new Error(`id should start with 'chatcmpl-', got '${data.id}'`);
+      if (data.object !== "chat.completion")
+        throw new Error(`object should be 'chat.completion', got '${data.object}'`);
+      if (typeof data.created !== "number")
+        throw new Error(`created should be number, got ${typeof data.created}`);
+      if (typeof data.model !== "string")
+        throw new Error(`model should be string, got ${typeof data.model}`);
+      if (!Array.isArray(data.choices))
+        throw new Error(`choices should be array, got ${typeof data.choices}`);
+      if (typeof data.usage !== "object" || data.usage === null)
+        throw new Error(`usage should be object, got ${typeof data.usage}`);
+      ok("chat completion response has all OpenAI top-level fields (id, object, created, model, choices, usage)");
+    } catch (e) {
+      fail("completion schema top-level", e);
+    }
+
+    // Test: choices[0] has index, message, finish_reason
+    try {
+      const res = await fetch(`http://localhost:${port}/v1/chat/completions`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          model: "holoiconic",
+          messages: [{ role: "user", content: "choices test" }],
+        }),
+      });
+      const data = await res.json() as any;
+      const choice = data.choices[0];
+      if (typeof choice.index !== "number")
+        throw new Error(`choice.index should be number, got ${typeof choice.index}`);
+      if (choice.index !== 0)
+        throw new Error(`choice.index should be 0, got ${choice.index}`);
+      if (typeof choice.message !== "object")
+        throw new Error(`choice.message should be object, got ${typeof choice.message}`);
+      if (choice.message.role !== "assistant")
+        throw new Error(`choice.message.role should be 'assistant', got '${choice.message.role}'`);
+      if (typeof choice.message.content !== "string")
+        throw new Error(`choice.message.content should be string, got ${typeof choice.message.content}`);
+      if (choice.finish_reason !== "stop")
+        throw new Error(`choice.finish_reason should be 'stop', got '${choice.finish_reason}'`);
+      ok("choices[0] has correct structure (index, message{role,content}, finish_reason)");
+    } catch (e) {
+      fail("choices structure", e);
+    }
+
+    // Test: usage has prompt_tokens, completion_tokens, total_tokens
+    try {
+      const res = await fetch(`http://localhost:${port}/v1/chat/completions`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          model: "holoiconic",
+          messages: [{ role: "user", content: "usage test" }],
+        }),
+      });
+      const data = await res.json() as any;
+      const usage = data.usage;
+      if (typeof usage.prompt_tokens !== "number")
+        throw new Error(`usage.prompt_tokens should be number, got ${typeof usage.prompt_tokens}`);
+      if (typeof usage.completion_tokens !== "number")
+        throw new Error(`usage.completion_tokens should be number, got ${typeof usage.completion_tokens}`);
+      if (typeof usage.total_tokens !== "number")
+        throw new Error(`usage.total_tokens should be number, got ${typeof usage.total_tokens}`);
+      ok("usage has prompt_tokens, completion_tokens, total_tokens as numbers");
+    } catch (e) {
+      fail("usage structure", e);
+    }
+
+    // Test: chatcmpl- ID is unique across requests
+    try {
+      const res1 = await fetch(`http://localhost:${port}/v1/chat/completions`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ model: "holoiconic", messages: [{ role: "user", content: "id1" }] }),
+      });
+      const data1 = await res1.json() as any;
+      // Small delay to ensure different timestamp
+      await new Promise((r) => setTimeout(r, 10));
+      const res2 = await fetch(`http://localhost:${port}/v1/chat/completions`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ model: "holoiconic", messages: [{ role: "user", content: "id2" }] }),
+      });
+      const data2 = await res2.json() as any;
+      if (data1.id === data2.id)
+        throw new Error(`IDs should be unique, both are '${data1.id}'`);
+      ok("each completion gets a unique chatcmpl- ID");
+    } catch (e) {
+      fail("unique completion IDs", e);
+    }
+  } finally {
+    ac.abort();
+    await new Promise((r) => setTimeout(r, 100));
+  }
+}
+
+async function testApiServerErrorHandling(ctx: Ctx) {
+  console.log("\n── API server: error handling ──");
+
+  const port = 15501 + Math.floor(Math.random() * 500);
+  const ac = new AbortController();
+
+  try {
+    ctx.call("api:server", { port, signal: ac.signal }).catch(() => {});
+    await new Promise((r) => setTimeout(r, 200));
+
+    // Test: missing messages field returns 400 (bad JSON body with no messages)
+    try {
+      const res = await fetch(`http://localhost:${port}/v1/chat/completions`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ model: "holoiconic" }),
+      });
+      const data = await res.json() as any;
+      if (res.status !== 400)
+        throw new Error(`expected 400, got ${res.status}`);
+      if (!data.error || !data.error.message)
+        throw new Error("expected error object with message");
+      if (data.error.type !== "invalid_request_error")
+        throw new Error(`expected type='invalid_request_error', got '${data.error.type}'`);
+      ok("missing messages field returns 400 with error object");
+    } catch (e) {
+      fail("missing messages", e);
+    }
+
+    // Test: empty messages array (no user message found)
+    try {
+      const res = await fetch(`http://localhost:${port}/v1/chat/completions`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ model: "holoiconic", messages: [] }),
+      });
+      const data = await res.json() as any;
+      if (res.status !== 400)
+        throw new Error(`expected 400, got ${res.status}`);
+      if (!data.error || !data.error.message.includes("No user message"))
+        throw new Error(`expected 'No user message' error, got '${data.error && data.error.message}'`);
+      ok("empty messages array returns 400 with 'No user message' error");
+    } catch (e) {
+      fail("empty messages", e);
+    }
+
+    // Test: messages with only system role (no user message)
+    try {
+      const res = await fetch(`http://localhost:${port}/v1/chat/completions`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          model: "holoiconic",
+          messages: [{ role: "system", content: "you are helpful" }],
+        }),
+      });
+      const data = await res.json() as any;
+      if (res.status !== 400)
+        throw new Error(`expected 400, got ${res.status}`);
+      if (!data.error || !data.error.message.includes("No user message"))
+        throw new Error(`expected 'No user message' error, got '${data.error && data.error.message}'`);
+      ok("messages with only system role returns 400 (no user message)");
+    } catch (e) {
+      fail("system-only messages", e);
+    }
+
+    // Test: invalid JSON body returns 400
+    try {
+      const res = await fetch(`http://localhost:${port}/v1/chat/completions`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: "not valid json{{{",
+      });
+      const data = await res.json() as any;
+      if (res.status !== 400)
+        throw new Error(`expected 400 for invalid JSON, got ${res.status}`);
+      if (data.error.type !== "invalid_request_error")
+        throw new Error(`expected type='invalid_request_error', got '${data.error.type}'`);
+      ok("invalid JSON body returns 400 with invalid_request_error type");
+    } catch (e) {
+      fail("invalid JSON body", e);
+    }
+
+    // Test: CORS headers present on error responses
+    try {
+      const res = await fetch(`http://localhost:${port}/v1/chat/completions`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ model: "holoiconic", messages: [] }),
+      });
+      const corsOrigin = res.headers.get("access-control-allow-origin");
+      if (corsOrigin !== "*")
+        throw new Error(`expected CORS origin='*', got '${corsOrigin}'`);
+      ok("error responses include CORS headers");
+    } catch (e) {
+      fail("CORS on errors", e);
+    }
+
+    // Test: OPTIONS preflight returns 204
+    try {
+      const res = await fetch(`http://localhost:${port}/v1/chat/completions`, {
+        method: "OPTIONS",
+      });
+      if (res.status !== 204)
+        throw new Error(`expected 204 for OPTIONS, got ${res.status}`);
+      const allowMethods = res.headers.get("access-control-allow-methods") || "";
+      if (!allowMethods.includes("POST"))
+        throw new Error(`expected Allow-Methods to include POST, got '${allowMethods}'`);
+      ok("OPTIONS preflight returns 204 with CORS methods");
+    } catch (e) {
+      fail("OPTIONS preflight", e);
+    }
+
+    // Test: /health endpoint returns ok
+    try {
+      const res = await fetch(`http://localhost:${port}/health`);
+      const data = await res.json() as any;
+      if (res.status !== 200)
+        throw new Error(`expected 200, got ${res.status}`);
+      if (data.status !== "ok")
+        throw new Error(`expected status='ok', got '${data.status}'`);
+      ok("GET /health returns {status:'ok'}");
+    } catch (e) {
+      fail("health endpoint", e);
+    }
+  } finally {
+    ac.abort();
+    await new Promise((r) => setTimeout(r, 100));
+  }
+}
+
+async function testApiServerStreamingDeep(ctx: Ctx) {
+  console.log("\n── API server: streaming deep ──");
+
+  const port = 16001 + Math.floor(Math.random() * 500);
+  const ac = new AbortController();
+
+  try {
+    ctx.call("api:server", { port, signal: ac.signal }).catch(() => {});
+    await new Promise((r) => setTimeout(r, 200));
+
+    // Test: all streaming chunks have consistent ID
+    try {
+      const res = await fetch(`http://localhost:${port}/v1/chat/completions`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          model: "holoiconic",
+          messages: [{ role: "user", content: "consistent id test" }],
+          stream: true,
+        }),
+      });
+      const body = await res.text();
+      const dataLines = body.split("\n").filter(l => l.startsWith("data: ") && !l.includes("[DONE]"));
+      if (dataLines.length === 0) throw new Error("no data chunks received");
+      const ids = dataLines.map(l => JSON.parse(l.slice(6)).id);
+      const uniqueIds = new Set(ids);
+      if (uniqueIds.size !== 1)
+        throw new Error(`expected all chunks to have same ID, got ${uniqueIds.size} different IDs`);
+      ok("all streaming chunks share a consistent chatcmpl- ID");
+    } catch (e) {
+      fail("streaming consistent ID", e);
+    }
+
+    // Test: streaming chunks have correct object type
+    try {
+      const res = await fetch(`http://localhost:${port}/v1/chat/completions`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          model: "holoiconic",
+          messages: [{ role: "user", content: "object type test" }],
+          stream: true,
+        }),
+      });
+      const body = await res.text();
+      const dataLines = body.split("\n").filter(l => l.startsWith("data: ") && !l.includes("[DONE]"));
+      for (const line of dataLines) {
+        const chunk = JSON.parse(line.slice(6));
+        if (chunk.object !== "chat.completion.chunk")
+          throw new Error(`expected object='chat.completion.chunk', got '${chunk.object}'`);
+      }
+      ok("all streaming chunks have object='chat.completion.chunk'");
+    } catch (e) {
+      fail("streaming object type", e);
+    }
+
+    // Test: final chunk has finish_reason='stop' and empty delta
+    try {
+      const res = await fetch(`http://localhost:${port}/v1/chat/completions`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          model: "holoiconic",
+          messages: [{ role: "user", content: "finish reason test" }],
+          stream: true,
+        }),
+      });
+      const body = await res.text();
+      const dataLines = body.split("\n").filter(l => l.startsWith("data: ") && !l.includes("[DONE]"));
+      const lastChunk = JSON.parse(dataLines[dataLines.length - 1].slice(6));
+      if (lastChunk.choices[0].finish_reason !== "stop")
+        throw new Error(`expected finish_reason='stop', got '${lastChunk.choices[0].finish_reason}'`);
+      // The final chunk should have empty delta (no content)
+      if (lastChunk.choices[0].delta.content !== undefined)
+        throw new Error(`expected empty delta in final chunk, got content='${lastChunk.choices[0].delta.content}'`);
+      ok("final streaming chunk has finish_reason='stop' and empty delta");
+    } catch (e) {
+      fail("streaming final chunk", e);
+    }
+
+    // Test: assembled streaming text matches non-streaming response for same prompt
+    try {
+      // First get streaming response
+      const streamRes = await fetch(`http://localhost:${port}/v1/chat/completions`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          model: "holoiconic",
+          messages: [{ role: "user", content: "equivalence test" }],
+          stream: true,
+          session: "stream-equiv-" + Date.now(),
+        }),
+      });
+      const streamBody = await streamRes.text();
+      const dataLines = streamBody.split("\n").filter(l => l.startsWith("data: ") && !l.includes("[DONE]"));
+      let assembled = "";
+      for (const line of dataLines) {
+        const chunk = JSON.parse(line.slice(6));
+        if (chunk.choices[0].delta.content) assembled += chunk.choices[0].delta.content;
+      }
+
+      // Then get non-streaming response with a fresh session
+      const nonStreamRes = await fetch(`http://localhost:${port}/v1/chat/completions`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          model: "holoiconic",
+          messages: [{ role: "user", content: "equivalence test" }],
+          session: "nonstream-equiv-" + Date.now(),
+        }),
+      });
+      const nonStreamData = await nonStreamRes.json() as any;
+      const fullText = nonStreamData.choices[0].message.content;
+
+      // Both should contain the stub text (same prompt => same stub output)
+      if (assembled.length === 0) throw new Error("assembled text is empty");
+      if (fullText.length === 0) throw new Error("full text is empty");
+      // The stub produces deterministic output for the same provider, so both should be equal
+      if (assembled !== fullText)
+        throw new Error(`streaming assembled '${assembled.slice(0,60)}...' !== non-streaming '${fullText.slice(0,60)}...'`);
+      ok("assembled streaming chunks equal non-streaming response text");
+    } catch (e) {
+      fail("streaming equivalence", e);
+    }
+
+    // Test: streaming response has correct content-type and cache headers
+    try {
+      const res = await fetch(`http://localhost:${port}/v1/chat/completions`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          model: "holoiconic",
+          messages: [{ role: "user", content: "headers test" }],
+          stream: true,
+        }),
+      });
+      const ct = res.headers.get("content-type") || "";
+      if (!ct.includes("text/event-stream"))
+        throw new Error(`expected text/event-stream, got '${ct}'`);
+      const cc = res.headers.get("cache-control") || "";
+      if (!cc.includes("no-cache"))
+        throw new Error(`expected no-cache, got '${cc}'`);
+      ok("streaming response has text/event-stream content-type and no-cache");
+    } catch (e) {
+      fail("streaming headers", e);
+    }
+  } finally {
+    ac.abort();
+    await new Promise((r) => setTimeout(r, 100));
+  }
+}
+
+// ── Graph introspection tests ────────────────────────────────────
+
+async function testGraphDescribe(ctx: Ctx) {
+  console.log("\n── graph:describe ──");
+
+  // Test: requires subject arg
+  try {
+    await ctx.call("graph:describe", {});
+    fail("graph:describe requires subject", "expected error but got success");
+  } catch (e: any) {
+    if (e.message && e.message.includes("args.subject is required"))
+      ok("graph:describe throws when subject is missing");
+    else
+      fail("graph:describe requires subject", e);
+  }
+
+  // Test: describes an existing node with all quads
+  try {
+    const result = await ctx.call("graph:describe", { subject: "main" });
+    if (!result.subject || result.subject !== "main")
+      throw new Error(`expected subject='main', got '${result.subject}'`);
+    if (!Array.isArray(result.quads))
+      throw new Error("expected quads array");
+    if (result.quads.length < 2)
+      throw new Error(`expected >=2 quads for 'main', got ${result.quads.length}`);
+    // main has at least type and source
+    if (typeof result.predicates !== "object")
+      throw new Error("expected predicates object");
+    ok("graph:describe returns subject, quads array, and predicates object for existing node");
+  } catch (e) {
+    fail("graph:describe existing node", e);
+  }
+
+  // Test: predicates are grouped by predicate name
+  try {
+    const result = await ctx.call("graph:describe", { subject: "main" });
+    if (!result.predicates.type)
+      throw new Error("expected predicates.type to exist");
+    if (!result.predicates.source)
+      throw new Error("expected predicates.source to exist");
+    if (!Array.isArray(result.predicates.type))
+      throw new Error("predicates.type should be an array");
+    // Each entry has value and graph
+    const typeEntry = result.predicates.type[0];
+    if (typeof typeEntry.value !== "string")
+      throw new Error(`expected value string, got ${typeof typeEntry.value}`);
+    if (typeof typeEntry.graph !== "string")
+      throw new Error(`expected graph string, got ${typeof typeEntry.graph}`);
+    ok("graph:describe groups predicates with {value, graph} entries");
+  } catch (e) {
+    fail("graph:describe predicates grouped", e);
+  }
+
+  // Test: quads have s, p, o, g fields
+  try {
+    const result = await ctx.call("graph:describe", { subject: "main" });
+    const q = result.quads[0];
+    if (!("s" in q) || !("p" in q) || !("o" in q) || !("g" in q))
+      throw new Error(`quad missing fields, got keys: ${Object.keys(q).join(",")}`);
+    if (q.s !== "main")
+      throw new Error(`expected s='main', got '${q.s}'`);
+    ok("graph:describe quads have s, p, o, g fields");
+  } catch (e) {
+    fail("graph:describe quad fields", e);
+  }
+
+  // Test: non-existent subject returns empty
+  try {
+    const result = await ctx.call("graph:describe", { subject: "nonexistent:xyz:456" });
+    if (result.quads.length !== 0)
+      throw new Error(`expected 0 quads for non-existent subject, got ${result.quads.length}`);
+    if (Object.keys(result.predicates).length !== 0)
+      throw new Error("expected empty predicates for non-existent subject");
+    ok("graph:describe returns empty quads/predicates for non-existent subject");
+  } catch (e) {
+    fail("graph:describe non-existent", e);
+  }
+}
+
+async function testGraphSubjects(ctx: Ctx) {
+  console.log("\n── graph:subjects ──");
+
+  // Test: returns all unique subjects (no filter)
+  try {
+    const result = await ctx.call("graph:subjects", {});
+    if (!Array.isArray(result))
+      throw new Error("expected array result");
+    if (result.length < 10)
+      throw new Error(`expected >=10 subjects, got ${result.length}`);
+    // Each entry has subject and types
+    const entry = result[0];
+    if (typeof entry.subject !== "string")
+      throw new Error(`expected subject string, got ${typeof entry.subject}`);
+    if (!Array.isArray(entry.types))
+      throw new Error("expected types array");
+    ok("graph:subjects returns enriched subject list with types");
+  } catch (e) {
+    fail("graph:subjects all", e);
+  }
+
+  // Test: results are sorted alphabetically
+  try {
+    const result = await ctx.call("graph:subjects", {});
+    const subjects = result.map((r: any) => r.subject);
+    const sorted = [...subjects].sort();
+    let isSorted = true;
+    for (let i = 0; i < subjects.length; i++) {
+      if (subjects[i] !== sorted[i]) { isSorted = false; break; }
+    }
+    if (!isSorted)
+      throw new Error("subjects are not sorted alphabetically");
+    ok("graph:subjects returns subjects in sorted order");
+  } catch (e) {
+    fail("graph:subjects sorted", e);
+  }
+
+  // Test: filter by type='Function' returns only function nodes
+  try {
+    const result = await ctx.call("graph:subjects", { type: "Function" });
+    if (!Array.isArray(result))
+      throw new Error("expected array result");
+    if (result.length < 7)
+      throw new Error(`expected >=7 Function subjects, got ${result.length}`);
+    // All should have types=['Function']
+    for (const entry of result) {
+      if (!entry.types.includes("Function"))
+        throw new Error(`subject '${entry.subject}' missing 'Function' type`);
+    }
+    // Known function nodes should be present
+    const subjects = result.map((r: any) => r.subject);
+    if (!subjects.includes("main"))
+      throw new Error("expected 'main' in Function subjects");
+    if (!subjects.includes("shell"))
+      throw new Error("expected 'shell' in Function subjects");
+    ok("graph:subjects with type='Function' returns only function nodes");
+  } catch (e) {
+    fail("graph:subjects filter Function", e);
+  }
+
+  // Test: filter by non-existent type returns empty
+  try {
+    const result = await ctx.call("graph:subjects", { type: "NonExistentType999" });
+    if (!Array.isArray(result))
+      throw new Error("expected array result");
+    if (result.length !== 0)
+      throw new Error(`expected 0 subjects for non-existent type, got ${result.length}`);
+    ok("graph:subjects with non-existent type returns empty array");
+  } catch (e) {
+    fail("graph:subjects non-existent type", e);
+  }
+
+  // Test: includes subjects that are not Function nodes (e.g., session data)
+  try {
+    // Create a non-function subject
+    await ctx.assert("test:graph-subj-data", "kind", "data-item");
+    const result = await ctx.call("graph:subjects", {});
+    const subjects = result.map((r: any) => r.subject);
+    if (!subjects.includes("test:graph-subj-data"))
+      throw new Error("expected 'test:graph-subj-data' in all subjects");
+    ok("graph:subjects includes non-Function subjects");
+  } catch (e) {
+    fail("graph:subjects includes non-Function", e);
+  }
+}
+
+async function testGraphDeps(ctx: Ctx) {
+  console.log("\n── graph:deps ──");
+
+  // Test: requires node arg
+  try {
+    await ctx.call("graph:deps", {});
+    fail("graph:deps requires node", "expected error but got success");
+  } catch (e: any) {
+    if (e.message && e.message.includes("args.node is required"))
+      ok("graph:deps throws when node is missing");
+    else
+      fail("graph:deps requires node", e);
+  }
+
+  // Test: returns calls and calledBy for main
+  try {
+    const result = await ctx.call("graph:deps", { node: "main" });
+    if (result.node !== "main")
+      throw new Error(`expected node='main', got '${result.node}'`);
+    if (!Array.isArray(result.calls))
+      throw new Error("expected calls array");
+    if (!Array.isArray(result.calledBy))
+      throw new Error("expected calledBy array");
+    // main calls sys:compiler and spawn at least
+    if (result.calls.length < 2)
+      throw new Error(`expected >=2 calls from main, got ${result.calls.length}`);
+    if (!result.calls.includes("sys:compiler"))
+      throw new Error("expected main to call sys:compiler");
+    ok("graph:deps returns node, calls, and calledBy for main");
+  } catch (e) {
+    fail("graph:deps main", e);
+  }
+
+  // Test: calledBy relationship is correct
+  try {
+    // sys:compiler is called by main
+    const result = await ctx.call("graph:deps", { node: "sys:compiler" });
+    if (!result.calledBy.includes("main"))
+      throw new Error(`expected sys:compiler to be calledBy main, got [${result.calledBy.join(",")}]`);
+    ok("graph:deps calledBy correctly identifies callers");
+  } catch (e) {
+    fail("graph:deps calledBy", e);
+  }
+
+  // Test: calls are deduplicated
+  try {
+    // Create a node that calls the same node twice
+    await ctx.assert("test:dup-calls", "type", "Function");
+    await ctx.assert("test:dup-calls", "source", "await ctx.call('shell', {cmd:'echo 1'}); await ctx.call('shell', {cmd:'echo 2'}); return 'done';");
+    const result = await ctx.call("graph:deps", { node: "test:dup-calls" });
+    const shellCount = result.calls.filter((c: string) => c === "shell").length;
+    if (shellCount !== 1)
+      throw new Error(`expected 'shell' to appear once in calls, appeared ${shellCount} times`);
+    ok("graph:deps deduplicates repeated calls to same node");
+  } catch (e) {
+    fail("graph:deps dedup", e);
+  }
+
+  // Test: node with no calls returns empty calls array
+  try {
+    await ctx.assert("test:no-calls", "type", "Function");
+    await ctx.assert("test:no-calls", "source", "return 42;");
+    const result = await ctx.call("graph:deps", { node: "test:no-calls" });
+    if (result.calls.length !== 0)
+      throw new Error(`expected 0 calls, got ${result.calls.length}: [${result.calls.join(",")}]`);
+    ok("graph:deps returns empty calls for node with no ctx.call references");
+  } catch (e) {
+    fail("graph:deps no calls", e);
+  }
+
+  // Test: non-existent node returns empty arrays
+  try {
+    const result = await ctx.call("graph:deps", { node: "nonexistent:node:xyz" });
+    if (result.calls.length !== 0)
+      throw new Error(`expected 0 calls for non-existent node, got ${result.calls.length}`);
+    ok("graph:deps returns empty calls for non-existent node");
+  } catch (e) {
+    fail("graph:deps non-existent", e);
+  }
+}
+
+async function testInspectNode(ctx: Ctx) {
+  console.log("\n── inspect ──");
+
+  // Test: requires node arg
+  try {
+    await ctx.call("inspect", {});
+    fail("inspect requires node", "expected error but got success");
+  } catch (e: any) {
+    if (e.message && e.message.includes("args.node is required"))
+      ok("inspect throws when node is missing");
+    else
+      fail("inspect requires node", e);
+  }
+
+  // Test: inspect a known function node
+  try {
+    const result = await ctx.call("inspect", { node: "shell" });
+    if (result.node !== "shell")
+      throw new Error(`expected node='shell', got '${result.node}'`);
+    if (result.exists !== true)
+      throw new Error(`expected exists=true, got ${result.exists}`);
+    if (!result.types.includes("Function"))
+      throw new Error(`expected types to include 'Function', got [${result.types.join(",")}]`);
+    if (result.isFunction !== true)
+      throw new Error(`expected isFunction=true, got ${result.isFunction}`);
+    ok("inspect returns correct basic info for shell node");
+  } catch (e) {
+    fail("inspect shell basic", e);
+  }
+
+  // Test: inspect returns source and sourceLength
+  try {
+    const result = await ctx.call("inspect", { node: "shell" });
+    if (typeof result.source !== "string" || result.source.length === 0)
+      throw new Error("expected non-empty source string");
+    if (typeof result.sourceLength !== "number" || result.sourceLength === 0)
+      throw new Error(`expected positive sourceLength, got ${result.sourceLength}`);
+    if (result.sourceLength !== result.source.length && result.sourceLength <= 2000)
+      throw new Error("sourceLength should match source.length when under 2000 chars");
+    ok("inspect returns source and accurate sourceLength");
+  } catch (e) {
+    fail("inspect source", e);
+  }
+
+  // Test: inspect returns dependencies from graph:deps
+  try {
+    const result = await ctx.call("inspect", { node: "main" });
+    if (!Array.isArray(result.dependencies))
+      throw new Error("expected dependencies array");
+    if (!Array.isArray(result.dependents))
+      throw new Error("expected dependents array");
+    if (!result.dependencies.includes("sys:compiler"))
+      throw new Error("expected main dependencies to include sys:compiler");
+    ok("inspect returns dependencies and dependents arrays");
+  } catch (e) {
+    fail("inspect deps", e);
+  }
+
+  // Test: inspect returns quadCount and predicates list
+  try {
+    const result = await ctx.call("inspect", { node: "main" });
+    if (typeof result.quadCount !== "number" || result.quadCount < 2)
+      throw new Error(`expected quadCount >= 2, got ${result.quadCount}`);
+    if (!Array.isArray(result.predicates))
+      throw new Error("expected predicates to be an array of predicate names");
+    if (!result.predicates.includes("type"))
+      throw new Error("expected predicates to include 'type'");
+    if (!result.predicates.includes("source"))
+      throw new Error("expected predicates to include 'source'");
+    ok("inspect returns quadCount and predicates list");
+  } catch (e) {
+    fail("inspect quadCount/predicates", e);
+  }
+
+  // Test: inspect a Tool node shows isTool and toolSchema
+  try {
+    // Find a node that is a Tool
+    const toolQuads = await ctx.query({ p: "type", o: "Tool" });
+    if (toolQuads.length > 0) {
+      const toolNode = toolQuads[0].s;
+      const result = await ctx.call("inspect", { node: toolNode });
+      if (result.isTool !== true)
+        throw new Error(`expected isTool=true for '${toolNode}', got ${result.isTool}`);
+      // toolSchema may or may not be present depending on whether tool_schema quad exists
+      ok("inspect correctly identifies Tool nodes with isTool=true");
+    } else {
+      // No tool nodes exist — just verify the field is false for a regular node
+      const result = await ctx.call("inspect", { node: "shell" });
+      if (result.isTool !== false)
+        throw new Error(`expected isTool=false for non-tool, got ${result.isTool}`);
+      ok("inspect correctly identifies non-Tool nodes with isTool=false");
+    }
+  } catch (e) {
+    fail("inspect Tool node", e);
+  }
+
+  // Test: inspect non-existent node returns exists=false
+  try {
+    const result = await ctx.call("inspect", { node: "nonexistent:abc:789" });
+    if (result.exists !== false)
+      throw new Error(`expected exists=false, got ${result.exists}`);
+    if (result.quadCount !== 0)
+      throw new Error(`expected quadCount=0, got ${result.quadCount}`);
+    if (result.source !== null)
+      throw new Error(`expected source=null, got '${result.source}'`);
+    ok("inspect returns exists=false for non-existent node");
+  } catch (e) {
+    fail("inspect non-existent", e);
+  }
+
+  // Test: inspect truncates source at 2000 chars for very long nodes
+  try {
+    // Create a node with very long source
+    const longSource = "return '" + "x".repeat(2500) + "';";
+    await ctx.assert("test:long-inspect", "type", "Function");
+    await ctx.assert("test:long-inspect", "source", longSource);
+    const result = await ctx.call("inspect", { node: "test:long-inspect" });
+    if (result.sourceLength !== longSource.length)
+      throw new Error(`expected sourceLength=${longSource.length}, got ${result.sourceLength}`);
+    if (result.source.length > 2003) // 2000 + "..."
+      throw new Error(`expected source truncated to ~2003 chars, got ${result.source.length}`);
+    if (!result.source.endsWith("..."))
+      throw new Error("expected truncated source to end with '...'");
+    ok("inspect truncates long source at 2000 chars with '...' suffix");
+  } catch (e) {
+    fail("inspect long source truncation", e);
+  }
+
+  // Test: inspect includes status and lifecycle arrays
+  try {
+    const result = await ctx.call("inspect", { node: "shell" });
+    if (!Array.isArray(result.status))
+      throw new Error("expected status to be an array");
+    if (!Array.isArray(result.lifecycle))
+      throw new Error("expected lifecycle to be an array");
+    ok("inspect returns status and lifecycle as arrays");
+  } catch (e) {
+    fail("inspect status/lifecycle", e);
+  }
+}
+
 // ── Main ──────────────────────────────────────────────────────────
 
 async function main() {
@@ -8821,6 +9628,13 @@ async function main() {
   await testSpawnConcurrency(ctx);
   await testSpawnSetsSpawnedType(ctx);
   await testSpawnRequiresNodeArg(ctx);
+  await testApiServerOpenAISchema(ctx);
+  await testApiServerErrorHandling(ctx);
+  await testApiServerStreamingDeep(ctx);
+  await testGraphDescribe(ctx);
+  await testGraphSubjects(ctx);
+  await testGraphDeps(ctx);
+  await testInspectNode(ctx);
 
   // Summary
   console.log("\n── Summary ──");
