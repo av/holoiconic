@@ -4,44 +4,64 @@
 - the runtime is homoiconic: code, state, context, tools, and the agentic loop are all quads in the same graph
 - there is no distinction between system and user data — all quads are equally accessible and mutable
 - breaking sys nodes breaks the runtime — that is by design, the system is fully self-modifiable
+- label: the only runtime dependency is @libsql/client
+  command: grep -c '"dependencies"' package.json && jq -r '.dependencies | keys[]' package.json | grep -q '@libsql/client'
 
 # quad
 
-- a quad is (s, p, o, g) — subject, predicate, object, graph — all strings
-- g defaults to '_' when omitted
+- label: a quad is (s, p, o, g) — subject, predicate, object, graph — all strings
+  command: grep -q 's TEXT NOT NULL' src/db.ts && grep -q 'p TEXT NOT NULL' src/db.ts && grep -q 'o TEXT NOT NULL' src/db.ts && grep -q 'g TEXT NOT NULL' src/db.ts
+- label: g defaults to '_' when omitted
+  command: grep -q "DEFAULT '_'" src/db.ts && grep -q 'g: string = "_"' src/ctx.ts
 - o (object) holds the value — always a string: a name, source code, JSON, a number-as-string
 - attrs is optional JSON metadata about the quad itself (provenance, timestamp) — never about the subject
-- embedding is an optional F32_BLOB vector for semantic search
-- quads are unique on (s, p, o, g) — asserting an existing quad is a no-op
-- retracting a non-existent quad is a no-op
-- convention: a function is (name, 'source', code) and (name, 'type', 'Function')
+- label: embedding is an optional F32_BLOB vector for semantic search
+  command: grep -q 'F32_BLOB(1536)' src/db.ts
+- label: quads are unique on (s, p, o, g) — asserting an existing quad is a no-op
+  command: grep -q 'UNIQUE(s, p, o, g)' src/db.ts && grep -q 'INSERT OR IGNORE' src/ctx.ts
+- label: retracting a non-existent quad is a no-op
+  command: grep -q 'rows.length === 0) return' src/ctx.ts
+- label: convention: a function is (name, 'source', code) and (name, 'type', 'Function')
+  command: grep -q '"source"' src/template.ts && grep -q '"type", "Function"' src/template.ts
 - convention: value always goes in o, never duplicated in attrs
 
 # ctx
 
 - ctx is the single context object available everywhere — every node receives it
-- ctx has 5 primitives: assert, retract, query, call, on
-- ctx.assert(s, p, o, g?) writes a quad and fires change events
+- label: ctx has 5 primitives: assert, retract, query, call, on
+  command: grep -A10 'export type Ctx' src/ctx.ts | grep -cE '^\s+(assert|retract|query|call|on)\b' | grep -q 5
+- ctx.assert(s, p, o, g?, embedding?) writes a quad and fires change events — embedding is an optional F32_BLOB vector
 - ctx.retract(s, p, o, g?) removes a quad and fires change events
 - ctx.query({ s?, p?, o?, g? }) returns Quad[] matching the pattern — omitted fields are wildcards
 - ctx.call(name, args?) looks up (name, 'source', ?), compiles to AsyncFunction, and runs it
 - ctx.on(pattern, callback) watches for quad assert/retract matching pattern, returns an unsubscribe function
 - ctx.on callback receives { type: 'assert' | 'retract', quad: { id, s, p, o, g, attrs? } }
-- ctx.self is a getter that returns the name of the currently executing node via AsyncLocalStorage
-- ctx is mutable — nodes can replace any primitive (sys:compiler replaces ctx.call)
+- label: ctx.self is a getter that returns the name of the currently executing node via AsyncLocalStorage
+  command: grep -q 'AsyncLocalStorage' src/ctx.ts && grep -q 'get self' src/ctx.ts
+- label: ctx is mutable — nodes can replace any primitive (sys:compiler replaces ctx.call)
+  command: grep -q 'ctx\.call =' src/template.ts
 - everything beyond these 5 primitives — llm, shell, vector, spawn — is implemented as nodes
+- label: set is a convenience node for single-valued predicates — retracts old values then asserts new, with serialized locking per (s, p, g) key
+  command: grep -q '"set":' src/template.ts
 
 # execution
 
-- the platform runtime is Bun
-- the implementation language is TypeScript
-- one graph node = one callable unit — identified by subject, source in o of a 'source' predicate
-- each node's source is a function body compiled to AsyncFunction — receives ctx and args
+- label: the platform runtime is Bun
+  command: test -f bun.lock
+- label: the implementation language is TypeScript
+  command: test -f tsconfig.json
+- label: one graph node = one callable unit — identified by subject, source in o of a 'source' predicate
+  command: grep -q "p = 'source'" src/ctx.ts
+- label: each node's source is a function body compiled to AsyncFunction — receives ctx and args
+  command: grep -q 'AsyncFunction.*ctx.*args' src/ctx.ts
 - nodes have access to all Bun globals (Bun, fetch, Response, console, process)
 - nodes can use await import() for dynamic imports of npm packages
 - nodes reach other nodes through ctx.call — string-addressed, always resolves current compiled form
 - nodes define local helpers and closures but are a single callable unit
-- compilation is reactive — sys:compiler watches { p: 'source' } and invalidates its cache on change
+- label: compilation is reactive — sys:compiler watches { p: 'source' } and invalidates its cache on change
+  command: grep -q "p: 'source'" src/template.ts
+- label: all node source strings are syntactically valid AsyncFunction bodies
+  command: bun -e 'const AF=Object.getPrototypeOf(async function(){}).constructor;const{nodes}=require("./src/template.ts");for(const[n,s]of Object.entries(nodes)){try{new AF("ctx","args",s)}catch(e){console.error(n,e.message);process.exit(1)}};console.log(Object.keys(nodes).length+" nodes OK")'
 
 # reactivity
 
@@ -51,47 +71,93 @@
 - ctx.on takes a pattern { s?, p?, o?, g? } — omitted fields are wildcards
 - ctx.on returns an unsubscribe function
 - reactive callbacks fire only on actual changes — duplicate asserts and missing retracts are no-ops
-- lifecycle events are quads, not a separate mechanism — supervisor asserts (name, 'lifecycle', 'cleanup')
-- nodes watch their own lifecycle via ctx.on({ s: ctx.self, p: 'lifecycle', o: 'cleanup' }, callback)
+- label: lifecycle events are quads, not a separate mechanism — supervisor asserts (name, 'lifecycle', 'cleanup')
+  command: grep -q "'lifecycle'" src/template.ts
+- nodes can watch their own lifecycle via ctx.on({ s: ctx.self, p: 'lifecycle', o: 'cleanup' }, callback) — supported but not currently used by any built-in node
 
 # spawn
 
-- spawn is a node, not a kernel primitive — invoked via ctx.call('spawn', { node, args? })
-- spawn uses AbortController internally to manage the lifecycle of long-lived nodes
-- spawned nodes receive args.signal (AbortSignal) for cooperative cancellation
-- when a spawned node's source changes, spawn asserts (name, 'lifecycle', 'cleanup'), aborts, recompiles, re-runs
+- label: spawn is a node, not a kernel primitive — invoked via ctx.call('spawn', { node, args? })
+  command: grep -q '"spawn":' src/template.ts
+- label: spawn uses AbortController internally to manage the lifecycle of long-lived nodes
+  command: grep -q 'AbortController' src/template.ts
+- label: spawned nodes receive args.signal (AbortSignal) for cooperative cancellation
+  command: grep -q 'args.signal' src/template.ts
+- when a spawned node's source changes, sys:supervisor detects it, asserts (name, 'lifecycle', 'cleanup'), aborts, and re-runs the node
 - multiple cleanup handlers can be registered — same mechanism as graph reactivity
+- label: sys:supervisor retries crashed nodes with exponential backoff — max 3 retries, delays 500/1000/2000ms — retry count resets on manual source change
+  command: grep -q 'Math.pow(2' src/template.ts && grep -q '500' src/template.ts
 
 # bootstrap
 
-- the kernel is ~50 lines of TypeScript — pure plumbing, no policy
-- kernel connects to Turso, creates ctx with 5 naive primitives, and calls ctx.call('main')
-- the kernel's ctx.call compiles from scratch on every call — no cache, no reactivity
+- label: the kernel is ~30 lines of TypeScript — pure plumbing, no policy
+  command: test $(grep -c '' src/boot.ts) -le 50
+- label: kernel connects to Turso, creates ctx with 5 naive primitives, and calls ctx.call('main')
+  command: grep -q 'createDatabase' src/boot.ts && grep -q 'createCtx' src/boot.ts && grep -q 'call.*main' src/boot.ts
+- label: the kernel's ctx.call compiles from scratch on every call — no cache, no reactivity
+  command: grep -q 'no cache' src/ctx.ts
 - the kernel wires assert/retract to emit events through ctx.on automatically
-- if the graph is empty on boot, the kernel seeds it from a template
-- the template contains: sys:compiler, sys:supervisor, main, core tool nodes, the agentic loop
-- main calls sys:compiler first — which replaces ctx.call with a cached, reactively-invalidated version
+- label: if the graph is empty on boot, the kernel seeds it from a template
+  command: grep -q 'length === 0' src/boot.ts && grep -q 'seedTemplate' src/boot.ts
+- label: the template seeds 28 nodes: sys:compiler, sys:supervisor, main, spawn, shell, llm, agent:tools, agent:loop, api:server, web:ui, repl, set, snapshots, embed, vector:search, graph introspection, versioning, cron, and metrics
+  command: test $(grep -c '^  "' src/template.ts) -ge 28
+- label: main calls sys:compiler first — which replaces ctx.call with a cached, reactively-invalidated version
+  command: grep -q 'sys:compiler' src/template.ts
 - main then calls spawn for sys:supervisor and the application
 - before sys:compiler runs, compilation is cold — after, it is live and reactive
 - all sys nodes are rewritable like any other node
+- label: the project builds and all integration tests pass
+  command: bun run src/test-boot.ts 2>&1 | grep -q 'passed, 0 failed'
 
 # interfaces
 
-- holoiconic exposes a REPL for interactive use
-- holoiconic exposes a WebUI
-- holoiconic exposes an OpenAI-compatible API
-- interfaces are derived from badlogic's pi agentic packages (pi-agent-core, pi-ai, pi-tui)
+- label: holoiconic exposes a REPL for interactive use
+  command: grep -q '"repl":' src/template.ts
+- label: holoiconic exposes a WebUI
+  command: grep -q '"web:ui":' src/template.ts
+- label: holoiconic exposes an OpenAI-compatible API
+  command: grep -q '/v1/chat/completions' src/template.ts && grep -q '/v1/models' src/template.ts
 
 # agentic
 
-- there is no separate Agent class — the agentic loop is nodes in the graph like everything else
+- label: there is no separate Agent class — the agentic loop is nodes in the graph like everything else
+  command: ! grep -rq 'class Agent' src/
 - the loop, tool dispatch, and LLM calls are all graph-resident nodes invocable and modifiable through ctx
 - the agent can rewrite any part of itself — its loop, its tools, its LLM parameters — by mutating quads
-- the agent's context window is written to the same graph as everything else
+- label: the agent's context window is written to the same graph as everything else
+  command: grep -q 'ctx.assert.*message' src/template.ts
 - because everything is in the graph, arbitrary external harnesses can drive execution too
+- label: agent:tools registers 18 tools for the LLM agent, each stored as a Tool-typed quad with an input_schema
+  command: test $(grep -c "'type', 'Tool'" src/template.ts) -eq 18
+- label: embed generates vector embeddings via OpenAI API (text-embedding-3-small) with deterministic stub fallback when no API key is set
+  command: grep -q 'text-embedding-3-small' src/template.ts
+- label: vector:search performs semantic search using cosine similarity over stored embeddings, with brute-force fallback
+  command: grep -q 'cosineSim\|cosine' src/template.ts
+- label: graph introspection nodes (graph:describe, graph:subjects, graph:deps, inspect) provide structural analysis of the graph and dependency tracking
+  command: grep -q '"graph:describe":' src/template.ts && grep -q '"graph:deps":' src/template.ts && grep -q '"inspect":' src/template.ts
 
 # snapshots
 
-- local snapshots use SQLite file-level backup of the libSQL database
-- application-level snapshots can export/import the full graph as JSON
-- Turso Cloud branching and point-in-time restore available as an upgrade path when connected to cloud
+- label: local snapshots use SQLite file-level backup of the libSQL database
+  command: grep -q '"snapshot:backup":' src/template.ts
+- label: application-level snapshots can export/import the full graph as JSON
+  command: grep -q '"snapshot:export":' src/template.ts && grep -q '"snapshot:import":' src/template.ts
+- Turso Cloud branching and point-in-time restore are inherent platform capabilities available when connected to cloud — not implemented in holoiconic itself
+
+# versioning
+- label: sys:compiler auto-saves the old source as a version via version:save whenever a source quad is retracted
+  command: grep -q 'version:save' src/template.ts
+- label: version:list returns all saved versions for a node with seq numbers and timestamps
+  command: grep -q '"version:list":' src/template.ts
+- label: version:restore restores a node to a specific version by seq number — retracts current source and asserts the old one, triggering reactive recompilation
+  command: grep -q '"version:restore":' src/template.ts
+
+# observability
+- label: sys:compiler automatically records call count, duration, and errors for every ctx.call except calls to metrics nodes
+  command: grep -q "'metrics'" src/template.ts
+- label: metrics:report generates a formatted table of per-node call statistics sorted by call count
+  command: grep -q '"metrics:report":' src/template.ts
+
+# scheduling
+- label: cron runs a node on setInterval, registers job metadata as CronJob-typed quads, supports AbortSignal for cleanup
+  command: grep -q '"cron":' src/template.ts && grep -q 'setInterval' src/template.ts
