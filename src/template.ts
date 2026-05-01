@@ -15,6 +15,11 @@ const cache = new Map();
 const nodeStorage = ctx._nodeStorage;
 const originalCall = ctx.call.bind(ctx);
 
+// Unsubscribe previous compiler's source watcher to avoid subscriber leaks on re-invocation
+if (ctx._compilerUnsub) {
+  ctx._compilerUnsub();
+}
+
 ctx.call = async function cachedCall(name, callArgs) {
   let fn = cache.get(name);
   if (!fn) {
@@ -48,7 +53,7 @@ ctx.call = async function cachedCall(name, callArgs) {
 };
 
 // Watch for source changes — snapshot old source before invalidating cache
-ctx.on({ p: 'source' }, async (change) => {
+const unsub = ctx.on({ p: 'source' }, async (change) => {
   const name = change.quad.s;
   cache.delete(name);
 
@@ -61,6 +66,7 @@ ctx.on({ p: 'source' }, async (change) => {
     }
   }
 });
+ctx._compilerUnsub = unsub;
 
 console.log('[sys:compiler] installed — ctx.call now cached and reactive');
 `,
@@ -149,6 +155,15 @@ if (signal) {
   "spawn": `
 const node = args && args.node;
 if (!node) throw new Error('[spawn] args.node is required');
+
+// If already spawned, abort the old instance first to prevent leaks
+if (ctx._supervisorControllers) {
+  const existing = ctx._supervisorControllers.get(node);
+  if (existing && !existing.signal.aborted) {
+    console.log('[spawn] aborting previous instance of ' + node);
+    existing.abort();
+  }
+}
 
 const ac = new AbortController();
 
@@ -654,13 +669,14 @@ for (let i = 0; i < maxIterations; i++) {
       } else {
         // Try calling it as a generic node (tool names use underscores, node names use colons)
         const nodeName = toolName.replace(/_/g, ':');
-        result = JSON.stringify(await ctx.call(nodeName, toolInput));
+        const callResult = await ctx.call(nodeName, toolInput);
+        result = callResult === undefined ? '(no return value)' : JSON.stringify(callResult);
       }
     } catch (err) {
       result = 'Error: ' + (err.message || String(err));
     }
 
-    const resultStr = typeof result === 'string' ? result : JSON.stringify(result);
+    const resultStr = typeof result === 'string' ? result : (result === undefined ? '(no return value)' : JSON.stringify(result));
 
     // Record tool call for visibility
     allToolCalls.push({
@@ -753,11 +769,12 @@ const server = Bun.serve({
         if (body.stream) {
           const words = responseText.split(/(?<=\\s)/);
           const encoder = new TextEncoder();
+          let cancelled = false;
 
           const stream = new ReadableStream({
             async start(controller) {
               // If there are tool calls, send them as a metadata event first
-              if (toolCalls.length > 0) {
+              if (toolCalls.length > 0 && !cancelled) {
                 const metaChunk = {
                   id,
                   object: 'chat.completion.chunk',
@@ -769,10 +786,13 @@ const server = Bun.serve({
                     finish_reason: null,
                   }],
                 };
-                controller.enqueue(encoder.encode('data: ' + JSON.stringify(metaChunk) + '\\n\\n'));
+                try {
+                  controller.enqueue(encoder.encode('data: ' + JSON.stringify(metaChunk) + '\\n\\n'));
+                } catch { return; }
               }
 
               for (let i = 0; i < words.length; i++) {
+                if (cancelled) return;
                 const chunk = {
                   id,
                   object: 'chat.completion.chunk',
@@ -784,12 +804,16 @@ const server = Bun.serve({
                     finish_reason: null,
                   }],
                 };
-                controller.enqueue(encoder.encode('data: ' + JSON.stringify(chunk) + '\\n\\n'));
+                try {
+                  controller.enqueue(encoder.encode('data: ' + JSON.stringify(chunk) + '\\n\\n'));
+                } catch { return; }
                 // Small delay between chunks to simulate streaming
                 if (i < words.length - 1) {
                   await new Promise(r => setTimeout(r, 15));
                 }
               }
+
+              if (cancelled) return;
 
               // Final chunk with finish_reason
               const finalChunk = {
@@ -803,9 +827,14 @@ const server = Bun.serve({
                   finish_reason: 'stop',
                 }],
               };
-              controller.enqueue(encoder.encode('data: ' + JSON.stringify(finalChunk) + '\\n\\n'));
-              controller.enqueue(encoder.encode('data: [DONE]\\n\\n'));
-              controller.close();
+              try {
+                controller.enqueue(encoder.encode('data: ' + JSON.stringify(finalChunk) + '\\n\\n'));
+                controller.enqueue(encoder.encode('data: [DONE]\\n\\n'));
+                controller.close();
+              } catch { /* client disconnected */ }
+            },
+            cancel() {
+              cancelled = true;
             },
           });
 
@@ -1106,6 +1135,24 @@ async function send() {
       }
     }
 
+    // Flush any remaining data in the buffer after stream ends
+    if (buffer.trim()) {
+      const trimmed = buffer.trim();
+      if (trimmed.startsWith('data: ')) {
+        const payload = trimmed.slice(6);
+        if (payload !== '[DONE]') {
+          try {
+            const chunk = JSON.parse(payload);
+            const delta = chunk.choices && chunk.choices[0] && chunk.choices[0].delta;
+            if (delta && delta.content) {
+              fullText += delta.content;
+              contentSpan.textContent = fullText;
+            }
+          } catch {}
+        }
+      }
+    }
+
     // Render tool calls if any
     renderToolCalls(toolCalls, d);
 
@@ -1120,8 +1167,8 @@ async function send() {
 
 function addMsg(role, content) {
   const d = document.createElement('div');
-  d.className = 'msg ' + role;
-  d.innerHTML = '<div class="role">' + role + '</div>' + escHtml(content);
+  d.className = 'msg ' + escHtml(role);
+  d.innerHTML = '<div class="role">' + escHtml(role) + '</div>' + escHtml(content);
   msgDiv.appendChild(d);
   msgDiv.scrollTop = msgDiv.scrollHeight;
 }
@@ -1273,8 +1320,7 @@ async function showSource(name, el) {
 
 // Create Node
 document.getElementById('create-node-btn').onclick = () => {
-  createNodeForm.style.display = createNodeForm.style.display === 'none' ? 'block' : 'block';
-  createNodeForm.style.display = 'block';
+  createNodeForm.style.display = createNodeForm.style.display === 'block' ? 'none' : 'block';
 };
 document.getElementById('create-cancel').onclick = () => {
   createNodeForm.style.display = 'none';
@@ -1485,13 +1531,21 @@ const quads = JSON.parse(jsonStr);
 if (!Array.isArray(quads)) throw new Error('[snapshot:import] expected JSON array');
 
 let count = 0;
+let skipped = 0;
 for (const q of quads) {
-  await ctx.assert(q.s, q.p, q.o, q.g || '_');
+  if (!q.s || !q.p || (q.o === undefined || q.o === null)) {
+    skipped++;
+    continue;
+  }
+  await ctx.assert(q.s, q.p, String(q.o), q.g || '_');
   count++;
 }
 
+if (skipped > 0) {
+  console.warn('[snapshot:import] skipped ' + skipped + ' quads with missing s/p/o fields');
+}
 console.log('[snapshot:import] imported ' + count + ' quads');
-return { count };
+return { count, skipped };
 `,
 
   // ── snapshot:backup ────────────────────────────────────────────
@@ -1938,7 +1992,18 @@ if (signal) {
     signal.addEventListener('abort', resolve, { once: true });
   });
 } else {
-  // No signal — return the cronId and timer info for manual management
+  // No signal — store timer in a registry so it can be stopped via cron:stop or cleanup
+  if (!ctx._cronTimers) ctx._cronTimers = new Map();
+  ctx._cronTimers.set(cronId, { timer, stopCron: async () => {
+    clearInterval(timer);
+    try {
+      await ctx.retract(cronId, 'cron:status', 'running');
+      await ctx.assert(cronId, 'cron:status', 'stopped');
+      await ctx.assert(cronId, 'cron:stopped', new Date().toISOString());
+      await ctx.assert(cronId, 'cron:ticks', String(tickCount));
+    } catch {}
+    console.log('[cron] stopped ' + cronId + ' after ' + tickCount + ' ticks');
+  }});
 }
 
 return { cronId, node, interval };
@@ -2077,14 +2142,29 @@ if (!s || !p || o === undefined || o === null) {
   throw new Error('[set] args.s, args.p, and args.o are required');
 }
 
-// Retract all existing values for this (s, p, *, g) pattern
-const existing = await ctx.query({ s, p, g });
-for (const eq of existing) {
-  await ctx.retract(eq.s, eq.p, eq.o, eq.g);
-}
+// Serialize set operations per (s, p, g) key to prevent concurrent race conditions
+if (!ctx._setLocks) ctx._setLocks = new Map();
+const lockKey = s + '\\0' + p + '\\0' + g;
+const prev = ctx._setLocks.get(lockKey) || Promise.resolve();
+const op = prev.then(async () => {
+  // Retract all existing values for this (s, p, *, g) pattern
+  const existing = await ctx.query({ s, p, g });
+  for (const eq of existing) {
+    await ctx.retract(eq.s, eq.p, eq.o, eq.g);
+  }
+  // Assert the new value
+  return ctx.assert(s, p, o, g);
+}).catch(async (err) => {
+  // Even if a previous operation failed, try our operation
+  const existing = await ctx.query({ s, p, g });
+  for (const eq of existing) {
+    await ctx.retract(eq.s, eq.p, eq.o, eq.g);
+  }
+  return ctx.assert(s, p, o, g);
+});
+ctx._setLocks.set(lockKey, op.catch(() => {}));
 
-// Assert the new value
-const quad = await ctx.assert(s, p, o, g);
+const quad = await op;
 return quad;
 `,
 
@@ -2125,17 +2205,35 @@ for await (const line of rl) {
 
     } else if (trimmed.startsWith('.assert ')) {
       const parts = trimmed.slice(8).split(' ');
-      if (parts.length < 3) { console.log('usage: .assert s p o [g]'); }
+      if (parts.length < 3) { console.log('usage: .assert s p o [--g graph]'); }
       else {
-        const q = await ctx.assert(parts[0], parts[1], parts.slice(2).join(' '));
+        // If the last token starts with a known graph prefix or is '_', treat it as graph
+        // Use --g flag for explicit graph: .assert s p o --g graphname
+        const ggIdx = parts.indexOf('--g');
+        let s = parts[0], p = parts[1], o, g;
+        if (ggIdx !== -1 && ggIdx + 1 < parts.length) {
+          g = parts[ggIdx + 1];
+          o = parts.slice(2, ggIdx).join(' ');
+        } else {
+          o = parts.slice(2).join(' ');
+        }
+        const q = await ctx.assert(s, p, o, g || '_');
         console.log('asserted:', JSON.stringify(q));
       }
 
     } else if (trimmed.startsWith('.retract ')) {
       const parts = trimmed.slice(9).split(' ');
-      if (parts.length < 3) { console.log('usage: .retract s p o [g]'); }
+      if (parts.length < 3) { console.log('usage: .retract s p o [--g graph]'); }
       else {
-        await ctx.retract(parts[0], parts[1], parts.slice(2).join(' '));
+        const ggIdx = parts.indexOf('--g');
+        let s = parts[0], p = parts[1], o, g;
+        if (ggIdx !== -1 && ggIdx + 1 < parts.length) {
+          g = parts[ggIdx + 1];
+          o = parts.slice(2, ggIdx).join(' ');
+        } else {
+          o = parts.slice(2).join(' ');
+        }
+        await ctx.retract(s, p, o, g || '_');
         console.log('retracted');
       }
 
@@ -2331,8 +2429,8 @@ for await (const line of rl) {
     } else if (trimmed === '.help') {
       console.log('commands:');
       console.log('  .query {"s":"...","p":"..."}  — query quads by pattern');
-      console.log('  .assert s p o                 — assert a quad');
-      console.log('  .retract s p o                — retract a quad');
+      console.log('  .assert s p o [--g graph]     — assert a quad');
+      console.log('  .retract s p o [--g graph]    — retract a quad');
       console.log('  .call name [argsJSON]          — call a node');
       console.log('  .nodes                        — list all Function nodes');
       console.log('  .source <name>                — view a node source');

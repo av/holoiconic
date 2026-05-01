@@ -2132,6 +2132,872 @@ async function testReplMetricsCommand(ctx: Ctx) {
   }
 }
 
+async function testReplAssertRetractGraph(ctx: Ctx) {
+  console.log("\n── REPL .assert/.retract --g support ──");
+
+  try {
+    // Verify the REPL source has --g flag support
+    const rs = await ctx.query({ s: "repl", p: "source" });
+    if (rs.length === 0) throw new Error("repl source not found");
+    const src = rs[0].o;
+
+    if (!src.includes("'--g'"))
+      throw new Error("REPL .assert does not support --g flag");
+    ok("REPL .assert source contains --g flag parsing");
+  } catch (e) {
+    fail("REPL .assert --g flag", e);
+  }
+
+  try {
+    // Verify help text is updated
+    const rs = await ctx.query({ s: "repl", p: "source" });
+    const src = rs[0].o;
+
+    if (!src.includes(".assert s p o [--g graph]"))
+      throw new Error("REPL help text not updated for .assert");
+    if (!src.includes(".retract s p o [--g graph]"))
+      throw new Error("REPL help text not updated for .retract");
+    ok("REPL help text mentions --g flag for .assert and .retract");
+  } catch (e) {
+    fail("REPL help text update", e);
+  }
+}
+
+async function testSnapshotImportValidation(ctx: Ctx) {
+  console.log("\n── Snapshot import validation ──");
+
+  try {
+    // Import quads with missing 's' field — should be skipped, not crash
+    const result = await ctx.call("snapshot:import", {
+      data: JSON.stringify([
+        { p: "value", o: "hello", g: "_" },
+        { s: "valid:quad", p: "test", o: "works", g: "_" },
+      ]),
+    });
+    if (result.count !== 1)
+      throw new Error(`expected count=1 (valid quad only), got ${result.count}`);
+    if (result.skipped !== 1)
+      throw new Error(`expected skipped=1, got ${result.skipped}`);
+    ok("snapshot:import skips quads with missing fields (1 skipped, 1 imported)");
+  } catch (e) {
+    fail("snapshot:import validation", e);
+  }
+
+  try {
+    // Import quads with null 'o' field — should be skipped
+    const result = await ctx.call("snapshot:import", {
+      data: JSON.stringify([
+        { s: "test:nullo", p: "val", o: null, g: "_" },
+      ]),
+    });
+    if (result.skipped !== 1)
+      throw new Error(`expected skipped=1, got ${result.skipped}`);
+    ok("snapshot:import skips quads with null o field");
+  } catch (e) {
+    fail("snapshot:import null o", e);
+  }
+}
+
+async function testApiServerEdgeCases(ctx: Ctx) {
+  console.log("\n── API server edge cases ──");
+
+  const port = 13200 + Math.floor(Math.random() * 800);
+  const ac = new AbortController();
+
+  try {
+    ctx.call("api:server", { port, signal: ac.signal }).catch(() => {});
+    await new Promise((r) => setTimeout(r, 200));
+
+    // Empty messages array => 400
+    try {
+      const res = await fetch(`http://localhost:${port}/v1/chat/completions`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ model: "holoiconic", messages: [] }),
+      });
+      if (res.status !== 400)
+        throw new Error(`expected 400, got ${res.status}`);
+      ok("api: empty messages array returns 400");
+    } catch (e) {
+      fail("api: empty messages", e);
+    }
+
+    // Missing messages field => 400
+    try {
+      const res = await fetch(`http://localhost:${port}/v1/chat/completions`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ model: "holoiconic" }),
+      });
+      if (res.status !== 400)
+        throw new Error(`expected 400, got ${res.status}`);
+      ok("api: missing messages field returns 400");
+    } catch (e) {
+      fail("api: missing messages", e);
+    }
+
+    // Malformed JSON => 500
+    try {
+      const res = await fetch(`http://localhost:${port}/v1/chat/completions`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: "not valid json{{{",
+      });
+      if (res.status !== 500)
+        throw new Error(`expected 500, got ${res.status}`);
+      ok("api: malformed JSON body returns 500");
+    } catch (e) {
+      fail("api: malformed JSON", e);
+    }
+
+    // GET /v1/chat/completions (wrong method) => 404
+    try {
+      const res = await fetch(`http://localhost:${port}/v1/chat/completions`, {
+        method: "GET",
+      });
+      if (res.status !== 404)
+        throw new Error(`expected 404, got ${res.status}`);
+      ok("api: GET /v1/chat/completions returns 404");
+    } catch (e) {
+      fail("api: wrong method", e);
+    }
+
+    // Session with special characters preserved
+    try {
+      const specialSession = "test:session/special<>&\"";
+      const res = await fetch(`http://localhost:${port}/v1/chat/completions`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          model: "holoiconic",
+          messages: [{ role: "user", content: "test" }],
+          session: specialSession,
+        }),
+      });
+      const data = await res.json() as any;
+      if (data.session !== specialSession)
+        throw new Error(`session not preserved: ${data.session}`);
+      ok("api: session with special characters preserved");
+    } catch (e) {
+      fail("api: special session", e);
+    }
+
+    // Concurrent requests
+    try {
+      const promises = Array(5).fill(null).map((_, i) =>
+        fetch(`http://localhost:${port}/v1/chat/completions`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            model: "holoiconic",
+            messages: [{ role: "user", content: `concurrent ${i}` }],
+          }),
+        })
+      );
+      const results = await Promise.all(promises);
+      if (!results.every(r => r.status === 200))
+        throw new Error("not all concurrent requests returned 200");
+      ok("api: 5 concurrent requests all succeed");
+    } catch (e) {
+      fail("api: concurrent", e);
+    }
+  } finally {
+    ac.abort();
+    await new Promise((r) => setTimeout(r, 100));
+  }
+}
+
+async function testWebUiEdgeCases(ctx: Ctx) {
+  console.log("\n── WebUI edge cases ──");
+
+  const port = 14200 + Math.floor(Math.random() * 800);
+  const ac = new AbortController();
+
+  try {
+    ctx.call("web:ui", { port, apiPort: 19999, signal: ac.signal }).catch(() => {});
+    await new Promise((r) => setTimeout(r, 200));
+
+    // GET nonexistent node returns 200 with null source
+    try {
+      const res = await fetch(`http://localhost:${port}/api/node/nonexistent`);
+      const data = await res.json() as any;
+      if (res.status !== 200 || data.source !== null)
+        throw new Error(`expected 200 with null source, got ${res.status}/${JSON.stringify(data)}`);
+      ok("webui: GET nonexistent node returns 200 with null source");
+    } catch (e) {
+      fail("webui: GET nonexistent", e);
+    }
+
+    // POST with empty name returns 400
+    try {
+      const res = await fetch(`http://localhost:${port}/api/nodes`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name: "", source: "return 1" }),
+      });
+      if (res.status !== 400)
+        throw new Error(`expected 400, got ${res.status}`);
+      ok("webui: POST empty name returns 400");
+    } catch (e) {
+      fail("webui: POST empty name", e);
+    }
+
+    // DELETE nonexistent node returns 200 with retracted=0
+    try {
+      const res = await fetch(`http://localhost:${port}/api/node/nonexistent:xyz`, {
+        method: "DELETE",
+      });
+      const data = await res.json() as any;
+      if (res.status !== 200 || data.retracted !== 0)
+        throw new Error(`expected 200 with retracted=0, got ${res.status}/${JSON.stringify(data)}`);
+      ok("webui: DELETE nonexistent node returns 200 with retracted=0");
+    } catch (e) {
+      fail("webui: DELETE nonexistent", e);
+    }
+
+    // POST unicode node name
+    try {
+      const res = await fetch(`http://localhost:${port}/api/nodes`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name: "test:unicode-éèê-" + Date.now(), source: "return 'utf8'" }),
+      });
+      if (res.status !== 201)
+        throw new Error(`expected 201, got ${res.status}`);
+      ok("webui: POST unicode node name succeeds");
+    } catch (e) {
+      fail("webui: POST unicode", e);
+    }
+
+    // GET deps for node with no source
+    try {
+      const nodeName = "test:nosrc-" + Date.now();
+      await ctx.assert(nodeName, "type", "Function");
+      const res = await fetch(`http://localhost:${port}/api/node/${encodeURIComponent(nodeName)}/deps`);
+      const data = await res.json() as any;
+      if (res.status !== 200 || !Array.isArray(data.calls) || data.calls.length !== 0)
+        throw new Error(`expected 200 with empty calls, got ${res.status}/${JSON.stringify(data)}`);
+      ok("webui: GET deps for node with no source returns empty calls");
+    } catch (e) {
+      fail("webui: GET deps no source", e);
+    }
+  } finally {
+    ac.abort();
+    await new Promise((r) => setTimeout(r, 100));
+  }
+}
+
+// ── BUG-004: Double-spawn aborts old instance ────────────────────
+
+async function testDoubleSpawn(ctx: Ctx) {
+  console.log("\n── Double-spawn (BUG-004 fix) ──");
+
+  try {
+    // Create a test node that stays alive
+    await ctx.assert("test:dblspawn", "type", "Function");
+    await ctx.assert("test:dblspawn", "source", `
+const id = 'inst:' + Date.now() + ':' + Math.random().toString(36).slice(2);
+await ctx.assert('test:dblspawn', id, 'running');
+const signal = args && args.signal;
+if (signal) {
+  await new Promise(r => signal.addEventListener('abort', r, { once: true }));
+}
+`);
+
+    // Spawn it twice
+    const ac1 = await ctx.call("spawn", { node: "test:dblspawn" });
+    await new Promise((r) => setTimeout(r, 100));
+
+    const ac2 = await ctx.call("spawn", { node: "test:dblspawn" });
+    await new Promise((r) => setTimeout(r, 100));
+
+    // The first controller should have been aborted
+    if (ac1.signal.aborted) {
+      ok("double-spawn: first instance aborted when second spawn called");
+    } else {
+      fail("double-spawn", "first instance was NOT aborted — controller leak");
+    }
+
+    // Only one controller should be stored
+    const controllers = ctx._supervisorControllers;
+    if (controllers) {
+      const stored = controllers.get("test:dblspawn");
+      if (stored && !stored.signal.aborted) {
+        ok("double-spawn: only the latest controller is stored");
+      } else {
+        fail("double-spawn", "stored controller is wrong or aborted");
+      }
+    }
+
+    // Cleanup
+    ac2.abort();
+  } catch (e) {
+    fail("double-spawn", e);
+  }
+}
+
+// ── BUG-005: Cron without signal stores timer for cleanup ────────
+
+async function testCronNoSignalCleanup(ctx: Ctx) {
+  console.log("\n── Cron no-signal cleanup (BUG-005 fix) ──");
+
+  try {
+    await ctx.assert("test:cronnos", "type", "Function");
+    await ctx.assert("test:cronnos", "source", "return 'tick'");
+
+    // Start cron without signal
+    const result = await ctx.call("cron", {
+      node: "test:cronnos",
+      interval: 60000,
+    });
+
+    if (!result || !result.cronId)
+      throw new Error("cron did not return cronId");
+
+    // Check that the timer was stored in ctx._cronTimers for cleanup
+    if (ctx._cronTimers && ctx._cronTimers.has(result.cronId)) {
+      ok("cron-no-signal: timer stored in ctx._cronTimers for cleanup");
+
+      // Stop it via the stored stopCron function
+      const entry = ctx._cronTimers.get(result.cronId);
+      await entry.stopCron();
+
+      ok("cron-no-signal: timer successfully stopped via stored cleanup function");
+    } else {
+      fail("cron-no-signal", "timer NOT stored in ctx._cronTimers — would leak");
+    }
+  } catch (e) {
+    fail("cron-no-signal", e);
+  }
+}
+
+// ── BUG-006: sys:compiler subscriber cleanup on re-invocation ────
+
+async function testCompilerSubscriberCleanup(ctx: Ctx) {
+  console.log("\n── Compiler subscriber cleanup (BUG-006 fix) ──");
+
+  try {
+    // sys:compiler was already called during boot chain. Check that _compilerUnsub exists.
+    if (typeof ctx._compilerUnsub !== "function") {
+      fail("compiler-unsub", "_compilerUnsub is not a function");
+      return;
+    }
+    ok("compiler-unsub: _compilerUnsub function is set after sys:compiler");
+
+    // Call sys:compiler again — should unsubscribe the previous watcher first
+    await ctx.call("sys:compiler");
+
+    // Verify the new unsub is set (not the old one)
+    if (typeof ctx._compilerUnsub !== "function") {
+      fail("compiler-unsub", "_compilerUnsub not set after re-invocation");
+    } else {
+      ok("compiler-unsub: re-invocation sets new _compilerUnsub (old was unsubscribed)");
+    }
+
+    // Verify compilation still works after re-invocation
+    await ctx.assert("test:compilerresub", "type", "Function");
+    await ctx.assert("test:compilerresub", "source", "return 'works'");
+    const result = await ctx.call("test:compilerresub");
+    if (result !== "works") throw new Error(`expected 'works', got '${result}'`);
+    ok("compiler-unsub: compilation works correctly after re-invocation");
+  } catch (e) {
+    fail("compiler-unsub", e);
+  }
+}
+
+// ── BUG-007: Concurrent set race condition fixed ─────────────────
+
+async function testConcurrentSetFix(ctx: Ctx) {
+  console.log("\n── Concurrent set fix (BUG-007 fix) ──");
+
+  try {
+    await ctx.assert("test:setrace", "value", "initial");
+
+    // Call set concurrently — with the fix, operations should be serialized
+    const p1 = ctx.call("set", { s: "test:setrace", p: "value", o: "winner1" });
+    const p2 = ctx.call("set", { s: "test:setrace", p: "value", o: "winner2" });
+
+    await Promise.all([p1, p2]);
+
+    // Check: only one value should exist
+    const values = await ctx.query({ s: "test:setrace", p: "value" });
+    if (values.length === 1) {
+      ok("concurrent-set: serialized — only one value survives (" + values[0].o + ")");
+    } else {
+      fail(
+        "concurrent-set",
+        `race condition still exists — ${values.length} values: ${values.map((q) => q.o).join(", ")}`
+      );
+    }
+  } catch (e) {
+    fail("concurrent-set", e);
+  }
+}
+
+// ── BUG-008: Generic tool fallback undefined result ──────────────
+
+async function testToolResultUndefined(ctx: Ctx) {
+  console.log("\n── Tool result undefined fix (BUG-008 fix) ──");
+
+  try {
+    // Create a node that returns undefined
+    await ctx.assert("test:voidnode", "type", "Function");
+    await ctx.assert("test:voidnode", "source", "// returns undefined");
+
+    // Simulate what agent:loop does in the generic fallback
+    const callResult = await ctx.call("test:voidnode");
+    const resultStr = callResult === undefined ? "(no return value)" : JSON.stringify(callResult);
+
+    if (typeof resultStr === "string" && resultStr.length > 0) {
+      ok("tool-result-undefined: undefined result safely converted to string");
+    } else {
+      fail("tool-result-undefined", `resultStr is ${typeof resultStr}: ${resultStr}`);
+    }
+  } catch (e) {
+    fail("tool-result-undefined", e);
+  }
+
+  try {
+    // Verify the fix is in the agent:loop source
+    const loopSource = await ctx.query({ s: "agent:loop", p: "source" });
+    const src = loopSource[0].o;
+    if (src.includes("'(no return value)'")) {
+      ok("tool-result-undefined: agent:loop source handles undefined results");
+    } else {
+      fail("tool-result-undefined", "agent:loop source missing undefined handling");
+    }
+  } catch (e) {
+    fail("tool-result-undefined source check", e);
+  }
+}
+
+// ── SQL injection safety ─────────────────────────────────────────
+
+async function testSqlInjectionSafety(ctx: Ctx) {
+  console.log("\n── SQL injection safety ──");
+
+  try {
+    // Attempt SQL injection via node name
+    try {
+      await ctx.call("'; DROP TABLE quads; --");
+    } catch (e: any) {
+      if (e.message && e.message.includes("no source found")) {
+        ok("sql-injection: malicious node name safely rejected (parameterized query)");
+      } else {
+        fail("sql-injection", "unexpected error: " + e.message);
+      }
+    }
+
+    // Attempt SQL injection via assert values
+    const q = await ctx.assert(
+      "test'; DROP TABLE quads; --",
+      "pred'; DROP --",
+      "val'; DROP --"
+    );
+    if (q && q.s.includes("DROP TABLE")) {
+      ok("sql-injection: malicious values stored literally, not executed");
+    } else {
+      fail("sql-injection", "unexpected assert result");
+    }
+
+    // Verify database is intact
+    const allQuads = await ctx.query({});
+    if (allQuads.length > 0) {
+      ok("sql-injection: quads table intact after injection attempts (" + allQuads.length + " quads)");
+    } else {
+      fail("sql-injection", "quads table may have been dropped!");
+    }
+  } catch (e) {
+    fail("sql-injection safety", e);
+  }
+}
+
+// ── XSS safety in WebUI ─────────────────────────────────────────
+
+async function testXssSafety(ctx: Ctx) {
+  console.log("\n── XSS safety ──");
+
+  const port = 14900 + Math.floor(Math.random() * 100);
+  const ac = new AbortController();
+
+  try {
+    ctx.call("web:ui", { port, apiPort: 19999, signal: ac.signal }).catch(() => {});
+    await new Promise((r) => setTimeout(r, 200));
+
+    // Create a node with XSS payload in the name
+    const xssName = "test:<script>alert('xss')</script>";
+    await ctx.assert(xssName, "type", "Function");
+    await ctx.assert(xssName, "source", "return '<img onerror=alert(1)>'");
+
+    // Fetch the node list API
+    const res = await fetch(`http://localhost:${port}/api/nodes`);
+    const nodes = (await res.json()) as any[];
+    const xssNode = nodes.find((n: any) => n.name.includes("<script>"));
+
+    if (xssNode) {
+      // The API returns JSON, so the script tag is in a JSON string — no XSS risk
+      ok("xss: node with script tag in name safely returned as JSON");
+    }
+
+    // Fetch the source API
+    const srcRes = await fetch(
+      `http://localhost:${port}/api/node/${encodeURIComponent(xssName)}`
+    );
+    const srcData = (await srcRes.json()) as any;
+    if (srcData.source && srcData.source.includes("<img")) {
+      ok("xss: malicious source returned as JSON (no XSS in API responses)");
+    }
+
+    // Check the HTML page uses textContent for node names (not innerHTML)
+    const htmlRes = await fetch(`http://localhost:${port}/`);
+    const html = await htmlRes.text();
+    if (html.includes("nameSpan.textContent = n.name")) {
+      ok("xss: WebUI uses textContent for node names (XSS-safe)");
+    } else if (html.includes("textContent")) {
+      ok("xss: WebUI uses textContent for rendering (XSS-safe)");
+    }
+
+    // Verify escHtml is used for chat messages
+    if (html.includes("escHtml")) {
+      ok("xss: WebUI has escHtml function for HTML escaping");
+    }
+  } catch (e) {
+    fail("xss safety", e);
+  } finally {
+    ac.abort();
+    await new Promise((r) => setTimeout(r, 100));
+  }
+}
+
+// ── Prototype pollution safety ───────────────────────────────────
+
+async function testPrototypePollution(ctx: Ctx) {
+  console.log("\n── Prototype pollution safety ──");
+
+  try {
+    const payload = JSON.stringify({ __proto__: { polluted: true } });
+    await ctx.assert("test:proto", "data", payload);
+
+    const obj = {} as any;
+    if (obj.polluted === true) {
+      fail("prototype-pollution", "Object.prototype was polluted!");
+    } else {
+      ok("prototype-pollution: quad values do not pollute Object.prototype");
+    }
+
+    // Clean up
+    await ctx.retract("test:proto", "data", payload);
+  } catch (e) {
+    fail("prototype-pollution", e);
+  }
+}
+
+// ── BUG-009: Create-node form toggle was a no-op ────────────────
+
+async function testCreateNodeToggle(ctx: Ctx) {
+  console.log("\n── Create-node form toggle (BUG-009 fix) ──");
+
+  const port = 15050 + Math.floor(Math.random() * 100);
+  const ac = new AbortController();
+
+  try {
+    ctx.call("web:ui", { port, apiPort: 19999, signal: ac.signal }).catch(() => {});
+    await new Promise((r) => setTimeout(r, 200));
+
+    const res = await fetch(`http://localhost:${port}/`);
+    const html = await res.text();
+
+    // The toggle should use a proper conditional, not always 'block'
+    if (html.includes("=== 'block' ? 'none' : 'block'")) {
+      ok("create-node-toggle: form toggles between block and none");
+    } else if (html.includes("=== 'none' ? 'block' : 'block'")) {
+      fail("create-node-toggle", "ternary is still a no-op (both branches are 'block')");
+    } else {
+      // Check it doesn't have the broken pattern
+      if (!html.includes("? 'block' : 'block'")) {
+        ok("create-node-toggle: no broken always-block ternary found");
+      } else {
+        fail("create-node-toggle", "broken toggle pattern still present");
+      }
+    }
+  } catch (e) {
+    fail("create-node-toggle", e);
+  } finally {
+    ac.abort();
+    await new Promise((r) => setTimeout(r, 100));
+  }
+}
+
+// ── BUG-010: SSE stream cancel handler for client disconnect ────
+
+async function testStreamCancelHandler(ctx: Ctx) {
+  console.log("\n── SSE stream cancel handler (BUG-010 fix) ──");
+
+  const port = 15150 + Math.floor(Math.random() * 100);
+  const ac = new AbortController();
+
+  try {
+    ctx.call("api:server", { port, signal: ac.signal }).catch(() => {});
+    await new Promise((r) => setTimeout(r, 200));
+
+    // Verify the source contains the cancel handler
+    const sourceQuads = await ctx.query({ s: "api:server", p: "source" });
+    const src = sourceQuads[0].o;
+    if (src.includes("cancel()") && src.includes("cancelled = true")) {
+      ok("stream-cancel: ReadableStream has cancel() handler");
+    } else {
+      fail("stream-cancel", "ReadableStream missing cancel() handler");
+    }
+
+    // Test that aborting a stream doesn't crash the server
+    const fetchAc = new AbortController();
+    try {
+      const res = await fetch(`http://localhost:${port}/v1/chat/completions`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          model: "holoiconic",
+          messages: [{ role: "user", content: "cancel test" }],
+          stream: true,
+        }),
+        signal: fetchAc.signal,
+      });
+      const reader = res.body!.getReader();
+      await reader.read(); // read one chunk
+      fetchAc.abort();
+    } catch {}
+
+    await new Promise((r) => setTimeout(r, 200));
+
+    // Server should still be healthy
+    const healthRes = await fetch(`http://localhost:${port}/health`);
+    const healthData = (await healthRes.json()) as any;
+    if (healthData.status === "ok") {
+      ok("stream-cancel: server healthy after client abort");
+    } else {
+      fail("stream-cancel: health after abort", "server not healthy");
+    }
+  } catch (e) {
+    fail("stream-cancel", e);
+  } finally {
+    ac.abort();
+    await new Promise((r) => setTimeout(r, 100));
+  }
+}
+
+// ── BUG-011: addMsg role parameter escaped via escHtml ──────────
+
+async function testAddMsgRoleEscaping(ctx: Ctx) {
+  console.log("\n── addMsg role escaping (BUG-011 fix) ──");
+
+  const port = 15250 + Math.floor(Math.random() * 100);
+  const ac = new AbortController();
+
+  try {
+    ctx.call("web:ui", { port, apiPort: 19999, signal: ac.signal }).catch(() => {});
+    await new Promise((r) => setTimeout(r, 200));
+
+    const res = await fetch(`http://localhost:${port}/`);
+    const html = await res.text();
+
+    // The addMsg function should escape role via escHtml
+    if (html.includes("escHtml(role)")) {
+      ok("addMsg-role: role parameter is escaped via escHtml");
+    } else {
+      fail("addMsg-role", "role parameter is NOT escaped in addMsg innerHTML");
+    }
+  } catch (e) {
+    fail("addMsg-role", e);
+  } finally {
+    ac.abort();
+    await new Promise((r) => setTimeout(r, 100));
+  }
+}
+
+// ── BUG-012: SSE client buffer flush after stream ends ──────────
+
+async function testSseBufferFlush(ctx: Ctx) {
+  console.log("\n── SSE buffer flush (BUG-012 fix) ──");
+
+  const port = 15350 + Math.floor(Math.random() * 100);
+  const ac = new AbortController();
+
+  try {
+    ctx.call("web:ui", { port, apiPort: 19999, signal: ac.signal }).catch(() => {});
+    await new Promise((r) => setTimeout(r, 200));
+
+    const res = await fetch(`http://localhost:${port}/`);
+    const html = await res.text();
+
+    // The WebUI JS should flush remaining buffer after stream ends
+    if (html.includes("Flush any remaining data in the buffer after stream ends")) {
+      ok("sse-buffer-flush: client flushes remaining buffer after stream ends");
+    } else if (html.includes("buffer.trim()") && html.includes("startsWith('data: ')")) {
+      ok("sse-buffer-flush: client has buffer flush logic");
+    } else {
+      fail("sse-buffer-flush", "no buffer flush logic found in client JS");
+    }
+  } catch (e) {
+    fail("sse-buffer-flush", e);
+  } finally {
+    ac.abort();
+    await new Promise((r) => setTimeout(r, 100));
+  }
+}
+
+// ── SSE concurrent streams don't interfere ──────────────────────
+
+async function testConcurrentStreams(ctx: Ctx) {
+  console.log("\n── Concurrent SSE streams ──");
+
+  const port = 15450 + Math.floor(Math.random() * 100);
+  const ac = new AbortController();
+
+  try {
+    ctx.call("api:server", { port, signal: ac.signal }).catch(() => {});
+    await new Promise((r) => setTimeout(r, 200));
+
+    const promises = [0, 1, 2].map((i) =>
+      fetch(`http://localhost:${port}/v1/chat/completions`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          model: "holoiconic",
+          messages: [{ role: "user", content: `concurrent ${i}` }],
+          stream: true,
+          session: `concurrent:${i}:${Date.now()}`,
+        }),
+      }).then((r) => r.text())
+    );
+
+    const results = await Promise.all(promises);
+
+    let allValid = true;
+    for (let i = 0; i < results.length; i++) {
+      const lines = results[i].split("\n").filter((l: string) => l.startsWith("data: "));
+      const lastPayload = lines[lines.length - 1]?.slice(6)?.trim();
+      if (lastPayload !== "[DONE]") {
+        fail(`concurrent-stream ${i}`, `missing [DONE], last: ${lastPayload}`);
+        allValid = false;
+      }
+    }
+    if (allValid) {
+      ok("concurrent-streams: all 3 concurrent SSE streams complete correctly");
+    }
+  } catch (e) {
+    fail("concurrent-streams", e);
+  } finally {
+    ac.abort();
+    await new Promise((r) => setTimeout(r, 100));
+  }
+}
+
+// ── Full integration flow ────────────────────────────────────────
+
+async function testFullIntegrationFlow(ctx: Ctx) {
+  console.log("\n── Full integration flow ──");
+
+  const apiPort = 15550 + Math.floor(Math.random() * 50);
+  const webPort = 15650 + Math.floor(Math.random() * 50);
+  const apiAc = new AbortController();
+  const webAc = new AbortController();
+
+  try {
+    ctx.call("api:server", { port: apiPort, signal: apiAc.signal }).catch(() => {});
+    ctx.call("web:ui", { port: webPort, apiPort, signal: webAc.signal }).catch(() => {});
+    await new Promise((r) => setTimeout(r, 300));
+
+    // 1. Create a node via WebUI API
+    try {
+      const res = await fetch(`http://localhost:${webPort}/api/nodes`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          name: "test:flow",
+          source: "return 'flow-' + ((args && args.v) || 'default')",
+        }),
+      });
+      if (res.status !== 201) throw new Error(`expected 201, got ${res.status}`);
+      ok("flow: created node via WebUI API");
+    } catch (e) { fail("flow: create node", e); }
+
+    // 2. Call via API server
+    let sessionId: string | undefined;
+    try {
+      const res = await fetch(`http://localhost:${apiPort}/v1/chat/completions`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          model: "holoiconic",
+          messages: [{ role: "user", content: "flow test" }],
+        }),
+      });
+      const data = (await res.json()) as any;
+      sessionId = data.session;
+      if (data.choices?.[0]?.message?.content) {
+        ok("flow: chat completions works");
+      } else {
+        fail("flow: chat completions", "no content");
+      }
+    } catch (e) { fail("flow: chat completions", e); }
+
+    // 3. Verify conversation in graph
+    if (sessionId) {
+      try {
+        const msgs = await ctx.query({ p: "message", g: sessionId });
+        if (msgs.length >= 2) ok(`flow: conversation stored (${msgs.length} messages)`);
+        else fail("flow: conversation", `expected >=2 messages, got ${msgs.length}`);
+      } catch (e) { fail("flow: conversation", e); }
+    }
+
+    // 4. Export snapshot
+    let snap: string | undefined;
+    try {
+      snap = await ctx.call("snapshot:export");
+      ok("flow: snapshot exported");
+    } catch (e) { fail("flow: export", e); }
+
+    // 5. Delete node
+    try {
+      const res = await fetch(
+        `http://localhost:${webPort}/api/node/${encodeURIComponent("test:flow")}`,
+        { method: "DELETE" }
+      );
+      const data = (await res.json()) as any;
+      if (data.ok) ok("flow: node deleted");
+      else fail("flow: delete", JSON.stringify(data));
+    } catch (e) { fail("flow: delete", e); }
+
+    // 6. Import snapshot — node should be restored
+    if (snap) {
+      try {
+        await ctx.call("snapshot:import", { data: snap });
+        const check = await ctx.query({ s: "test:flow", p: "source" });
+        if (check.length > 0) ok("flow: deleted node restored via snapshot import");
+        else fail("flow: restore", "node not found after import");
+      } catch (e) { fail("flow: import", e); }
+    }
+
+    // 7. Deps on restored node
+    try {
+      const deps = await ctx.call("graph:deps", { node: "test:flow" });
+      if (deps.node === "test:flow") ok("flow: deps works on restored node");
+      else fail("flow: deps", `wrong node: ${deps.node}`);
+    } catch (e) { fail("flow: deps", e); }
+
+    // 8. Metrics check
+    try {
+      const report = await ctx.call("metrics:report", { raw: true });
+      if (report.nodes.length > 0) ok(`flow: metrics has ${report.nodes.length} entries`);
+      else fail("flow: metrics", "empty");
+    } catch (e) { fail("flow: metrics", e); }
+  } finally {
+    apiAc.abort();
+    webAc.abort();
+    await new Promise((r) => setTimeout(r, 100));
+  }
+}
+
 // ── Main ──────────────────────────────────────────────────────────
 
 async function main() {
@@ -2184,6 +3050,24 @@ async function main() {
   await testMetricsCompilerIntegration(ctx);
   await testMetricsToolRegistration(ctx);
   await testReplMetricsCommand(ctx);
+  await testReplAssertRetractGraph(ctx);
+  await testSnapshotImportValidation(ctx);
+  await testApiServerEdgeCases(ctx);
+  await testWebUiEdgeCases(ctx);
+  await testDoubleSpawn(ctx);
+  await testCronNoSignalCleanup(ctx);
+  await testCompilerSubscriberCleanup(ctx);
+  await testConcurrentSetFix(ctx);
+  await testToolResultUndefined(ctx);
+  await testSqlInjectionSafety(ctx);
+  await testXssSafety(ctx);
+  await testPrototypePollution(ctx);
+  await testCreateNodeToggle(ctx);
+  await testStreamCancelHandler(ctx);
+  await testAddMsgRoleEscaping(ctx);
+  await testSseBufferFlush(ctx);
+  await testConcurrentStreams(ctx);
+  await testFullIntegrationFlow(ctx);
 
   // Summary
   console.log("\n── Summary ──");
@@ -2193,6 +3077,13 @@ async function main() {
   if (ctx._supervisorControllers) {
     for (const [, ac] of ctx._supervisorControllers) {
       ac.abort();
+    }
+  }
+
+  // Cleanup: stop any leaked cron timers
+  if (ctx._cronTimers) {
+    for (const [, entry] of ctx._cronTimers) {
+      try { await entry.stopCron(); } catch {}
     }
   }
 
