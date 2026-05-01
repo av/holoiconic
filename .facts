@@ -217,11 +217,14 @@
 
 - label: there is no separate Agent class — the agentic loop is nodes in the graph like everything else
   command: ! grep -rq 'class Agent' src/
-- the loop, tool dispatch, and LLM calls are all graph-resident nodes invocable and modifiable through ctx
-- the agent can rewrite any part of itself — its loop, its tools, its LLM parameters — by mutating quads
+- label: the loop, tool dispatch, and LLM calls are all graph-resident nodes invocable and modifiable through ctx
+  command: grep -q '"agent:loop":' src/template.ts && grep -q '"agent:tools":' src/template.ts && grep -q '"llm":' src/template.ts && grep -q 'ctx.call' src/template.ts
+- label: the agent can rewrite any part of itself — its loop, its tools, its LLM parameters — by mutating quads
+  command: grep -q 'ctx.retract.*source' src/template.ts && grep -q 'ctx.assert.*source' src/template.ts
 - label: the agent's context window is written to the same graph as everything else
   command: grep -q 'ctx.assert.*message' src/template.ts
-- because everything is in the graph, arbitrary external harnesses can drive execution too
+- label: because everything is in the graph, arbitrary external harnesses can drive execution too
+  command: grep -q 'export function createCtx' src/ctx.ts && grep -q '/v1/chat/completions' src/template.ts
 - label: agent:tools registers 18 tools for the LLM agent, each stored as a Tool-typed quad with an input_schema
   command: test $(grep -c "'type', 'Tool'" src/template.ts) -eq 18
 - label: embed generates vector embeddings via OpenAI API (text-embedding-3-small) with deterministic stub fallback when no API key is set
@@ -275,12 +278,21 @@
   command: grep -q '"cron":' src/template.ts && grep -q 'setInterval' src/template.ts
 
 # snapshots
-- snapshot:backup copies the local SQLite file via Bun.write — raw file copy, not SQLite backup API
-- snapshot:backup defaults to holoiconic.db as source, generates a timestamped destination — both overridable via args
-- snapshot:backup throws if the source file doesn't exist — only works with local SQLite, not remote Turso
-- snapshot:export serializes all quads as JSON with s, p, o, g, and attrs fields — embedding vectors are stripped
-- snapshot:export returns a JSON string by default, or writes to a file when args.path is provided
-- snapshot:import accepts quads from a file path (args.path) or inline JSON string (args.data)
-- snapshot:import asserts each quad via ctx.assert — duplicates are no-ops, reactive events fire normally
-- snapshot:import skips quads missing s, p, or o fields and reports the skip count
-- Turso Cloud branching and point-in-time restore are platform-level — holoiconic does not implement or wrap them
+- label: snapshot:backup copies the local SQLite file via Bun.write — raw file copy, not SQLite backup API
+  command: grep -A20 '"snapshot:backup":' src/template.ts | grep -q 'Bun.write(dest, srcFile)'
+- label: snapshot:backup defaults to holoiconic.db as source, generates a timestamped destination — both overridable via args
+  command: grep -A20 '"snapshot:backup":' src/template.ts | grep -q "holoiconic.db" && grep -A20 '"snapshot:backup":' src/template.ts | grep -q 'toISOString'
+- label: snapshot:backup throws if the source file doesn't exist — only works with local SQLite, not remote Turso
+  command: grep -A20 '"snapshot:backup":' src/template.ts | grep -q 'throw new Error.*source database not found'
+- label: snapshot:export serializes all quads as JSON with s, p, o, g, and attrs fields — embedding vectors are stripped
+  command: grep -A15 '"snapshot:export":' src/template.ts | grep -q 's: q.s' && grep -A15 '"snapshot:export":' src/template.ts | grep -q 'attrs' && ! grep -A15 '"snapshot:export":' src/template.ts | grep -q 'embedding'
+- label: snapshot:export returns a JSON string by default, or writes to a file when args.path is provided
+  command: grep -A20 '"snapshot:export":' src/template.ts | grep -q 'return json' && grep -A20 '"snapshot:export":' src/template.ts | grep -q 'Bun.write(path, json)'
+- label: snapshot:import accepts quads from a file path (args.path) or inline JSON string (args.data)
+  command: grep -A15 '"snapshot:import":' src/template.ts | grep -q 'args.path' && grep -A15 '"snapshot:import":' src/template.ts | grep -q 'args.data'
+- label: snapshot:import asserts each quad via ctx.assert — duplicates are no-ops, reactive events fire normally
+  command: grep -A30 '"snapshot:import":' src/template.ts | grep -q 'ctx.assert(q.s, q.p'
+- label: snapshot:import skips quads missing s, p, or o fields and reports the skip count
+  command: grep -A30 '"snapshot:import":' src/template.ts | grep -q 'skipped++' && grep -A30 '"snapshot:import":' src/template.ts | grep -q 'missing s/p/o'
+- label: Turso Cloud branching and point-in-time restore are platform-level — holoiconic does not implement or wrap them
+  command: ! grep -q 'turso.*branch\|createBranch\|point-in-time' src/template.ts
