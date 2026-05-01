@@ -32,7 +32,7 @@
 - label: quads are unique on (s, p, o, g) — asserting an existing quad is a no-op
   command: grep -q 'UNIQUE(s, p, o, g)' src/db.ts && grep -q 'INSERT OR IGNORE' src/ctx.ts
 - label: retracting a non-existent quad returns an empty array
-  command: grep -q 'return quads' src/ctx.ts
+  command: bun -e 'const{createDatabase,initSchema}=require("./src/db.ts");const{createCtx}=require("./src/ctx.ts");(async()=>{const db=createDatabase(":memory:");await initSchema(db);const ctx=createCtx(db);const r=await ctx.retract("nonexistent","nope","nothing");if(!Array.isArray(r)||r.length!==0)process.exit(1);console.log("ok")})()'
 - label: convention: a function is (name, 'source', code) and (name, 'type', 'Function')
   command: grep -q '"source"' src/template.ts && grep -q '"type", "Function"' src/template.ts
 - label: convention: value always goes in o, never duplicated in attrs
@@ -86,7 +86,7 @@
 - label: nodes define local helpers and closures but are a single callable unit
   command: bun -e 'const{createDatabase,initSchema}=require("./src/db.ts");const{createCtx}=require("./src/ctx.ts");(async()=>{const db=createDatabase(":memory:");await initSchema(db);const ctx=createCtx(db);await ctx.assert("t:fn","source","function helper(x){return x*2} const y=helper(21); return y");await ctx.assert("t:fn","type","Function");const r=await ctx.call("t:fn");if(r!==42)process.exit(1);console.log("ok")})()'
 - label: compilation is reactive — sys:compiler watches { p: 'source' } and invalidates its cache on change
-  command: grep -q "p: 'source'" src/template.ts
+  command: grep -A50 '"sys:compiler":' src/template.ts | grep -q "ctx.on.*p: 'source'" && grep -A50 '"sys:compiler":' src/template.ts | grep -q 'cache.delete'
 - label: all node source strings are syntactically valid AsyncFunction bodies
   command: bun -e 'const AF=Object.getPrototypeOf(async function(){}).constructor;const{nodes}=require("./src/template.ts");for(const[n,s]of Object.entries(nodes)){try{new AF("ctx","args",s)}catch(e){console.error(n,e.message);process.exit(1)}};console.log(Object.keys(nodes).length+" nodes OK")'
 
@@ -105,9 +105,9 @@
 - label: reactive callbacks fire only on actual changes — duplicate asserts and missing retracts are no-ops
   command: bun -e 'const{createDatabase,initSchema}=require("./src/db.ts");const{createCtx}=require("./src/ctx.ts");(async()=>{const db=createDatabase(":memory:");await initSchema(db);const ctx=createCtx(db);let fires=0;ctx.on({s:"x"},()=>fires++);await ctx.assert("x","p","v");await ctx.assert("x","p","v");const r=await ctx.retract("x","p","missing");if(fires!==1)process.exit(1);if(r.length!==0)process.exit(1);console.log("ok")})()'
 - label: lifecycle events are quads, not a separate mechanism — supervisor asserts (name, 'lifecycle', 'cleanup')
-  command: grep -q "'lifecycle'" src/template.ts
+  command: grep -A80 '"sys:supervisor":' src/template.ts | grep -q "ctx.assert(name, 'lifecycle', 'cleanup')"
 - label: nodes can watch their own lifecycle via ctx.on({ s: ctx.self, p: 'lifecycle', o: 'cleanup' }, callback) — supported but not currently used by any built-in node
-  command: grep -q "'lifecycle'" src/template.ts && grep -q 'matchesPattern' src/ctx.ts
+  command: grep -q "ctx.assert(name, 'lifecycle', 'cleanup')" src/template.ts && grep -q 'matchesPattern' src/ctx.ts && ! grep -q "ctx.on.*ctx.self.*lifecycle" src/template.ts
 
 # spawn
 
@@ -122,7 +122,7 @@
 - label: multiple cleanup handlers can be registered — same mechanism as graph reactivity
   command: bun -e 'const{createDatabase,initSchema}=require("./src/db.ts");const{createCtx}=require("./src/ctx.ts");(async()=>{const db=createDatabase(":memory:");await initSchema(db);const ctx=createCtx(db);let a=0,b=0;ctx.on({s:"n",p:"lifecycle",o:"cleanup"},()=>a++);ctx.on({s:"n",p:"lifecycle",o:"cleanup"},()=>b++);await ctx.assert("n","lifecycle","cleanup");if(a!==1||b!==1)process.exit(1);console.log("ok")})()'
 - label: sys:supervisor retries crashed nodes with exponential backoff — max 3 retries, delays 500/1000/2000ms — retry count resets on manual source change
-  command: grep -q 'Math.pow(2' src/template.ts && grep -q '500' src/template.ts
+  command: grep -A80 '"sys:supervisor":' src/template.ts | grep -q 'MAX_RETRIES = 3' && grep -A80 '"sys:supervisor":' src/template.ts | grep -q 'Math.pow(2.*) \* 500' && grep -A80 '"sys:supervisor":' src/template.ts | grep -q 'retryCounts.set(name, 0)'
 
 # bootstrap
 
@@ -131,7 +131,7 @@
 - label: kernel connects to Turso, creates ctx with the 6 primitives, and calls ctx.call('main')
   command: grep -q 'createDatabase' src/boot.ts && grep -q 'createCtx' src/boot.ts && grep -q 'call.*main' src/boot.ts
 - label: the kernel's ctx.call compiles from scratch on every call — no cache, no reactivity
-  command: grep -q 'no cache' src/ctx.ts
+  command: grep -A12 'async call' src/ctx.ts | grep -q 'new AsyncFunction' && ! grep -A12 'async call' src/ctx.ts | grep -q 'cache\|Map'
 - label: the kernel wires assert/retract to emit events through ctx.on automatically
   command: grep -q 'function fire' src/ctx.ts && grep -q 'fire({ type: "assert"' src/ctx.ts && grep -q 'fire({ type: "retract"' src/ctx.ts
 - label: if the graph is empty on boot, the kernel seeds it from a template
@@ -143,7 +143,7 @@
 - label: main then calls spawn for sys:supervisor and the application
   command: grep -A30 '"main":' src/template.ts | grep -q "spawn.*node.*sys:supervisor" && grep -A30 '"main":' src/template.ts | grep -q "spawn.*node.*api:server"
 - label: before sys:compiler runs, compilation is cold — after, it is live and reactive
-  command: grep -q 'no cache' src/ctx.ts && grep -q 'cachedCall' src/template.ts
+  command: grep -A12 'async call' src/ctx.ts | grep -q 'new AsyncFunction' && ! grep -A12 'async call' src/ctx.ts | grep -q 'cache\|Map' && grep -q 'cachedCall' src/template.ts
 - label: all sys nodes are rewritable like any other node
   command: bun -e 'const{createDatabase,initSchema}=require("./src/db.ts");const{createCtx}=require("./src/ctx.ts");(async()=>{const db=createDatabase(":memory:");await initSchema(db);const ctx=createCtx(db);await ctx.assert("sys:compiler","source","return 1");const r=await ctx.retract("sys:compiler","source","return 1");if(r.length!==1)process.exit(1);await ctx.assert("sys:compiler","source","return 2");const q=await ctx.query({s:"sys:compiler",p:"source"});if(q[0].o!=="return 2")process.exit(1);console.log("ok")})()'
 - label: the project builds and all integration tests pass
@@ -222,38 +222,38 @@
 - label: the agent can rewrite any part of itself — its loop, its tools, its LLM parameters — by mutating quads
   command: grep -q 'ctx.retract.*source' src/template.ts && grep -q 'ctx.assert.*source' src/template.ts
 - label: the agent's context window is written to the same graph as everything else
-  command: grep -q 'ctx.assert.*message' src/template.ts
+  command: grep -A200 '"agent:loop":' src/template.ts | grep -q "ctx.assert(sessionId, 'message'"
 - label: because everything is in the graph, arbitrary external harnesses can drive execution too
   command: grep -q 'export function createCtx' src/ctx.ts && grep -q '/v1/chat/completions' src/template.ts
 - label: agent:tools registers 18 tools for the LLM agent, each stored as a Tool-typed quad with an input_schema
-  command: test $(grep -c "'type', 'Tool'" src/template.ts) -eq 18
+  command: test $(grep -c "'type', 'Tool'" src/template.ts) -eq 18 && grep -q "console.log.*registered 18 tools" src/template.ts
 - label: embed generates vector embeddings via OpenAI SDK (text-embedding-3-small) with deterministic stub fallback when no API key is set
-  command: grep -q 'text-embedding-3-small' src/template.ts && grep -q "import('openai')" src/template.ts
+  command: grep -A50 '"embed":' src/template.ts | grep -q 'text-embedding-3-small' && grep -A50 '"embed":' src/template.ts | grep -q "import('openai')" && grep -A20 '"embed":' src/template.ts | grep -q 'Stub\|stub'
 - label: vector:search performs semantic search using cosine similarity over stored embeddings, with brute-force fallback
-  command: grep -q 'cosineSim\|cosine' src/template.ts
+  command: grep -A60 '"vector:search":' src/template.ts | grep -q 'cosine similarity' && grep -A60 '"vector:search":' src/template.ts | grep -q 'brute-force\|Fallback'
 - label: graph introspection nodes (graph:describe, graph:subjects, graph:deps, inspect) provide structural analysis of the graph and dependency tracking
   command: grep -q '"graph:describe":' src/template.ts && grep -q '"graph:deps":' src/template.ts && grep -q '"inspect":' src/template.ts
 - label: agent:loop is a multi-turn loop — call LLM, run any tool calls, feed results back, repeat (max 20 turns)
-  command: grep -q 'maxIterations.*20' src/template.ts
+  command: grep -A200 '"agent:loop":' src/template.ts | grep -q 'maxIterations = 20' && grep -A200 '"agent:loop":' src/template.ts | grep -q 'for.*let i.*i < maxIterations'
 - label: all conversation messages are stored as quads in the session graph — user, assistant, and tool results
   command: grep -q 'seq: seq++, msg: userMsg' src/template.ts && grep -q 'seq: seq++, msg: assistantMsg' src/template.ts && grep -q 'seq: seq++, msg: toolResultMsg' src/template.ts
 - label: tool names use underscores in LLM schemas, colons in the graph — dispatch translates automatically
-  command: grep -q 'replace(/_/g' src/template.ts
+  command: grep -A200 '"agent:loop":' src/template.ts | grep -q "toolName.replace(/_/g, ':')"
 - label: agent:loop gives the LLM a system prompt explaining the runtime — quads, reactivity, available tools
-  command: grep -q 'systemPrompt' src/template.ts && grep -q 'reactive graph' src/template.ts
+  command: grep -A40 '"agent:loop":' src/template.ts | grep -q 'systemPrompt' && grep -A40 '"agent:loop":' src/template.ts | grep -q 'reactive graph'
 - label: the llm node uses pi-ai complete/stream — provider-agnostic, defaults to OpenAI-compatible
-  command: grep -q "@mariozechner/pi-ai" src/template.ts && grep -A5 '"llm":' src/template.ts | grep -q 'pi-ai'
+  command: grep -A45 '"llm":' src/template.ts | grep -q "import('@mariozechner/pi-ai')" && grep -A45 '"llm":' src/template.ts | grep -q "complete(model, piContext"
 - label: the llm node defaults to openai provider with gpt-4o, and returns a deterministic stub when no API key is set
-  command: grep -q "'openai'" src/template.ts && grep -q 'gpt-4o' src/template.ts && grep -q 'No API key' src/template.ts
+  command: grep -A10 '"llm":' src/template.ts | grep -q "|| 'openai'" && grep -A10 '"llm":' src/template.ts | grep -q "'gpt-4o'" && grep -A30 '"llm":' src/template.ts | grep -q 'No API key'
 - label: embed persists computed embeddings in the graph (graph='embeddings') so vector:search can reuse them without recomputing
   command: grep -q "'embeddings'" src/template.ts
 - label: agent:loop returns the final response plus a log of every tool call made during the turn
-  command: grep -q 'allToolCalls' src/template.ts
+  command: grep -A200 '"agent:loop":' src/template.ts | grep -q 'allToolCalls.push' && grep -A200 '"agent:loop":' src/template.ts | grep -q 'tool_calls: allToolCalls'
 
 # providers
 
 - label: first-class provider is OpenAI-compatible — Anthropic is one of many, not primary
-  command: grep -A5 '"llm":' src/template.ts | grep -q "'openai'" && grep -q "providerName === 'anthropic'" src/template.ts
+  command: grep -A10 '"llm":' src/template.ts | grep -q "|| 'openai'" && grep -A10 '"llm":' src/template.ts | grep -q "providerName === 'anthropic'"
 - label: llm and embed nodes use @mariozechner/pi-ai — no raw fetch to any provider
   command: grep -q "@mariozechner/pi-ai" src/template.ts && ! grep -q "await fetch('https://api.anthropic.com" src/template.ts && ! grep -q "await fetch('https://api.openai.com" src/template.ts
 - label: pi-ai covers OpenAI, Anthropic, Google, Mistral, Groq, Bedrock, Ollama, and custom endpoints
@@ -263,11 +263,11 @@
 - label: tool schemas use TypeBox (re-exported from pi-ai)
   command: bun -e "const{Type}=require('@mariozechner/pi-ai');if(typeof Type.String!=='function')process.exit(1);if(typeof Type.Object!=='function')process.exit(1);console.log('ok')"
 - label: agent:loop uses pi-ai stream/complete, stays graph-resident
-  command: grep -A3 '"agent:loop":' src/template.ts | grep -q '@mariozechner/pi-ai' && grep -q 'stream(model, piContext' src/template.ts && grep -q 'complete(model, piContext' src/template.ts
+  command: grep -A200 '"agent:loop":' src/template.ts | grep -q "import('@mariozechner/pi-ai')" && grep -A200 '"agent:loop":' src/template.ts | grep -q 'stream(model, piContext' && grep -A200 '"agent:loop":' src/template.ts | grep -q 'complete(model, piContext'
 
 # versioning
 - label: sys:compiler auto-saves the old source as a version via version:save whenever a source quad is retracted
-  command: grep -q 'version:save' src/template.ts
+  command: grep -A60 '"sys:compiler":' src/template.ts | grep -q "change.type === 'retract'" && grep -A60 '"sys:compiler":' src/template.ts | grep -q "ctx.call('version:save'"
 - label: version:list returns all saved versions for a node with seq numbers and timestamps
   command: grep -q '"version:list":' src/template.ts
 - label: version:restore restores a node to a specific version by seq number — retracts current source and asserts the old one, triggering reactive recompilation
@@ -275,13 +275,13 @@
 
 # observability
 - label: sys:compiler automatically records call count, duration, and errors for every ctx.call except calls to metrics nodes
-  command: grep -q "'metrics'" src/template.ts
+  command: grep -A50 '"sys:compiler":' src/template.ts | grep -q "name === 'metrics'" && grep -A50 '"sys:compiler":' src/template.ts | grep -q "originalCall('metrics'.*record.*name.*durationMs.*error"
 - label: metrics:report generates a formatted table of per-node call statistics sorted by call count
   command: grep -q '"metrics:report":' src/template.ts
 
 # scheduling
 - label: cron runs a node on setInterval, registers job metadata as CronJob-typed quads, supports AbortSignal for cleanup
-  command: grep -q '"cron":' src/template.ts && grep -q 'setInterval' src/template.ts
+  command: grep -A30 '"cron":' src/template.ts | grep -q 'setInterval' && grep -A30 '"cron":' src/template.ts | grep -q "'type', 'CronJob'" && grep -A30 '"cron":' src/template.ts | grep -q 'signal\|abort'
 
 # snapshots
 - label: snapshot:backup copies the local SQLite file via Bun.write — raw file copy, not SQLite backup API
