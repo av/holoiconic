@@ -108,6 +108,17 @@ ctx.on({ p: 'type', o: 'Spawned' }, async (change) => {
     const name = change.quad.s;
     console.log('[sys:supervisor] registered spawned node:', name);
   }
+  // If Spawned quad is retracted, abort the running node to prevent orphans
+  if (change.type === 'retract') {
+    const name = change.quad.s;
+    const ac = controllers.get(name);
+    if (ac && !ac.signal.aborted) {
+      console.log('[sys:supervisor] Spawned quad retracted for ' + name + ', aborting node');
+      ac.abort();
+      controllers.delete(name);
+      retryCounts.delete(name);
+    }
+  }
 });
 
 // Watch for source changes on spawned nodes — restart them

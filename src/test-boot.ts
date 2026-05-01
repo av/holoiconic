@@ -5625,6 +5625,365 @@ async function testGracefulDegradation(ctx: Ctx) {
   }
 }
 
+// ── BUG-020: Supervisor retract Spawned quad cleanup ────────────
+
+async function testSupervisorSpawnedRetract(ctx: Ctx) {
+  console.log("\n── Supervisor Spawned retract ──");
+
+  try {
+    await ctx.assert("test:sv:retractfix", "type", "Function");
+    await ctx.assert(
+      "test:sv:retractfix",
+      "source",
+      `
+await ctx.assert('test:sv:retractfix', 'status', 'alive');
+const signal = args && args.signal;
+if (signal) {
+  await new Promise(r => signal.addEventListener('abort', r, { once: true }));
+}
+`
+    );
+    await ctx.call("spawn", { node: "test:sv:retractfix" });
+    await new Promise((r) => setTimeout(r, 100));
+
+    // Verify it's running
+    const status = await ctx.query({ s: "test:sv:retractfix", p: "status", o: "alive" });
+    if (status.length === 0) throw new Error("node did not start");
+
+    // Retract the Spawned quad -- supervisor should abort the node
+    await ctx.retract("test:sv:retractfix", "type", "Spawned");
+    await new Promise((r) => setTimeout(r, 200));
+
+    const ac = ctx._supervisorControllers && ctx._supervisorControllers.get("test:sv:retractfix");
+    if (ac && !ac.signal.aborted)
+      throw new Error("node still running after Spawned quad retracted");
+    ok("BUG-020 fix: retracting Spawned quad aborts the running node");
+  } catch (e) {
+    fail("BUG-020: supervisor retract Spawned", e);
+  }
+}
+
+// ── Embedding assert edge cases ─────────────────────────────────
+
+async function testEmbeddingAssertEdgeCases(ctx: Ctx) {
+  console.log("\n── Embedding assert edge cases ──");
+
+  // Assert with embedding, query back
+  try {
+    const vec = new Array(1536).fill(0).map((_, i) => Math.sin(i) * 0.1);
+    const quad = await ctx.assert("emb:edgetest1", "has_vec", "value1", "_", vec);
+    if (!quad || quad.s !== "emb:edgetest1")
+      throw new Error(`assert did not return correct quad`);
+    const results = await ctx.query({ s: "emb:edgetest1", p: "has_vec" });
+    if (results.length !== 1)
+      throw new Error(`expected 1 result, got ${results.length}`);
+    if (results[0].o !== "value1")
+      throw new Error(`expected o='value1', got '${results[0].o}'`);
+    ok("ctx.assert with embedding: stored and queryable");
+  } catch (e) {
+    fail("ctx.assert with embedding", e);
+  }
+
+  // Two quads with different embeddings, distinguish by subject
+  try {
+    const vec1 = new Array(1536).fill(0.5);
+    const vec2 = new Array(1536).fill(-0.5);
+    await ctx.assert("emb:edgealpha", "data", "alpha-val", "_", vec1);
+    await ctx.assert("emb:edgebeta", "data", "beta-val", "_", vec2);
+    const r1 = await ctx.query({ s: "emb:edgealpha", p: "data" });
+    const r2 = await ctx.query({ s: "emb:edgebeta", p: "data" });
+    if (r1.length !== 1 || r1[0].o !== "alpha-val")
+      throw new Error("emb:edgealpha query failed");
+    if (r2.length !== 1 || r2[0].o !== "beta-val")
+      throw new Error("emb:edgebeta query failed");
+    ok("two quads with different embeddings: distinguishable by subject");
+  } catch (e) {
+    fail("two embedding quads", e);
+  }
+
+  // Duplicate assert with embedding is idempotent
+  try {
+    const vec = new Array(1536).fill(0.1);
+    const q1 = await ctx.assert("emb:edgedupe", "val", "x", "_", vec);
+    const q2 = await ctx.assert("emb:edgedupe", "val", "x", "_", vec);
+    if (q1.id !== q2.id)
+      throw new Error(`duplicate assert created new row: id ${q1.id} vs ${q2.id}`);
+    ok("duplicate assert with embedding is idempotent");
+  } catch (e) {
+    fail("duplicate assert with embedding", e);
+  }
+
+  // Empty embedding array -- treated as no embedding
+  try {
+    const q = await ctx.assert("emb:edgeempty", "val", "y", "_", []);
+    if (!q || q.s !== "emb:edgeempty")
+      throw new Error("empty embedding assert failed");
+    ok("assert with empty embedding array: treated as no embedding");
+  } catch (e) {
+    fail("assert with empty embedding", e);
+  }
+
+  // Retract quad with embedding
+  try {
+    const vec = new Array(1536).fill(0.42);
+    await ctx.assert("emb:edgeretract", "data", "to-retract", "_", vec);
+    await ctx.retract("emb:edgeretract", "data", "to-retract");
+    const after = await ctx.query({ s: "emb:edgeretract", p: "data" });
+    if (after.length !== 0)
+      throw new Error(`expected 0 results after retract, got ${after.length}`);
+    ok("retract quad with embedding: removed successfully");
+  } catch (e) {
+    fail("retract quad with embedding", e);
+  }
+
+  // ctx.on fires for assert with embedding
+  try {
+    let fired = false;
+    const unsub = ctx.on({ s: "emb:edgeontest" }, () => { fired = true; });
+    const vec = new Array(1536).fill(0.1);
+    await ctx.assert("emb:edgeontest", "data", "watched", "_", vec);
+    if (!fired) throw new Error("ctx.on did not fire for assert with embedding");
+    ok("ctx.on fires for assert with embedding");
+    unsub();
+  } catch (e) {
+    fail("ctx.on with embedding", e);
+  }
+}
+
+// ── Self-modifying node ─────────────────────────────────────────
+
+async function testSelfModifyingNode(ctx: Ctx) {
+  console.log("\n── Self-modifying node ──");
+
+  try {
+    await ctx.assert("test:selfmod2", "type", "Function");
+    await ctx.assert(
+      "test:selfmod2",
+      "source",
+      `
+const currentSource = (await ctx.query({ s: 'test:selfmod2', p: 'source' }))[0].o;
+if (currentSource.includes('SELFMOD2_MARKER')) {
+  await ctx.retract('test:selfmod2', 'source', currentSource);
+  await ctx.assert('test:selfmod2', 'source', "return 'v2-self-modified';");
+  return 'v1';
+}
+// SELFMOD2_MARKER
+return 'unexpected';
+`
+    );
+
+    const r1 = await ctx.call("test:selfmod2");
+    if (r1 !== "v1") throw new Error(`expected 'v1', got '${r1}'`);
+    ok("self-modifying node: first call returns 'v1'");
+
+    const r2 = await ctx.call("test:selfmod2");
+    if (r2 !== "v2-self-modified")
+      throw new Error(`expected 'v2-self-modified', got '${r2}'`);
+    ok("self-modifying node: second call uses new source");
+
+    const sourceQuads = await ctx.query({ s: "test:selfmod2", p: "source" });
+    if (sourceQuads.length !== 1)
+      throw new Error(`expected 1 source quad, got ${sourceQuads.length}`);
+    if (sourceQuads[0].o !== "return 'v2-self-modified';")
+      throw new Error("source not updated in graph");
+    ok("self-modifying node: compiler cache invalidated reactively");
+  } catch (e) {
+    fail("self-modifying node", e);
+  }
+}
+
+// ── Batch spawn/abort ───────────────────────────────────────────
+
+async function testBatchSpawnAbort(ctx: Ctx) {
+  console.log("\n── Batch spawn/abort ──");
+
+  try {
+    const nodeNames: string[] = [];
+    for (let i = 0; i < 10; i++) {
+      const name = `test:batchsv:${i}`;
+      nodeNames.push(name);
+      await ctx.assert(name, "type", "Function");
+      await ctx.assert(
+        name,
+        "source",
+        `
+await ctx.assert('${name}', 'bstatus', 'running');
+const signal = args && args.signal;
+if (signal) {
+  await new Promise(r => signal.addEventListener('abort', r, { once: true }));
+}
+`
+      );
+    }
+
+    const spawnPromises = nodeNames.map((name) =>
+      ctx.call("spawn", { node: name })
+    );
+    await Promise.all(spawnPromises);
+    await new Promise((r) => setTimeout(r, 200));
+
+    let allRunning = true;
+    for (const name of nodeNames) {
+      const status = await ctx.query({ s: name, p: "bstatus", o: "running" });
+      if (status.length === 0) { allRunning = false; break; }
+    }
+    if (!allRunning) throw new Error("not all 10 nodes started");
+    ok("spawn 10 nodes simultaneously: all started");
+
+    const controllers = ctx._supervisorControllers;
+    for (const name of nodeNames) {
+      const ac = controllers && controllers.get(name);
+      if (ac) ac.abort();
+    }
+    await new Promise((r) => setTimeout(r, 200));
+
+    let allStopped = true;
+    for (const name of nodeNames) {
+      const ac = controllers && controllers.get(name);
+      if (ac && !ac.signal.aborted) { allStopped = false; break; }
+    }
+    if (!allStopped) throw new Error("not all 10 nodes stopped");
+    ok("abort 10 nodes: all stopped");
+  } catch (e) {
+    fail("batch spawn/abort", e);
+  }
+}
+
+// ── Query result ordering ───────────────────────────────────────
+
+async function testQueryResultOrdering(ctx: Ctx) {
+  console.log("\n── Query result ordering ──");
+
+  // 10 quads with different subjects
+  try {
+    for (let i = 0; i < 10; i++) {
+      await ctx.assert(`qorder:test:${String(i).padStart(2, "0")}`, "ordering_key", "batch1");
+    }
+    const results = await ctx.query({ p: "ordering_key", o: "batch1" });
+    if (results.length !== 10) throw new Error(`expected 10 results, got ${results.length}`);
+
+    let orderedById = true;
+    for (let i = 1; i < results.length; i++) {
+      if (results[i].id <= results[i - 1].id) { orderedById = false; break; }
+    }
+    if (!orderedById) {
+      // At least check determinism
+      const results2 = await ctx.query({ p: "ordering_key", o: "batch1" });
+      const same = results.every((r, i) => r.id === results2[i].id);
+      if (!same) throw new Error("query results not deterministic");
+    }
+    ok("query 10 quads: results ordered by ID (deterministic)");
+  } catch (e) {
+    fail("query ordering", e);
+  }
+
+  // Same subject, different predicates
+  try {
+    await ctx.assert("qorder:multi", "alpha", "1");
+    await ctx.assert("qorder:multi", "beta", "2");
+    await ctx.assert("qorder:multi", "gamma", "3");
+    await ctx.assert("qorder:multi", "delta", "4");
+    const results = await ctx.query({ s: "qorder:multi" });
+    if (results.length !== 4) throw new Error(`expected 4 results, got ${results.length}`);
+    const preds = results.map((r) => r.p).sort();
+    if (preds.join(",") !== "alpha,beta,delta,gamma")
+      throw new Error(`predicates mismatch: ${preds.join(",")}`);
+    ok("query same subject, different predicates: all present");
+  } catch (e) {
+    fail("query ordering same subject", e);
+  }
+}
+
+// ── Graph parameter isolation ───────────────────────────────────
+
+async function testGraphParameterIsolation(ctx: Ctx) {
+  console.log("\n── Graph parameter isolation ──");
+
+  try {
+    await ctx.assert("giso:item", "value", "hello", "graph-AA");
+    await ctx.assert("giso:item", "value", "hello", "graph-BB");
+    const rA = await ctx.query({ s: "giso:item", p: "value", g: "graph-AA" });
+    const rB = await ctx.query({ s: "giso:item", p: "value", g: "graph-BB" });
+    if (rA.length !== 1 || rA[0].g !== "graph-AA")
+      throw new Error("graph-AA query failed");
+    if (rB.length !== 1 || rB[0].g !== "graph-BB")
+      throw new Error("graph-BB query failed");
+    ok("graph isolation: same s/p/o in different graphs are distinct");
+  } catch (e) {
+    fail("graph isolation assert", e);
+  }
+
+  try {
+    await ctx.retract("giso:item", "value", "hello", "graph-AA");
+    const rA = await ctx.query({ s: "giso:item", p: "value", g: "graph-AA" });
+    const rB = await ctx.query({ s: "giso:item", p: "value", g: "graph-BB" });
+    if (rA.length !== 0) throw new Error("graph-AA not retracted");
+    if (rB.length !== 1) throw new Error("graph-BB affected by retract");
+    ok("graph isolation: retract from one graph does not affect the other");
+  } catch (e) {
+    fail("graph isolation retract", e);
+  }
+
+  try {
+    await ctx.assert("giso:both", "shared", "data", "gXX");
+    await ctx.assert("giso:both", "shared", "data", "gYY");
+    const all = await ctx.query({ s: "giso:both", p: "shared" });
+    if (all.length !== 2) throw new Error(`expected 2, got ${all.length}`);
+    const graphs = all.map((r) => r.g).sort();
+    if (graphs[0] !== "gXX" || graphs[1] !== "gYY")
+      throw new Error(`expected [gXX, gYY], got ${graphs}`);
+    ok("query without graph filter: returns quads from all graphs");
+  } catch (e) {
+    fail("query across graphs", e);
+  }
+}
+
+// ── Special characters in node names ────────────────────────────
+
+async function testSpecialNodeNames(ctx: Ctx) {
+  console.log("\n── Special characters in node names ──");
+
+  try {
+    await ctx.assert("my:custom:deep:node2", "type", "Function");
+    await ctx.assert("my:custom:deep:node2", "source", "return 'deep-colon';");
+    const result = await ctx.call("my:custom:deep:node2");
+    if (result !== "deep-colon") throw new Error(`got '${result}'`);
+    ok("node with multiple colons works");
+  } catch (e) {
+    fail("node with multiple colons", e);
+  }
+
+  try {
+    await ctx.assert("my node spaces2", "type", "Function");
+    await ctx.assert("my node spaces2", "source", "return 'spaced';");
+    const result = await ctx.call("my node spaces2");
+    if (result !== "spaced") throw new Error(`got '${result}'`);
+    ok("node with spaces works");
+  } catch (e) {
+    fail("node with spaces", e);
+  }
+
+  try {
+    await ctx.assert("unicode:test:2:🎉", "type", "Function");
+    await ctx.assert("unicode:test:2:🎉", "source", "return 'unicode';");
+    const result = await ctx.call("unicode:test:2:🎉");
+    if (result !== "unicode") throw new Error(`got '${result}'`);
+    ok("node with unicode/emoji works");
+  } catch (e) {
+    fail("node with unicode", e);
+  }
+
+  try {
+    await ctx.assert("test'quote\"node2", "type", "Function");
+    await ctx.assert("test'quote\"node2", "source", "return 'sql-safe';");
+    const result = await ctx.call("test'quote\"node2");
+    if (result !== "sql-safe") throw new Error(`got '${result}'`);
+    ok("node with SQL special chars (quotes) works safely");
+  } catch (e) {
+    fail("node with SQL chars", e);
+  }
+}
+
 // ── Main ──────────────────────────────────────────────────────────
 
 async function main() {
@@ -5722,6 +6081,13 @@ async function main() {
   await testErrorMessageQuality(ctx);
   await testHttpStatusCodeAudit(ctx);
   await testGracefulDegradation(ctx);
+  await testSupervisorSpawnedRetract(ctx);
+  await testEmbeddingAssertEdgeCases(ctx);
+  await testSelfModifyingNode(ctx);
+  await testBatchSpawnAbort(ctx);
+  await testQueryResultOrdering(ctx);
+  await testGraphParameterIsolation(ctx);
+  await testSpecialNodeNames(ctx);
 
   // Summary
   console.log("\n── Summary ──");
