@@ -161,57 +161,57 @@
 # repl
 
 - label: primary input is natural language → agent:loop; dot-commands are escape hatches
-  command: grep -q "agent:loop" src/template.ts && grep -q "prompt.*trimmed" src/template.ts && grep -q "session.*sessionId" src/template.ts && grep -q "startsWith('.')" src/template.ts
+  command: grep -A400 '"repl":' src/template.ts | grep -q "agent:loop" && grep -A400 '"repl":' src/template.ts | grep -q "prompt.*trimmed" && grep -A400 '"repl":' src/template.ts | grep -q "session.*sessionId" && grep -A400 '"repl":' src/template.ts | grep -q "startsWith('.')"
 - label: repl starts a new session by default — session ID is repl:<timestamp>, conversation history stored as quads
-  command: grep -q "repl:.*Date.now()" src/template.ts && grep -q "session: sessionId" src/template.ts
+  command: grep -A400 '"repl":' src/template.ts | grep -q "repl:.*Date.now()" && grep -A400 '"repl":' src/template.ts | grep -q "session: sessionId"
 - label: repl is built on pi-mono — TUI rendering, streaming, markdown, syntax highlighting, and tool-call display are framework-provided
-  command: grep -q "pi-mono" src/template.ts && grep -q "@mariozechner/pi-tui" src/template.ts
+  command: grep -A400 '"repl":' src/template.ts | grep -q "pi-mono" && grep -A400 '"repl":' src/template.ts | grep -q "@mariozechner/pi-tui"
 - label: LLM responses stream by default
-  command: grep -q "stream.*true" src/template.ts && grep -q "onDelta" src/template.ts
+  command: grep -A400 '"repl":' src/template.ts | grep -q "stream.*true" && grep -A400 '"repl":' src/template.ts | grep -q "onDelta"
 - label: .query queries quads by JSON pattern
-  command: grep -q "\.query " src/template.ts && grep -q "ctx.query(pattern)" src/template.ts
+  command: grep -A400 '"repl":' src/template.ts | grep -q "\.query " && grep -A400 '"repl":' src/template.ts | grep -q "ctx.query(pattern)"
 - label: .assert inserts a quad (s p o [--g graph])
-  command: grep -q "\.assert " src/template.ts && grep -q "\.assert.*--g" src/template.ts
+  command: grep -A400 '"repl":' src/template.ts | grep -q "\.assert " && grep -A400 '"repl":' src/template.ts | grep -q "\.assert.*--g"
 - label: .retract removes a quad (s p o [--g graph])
-  command: grep -q "\.retract " src/template.ts && grep -q "\.retract.*--g" src/template.ts
+  command: grep -A400 '"repl":' src/template.ts | grep -q "\.retract " && grep -A400 '"repl":' src/template.ts | grep -q "\.retract.*--g"
 - label: .call invokes a node by name with optional JSON args
-  command: grep -q "\.call " src/template.ts && grep -q "JSON.parse(rest" src/template.ts
+  command: grep -A400 '"repl":' src/template.ts | grep -q "\.call " && grep -A400 '"repl":' src/template.ts | grep -q "JSON.parse(rest"
 - label: .nodes lists all Function-typed nodes
-  command: grep -q "=== '.nodes'" src/template.ts && grep -q "p: 'type', o: 'Function'" src/template.ts
+  command: grep -A400 '"repl":' src/template.ts | grep -q "=== '.nodes'" && grep -A400 '"repl":' src/template.ts | grep -q "p: 'type', o: 'Function'"
 - label: .source shows a node's source code
-  command: grep -q "\.source " src/template.ts && grep -q "s: name, p: 'source'" src/template.ts
+  command: grep -A400 '"repl":' src/template.ts | grep -q "\.source " && grep -A400 '"repl":' src/template.ts | grep -q "s: name, p: 'source'"
 - label: .edit opens inline multi-line editing of a node's source — blank line terminates
-  command: grep -q "\.edit " src/template.ts && grep -q "blank line" src/template.ts
+  command: grep -A400 '"repl":' src/template.ts | grep -q "\.edit " && grep -A400 '"repl":' src/template.ts | grep -q "blank line"
 - label: .create creates a new node with inline multi-line source — blank line terminates
-  command: grep -q "\.create " src/template.ts && grep -q "blank line" src/template.ts
+  command: grep -A400 '"repl":' src/template.ts | grep -q "\.create " && grep -A400 '"repl":' src/template.ts | grep -q "blank line"
 - label: .spawn starts a long-lived node via sys:supervisor
-  command: grep -q "\.spawn " src/template.ts && grep -q "ctx.call('spawn'" src/template.ts
+  command: grep -A400 '"repl":' src/template.ts | grep -q "\.spawn " && grep -A400 '"repl":' src/template.ts | grep -q "ctx.call('spawn'"
 - label: .session shows the current session ID
-  command: grep -q "=== '.session'" src/template.ts && grep -q "sessionId" src/template.ts
+  command: grep -A400 '"repl":' src/template.ts | grep -q "=== '.session'" && grep -A400 '"repl":' src/template.ts | grep -q "sessionId"
 - label: .sessions lists all sessions stored in the graph
-  command: grep -q "=== '.sessions'" src/template.ts && grep -q "p: 'message'" src/template.ts
+  command: grep -A400 '"repl":' src/template.ts | grep -q "=== '.sessions'" && grep -A400 '"repl":' src/template.ts | grep -q "p: 'message'"
 - label: .resume loads a previous session's conversation history from the graph
-  command: grep -q "\.resume " src/template.ts
+  command: grep -A400 '"repl":' src/template.ts | grep -q "\.resume "
 - label: .export exports the graph as a JSON snapshot, optionally to a file path
-  command: grep -q "\.export" src/template.ts && grep -q "snapshot:export" src/template.ts
+  command: grep -A400 '"repl":' src/template.ts | grep -q "\.export" && grep -A400 '"repl":' src/template.ts | grep -q "snapshot:export"
 - label: .import imports quads from a JSON snapshot file
-  command: grep -q "\.import " src/template.ts && grep -q "snapshot:import" src/template.ts
+  command: grep -A400 '"repl":' src/template.ts | grep -q "\.import " && grep -A400 '"repl":' src/template.ts | grep -q "snapshot:import"
 - label: .deps shows a node's call dependencies and dependents
-  command: grep -q "\.deps " src/template.ts && grep -q "graph:deps" src/template.ts
+  command: grep -A400 '"repl":' src/template.ts | grep -q "\.deps " && grep -A400 '"repl":' src/template.ts | grep -q "graph:deps"
 - label: .inspect shows comprehensive node info — types, source, schema, deps
-  command: grep -q "\.inspect " src/template.ts && grep -q "ctx.call('inspect'" src/template.ts
+  command: grep -A400 '"repl":' src/template.ts | grep -q "\.inspect " && grep -A400 '"repl":' src/template.ts | grep -q "ctx.call('inspect'"
 - label: .versions lists saved source versions for a node
-  command: grep -q "\.versions " src/template.ts && grep -q "version:list" src/template.ts
+  command: grep -A400 '"repl":' src/template.ts | grep -q "\.versions " && grep -A400 '"repl":' src/template.ts | grep -q "version:list"
 - label: .restore restores a node to a previous version by seq number
-  command: grep -q "\.restore " src/template.ts && grep -q "version:restore" src/template.ts
+  command: grep -A400 '"repl":' src/template.ts | grep -q "\.restore " && grep -A400 '"repl":' src/template.ts | grep -q "version:restore"
 - label: .cron starts a node on a periodic timer (interval in ms)
-  command: grep -q "\.cron " src/template.ts && grep -q "interval" src/template.ts
+  command: grep -A400 '"repl":' src/template.ts | grep -q "\.cron " && grep -A400 '"repl":' src/template.ts | grep -q "interval"
 - label: .crons lists all cron jobs and their status
-  command: grep -q "=== '.crons'" src/template.ts && grep -q "cron:list" src/template.ts
+  command: grep -A400 '"repl":' src/template.ts | grep -q "=== '.crons'" && grep -A400 '"repl":' src/template.ts | grep -q "cron:list"
 - label: .metrics shows per-node call count, duration, and error statistics
-  command: grep -q "=== '.metrics'" src/template.ts && grep -q "metrics:report" src/template.ts
+  command: grep -A400 '"repl":' src/template.ts | grep -q "=== '.metrics'" && grep -A400 '"repl":' src/template.ts | grep -q "metrics:report"
 - label: .eval runs arbitrary AsyncFunction code with ctx in scope
-  command: grep -q "\.eval " src/template.ts && grep -q "AsyncFn.*ctx" src/template.ts
+  command: grep -A400 '"repl":' src/template.ts | grep -q "\.eval " && grep -A400 '"repl":' src/template.ts | grep -q "AsyncFn.*ctx"
 
 # agentic
 
@@ -291,7 +291,7 @@
 - label: snapshot:backup throws if the source file doesn't exist — only works with local SQLite, not remote Turso
   command: grep -A20 '"snapshot:backup":' src/template.ts | grep -q 'throw new Error.*source database not found'
 - label: snapshot:export serializes all quads as JSON with s, p, o, g, and attrs fields — embedding vectors are stripped
-  command: grep -A15 '"snapshot:export":' src/template.ts | grep -q 's: q.s' && grep -A15 '"snapshot:export":' src/template.ts | grep -q 'attrs' && ! grep -A15 '"snapshot:export":' src/template.ts | grep -q 'embedding'
+  command: grep -A15 '"snapshot:export":' src/template.ts | grep -q 's: q.s' && grep -A15 '"snapshot:export":' src/template.ts | grep -q 'attrs' && ! grep -A15 '"snapshot:export":' src/template.ts | grep -q 'embedding.*q\.\|q\..*embedding'
 - label: snapshot:export returns a JSON string by default, or writes to a file when args.path is provided
   command: grep -A20 '"snapshot:export":' src/template.ts | grep -q 'return json' && grep -A20 '"snapshot:export":' src/template.ts | grep -q 'Bun.write(path, json)'
 - label: snapshot:import accepts quads from a file path (args.path) or inline JSON string (args.data)
