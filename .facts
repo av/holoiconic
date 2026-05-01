@@ -14,8 +14,8 @@
   command: ! grep -q 'protected\|readonly.*quad\|ACL\|permission' src/ctx.ts
 - label: breaking sys nodes breaks the runtime — that is by design, the system is fully self-modifiable
   command: grep -q 'ctx\.call =' src/template.ts && ! grep -q 'immutable\|frozen\|Object.freeze' src/ctx.ts
-- label: the only runtime dependency is @libsql/client
-  command: grep -c '"dependencies"' package.json && jq -r '.dependencies | keys[]' package.json | grep -q '@libsql/client'
+- label: the runtime dependencies are @libsql/client and @mariozechner/pi-ai
+  command: jq -r '.dependencies | keys[]' package.json | grep -q '@libsql/client' && jq -r '.dependencies | keys[]' package.json | grep -q '@mariozechner/pi-ai'
 
 # quad
 
@@ -78,7 +78,7 @@
 - label: each node's source is a function body compiled to AsyncFunction — receives ctx and args
   command: grep -q 'AsyncFunction.*ctx.*args' src/ctx.ts
 - label: nodes have access to all Bun globals (Bun, fetch, Response, console, process)
-  command: grep -q 'Bun.spawn' src/template.ts && grep -q 'Bun.serve' src/template.ts && grep -q 'Bun.env' src/template.ts && grep -q 'console.log' src/template.ts
+  command: grep -q 'Bun.spawn' src/template.ts && grep -q 'Bun.serve' src/template.ts && grep -q 'Bun.write' src/template.ts && grep -q 'console.log' src/template.ts
 - label: nodes can use await import() for dynamic imports of npm packages
   command: bun -e 'const{createDatabase,initSchema}=require("./src/db.ts");const{createCtx}=require("./src/ctx.ts");(async()=>{const db=createDatabase(":memory:");await initSchema(db);const ctx=createCtx(db);await ctx.assert("test:import","source","const m = await import(\"node:path\"); return m.sep");await ctx.assert("test:import","type","Function");const r=await ctx.call("test:import");if(typeof r!=="string")process.exit(1);console.log("ok")})()'
 - label: nodes reach other nodes through ctx.call — string-addressed, always resolves current compiled form
@@ -227,8 +227,8 @@
   command: grep -q 'export function createCtx' src/ctx.ts && grep -q '/v1/chat/completions' src/template.ts
 - label: agent:tools registers 18 tools for the LLM agent, each stored as a Tool-typed quad with an input_schema
   command: test $(grep -c "'type', 'Tool'" src/template.ts) -eq 18
-- label: embed generates vector embeddings via OpenAI API (text-embedding-3-small) with deterministic stub fallback when no API key is set
-  command: grep -q 'text-embedding-3-small' src/template.ts
+- label: embed generates vector embeddings via OpenAI SDK (text-embedding-3-small) with deterministic stub fallback when no API key is set
+  command: grep -q 'text-embedding-3-small' src/template.ts && grep -q "import('openai')" src/template.ts
 - label: vector:search performs semantic search using cosine similarity over stored embeddings, with brute-force fallback
   command: grep -q 'cosineSim\|cosine' src/template.ts
 - label: graph introspection nodes (graph:describe, graph:subjects, graph:deps, inspect) provide structural analysis of the graph and dependency tracking
@@ -241,10 +241,10 @@
   command: grep -q 'replace(/_/g' src/template.ts
 - label: agent:loop gives the LLM a system prompt explaining the runtime — quads, reactivity, available tools
   command: grep -q 'systemPrompt' src/template.ts && grep -q 'reactive graph' src/template.ts
-- label: the llm node calls the Anthropic Messages API via fetch — streaming by default
-  command: grep -q 'api.anthropic.com/v1/messages' src/template.ts && ! grep -q 'pi-ai\|@anthropic-ai/sdk' src/template.ts
-- label: the llm node defaults to claude-sonnet-4-20250514 and returns a deterministic stub when no ANTHROPIC_API_KEY is set
-  command: grep -q 'claude-sonnet-4-20250514' src/template.ts && grep -q 'ANTHROPIC_API_KEY' src/template.ts
+- label: the llm node uses pi-ai complete/stream — provider-agnostic, defaults to OpenAI-compatible
+  command: grep -q "@mariozechner/pi-ai" src/template.ts && grep -A5 '"llm":' src/template.ts | grep -q 'pi-ai'
+- label: the llm node defaults to openai provider with gpt-4o, and returns a deterministic stub when no API key is set
+  command: grep -q "'openai'" src/template.ts && grep -q 'gpt-4o' src/template.ts && grep -q 'No API key' src/template.ts
 - label: embed persists computed embeddings in the graph (graph='embeddings') so vector:search can reuse them without recomputing
   command: grep -q "'embeddings'" src/template.ts
 - label: agent:loop returns the final response plus a log of every tool call made during the turn
@@ -252,12 +252,18 @@
 
 # providers
 
-- first-class provider is OpenAI-compatible — Anthropic is one of many, not primary
-- llm and embed nodes use @mariozechner/pi-ai — no raw fetch to any provider
-- pi-ai covers OpenAI, Anthropic, Google, Mistral, Groq, Bedrock, Ollama, and custom endpoints
-- auth via pi-ai OAuth — Claude Pro/Max, GitHub Copilot, Gemini CLI all supported
-- tool schemas use TypeBox (re-exported from pi-ai)
-- agent:loop uses pi-ai stream/complete, stays graph-resident
+- label: first-class provider is OpenAI-compatible — Anthropic is one of many, not primary
+  command: grep -A5 '"llm":' src/template.ts | grep -q "'openai'" && grep -q "providerName === 'anthropic'" src/template.ts
+- label: llm and embed nodes use @mariozechner/pi-ai — no raw fetch to any provider
+  command: grep -q "@mariozechner/pi-ai" src/template.ts && ! grep -q "await fetch('https://api.anthropic.com" src/template.ts && ! grep -q "await fetch('https://api.openai.com" src/template.ts
+- label: pi-ai covers OpenAI, Anthropic, Google, Mistral, Groq, Bedrock, Ollama, and custom endpoints
+  command: bun -e "const{getProviders}=require('@mariozechner/pi-ai');const p=getProviders();['openai','anthropic','google','mistral','groq','amazon-bedrock'].forEach(x=>{if(!p.includes(x)){console.error('missing:',x);process.exit(1)}});console.log('ok')"
+- label: auth via pi-ai OAuth — Claude Pro/Max, GitHub Copilot, Gemini CLI all supported
+  command: test -f node_modules/@mariozechner/pi-ai/dist/utils/oauth/types.d.ts && grep -q 'OAuthProvider' node_modules/@mariozechner/pi-ai/dist/utils/oauth/types.d.ts
+- label: tool schemas use TypeBox (re-exported from pi-ai)
+  command: bun -e "const{Type}=require('@mariozechner/pi-ai');if(typeof Type.String!=='function')process.exit(1);if(typeof Type.Object!=='function')process.exit(1);console.log('ok')"
+- label: agent:loop uses pi-ai stream/complete, stays graph-resident
+  command: grep -A3 '"agent:loop":' src/template.ts | grep -q '@mariozechner/pi-ai' && grep -q 'complete(model, piContext' src/template.ts
 
 # versioning
 - label: sys:compiler auto-saves the old source as a version via version:save whenever a source quad is retracted

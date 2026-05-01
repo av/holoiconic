@@ -4922,15 +4922,15 @@ async function testErrorMessageQuality(ctx: Ctx) {
   // 18. llm with missing messages
   try {
     // Temporarily set a fake API key to avoid stub path
-    const origKey = process.env.ANTHROPIC_API_KEY;
-    process.env.ANTHROPIC_API_KEY = "test-key-for-validation";
+    const origKey = process.env.OPENAI_API_KEY;
+    process.env.OPENAI_API_KEY = "test-key-for-validation";
     try {
       await ctx.call("llm", {});
     } finally {
       if (origKey) {
-        process.env.ANTHROPIC_API_KEY = origKey;
+        process.env.OPENAI_API_KEY = origKey;
       } else {
-        delete process.env.ANTHROPIC_API_KEY;
+        delete process.env.OPENAI_API_KEY;
       }
     }
     fail("error: llm missing messages", "should have thrown");
@@ -5412,31 +5412,31 @@ async function testHttpStatusCodeAudit(ctx: Ctx) {
 async function testGracefulDegradation(ctx: Ctx) {
   console.log("\n── Graceful degradation audit ──");
 
-  // 1. No ANTHROPIC_API_KEY: LLM returns stub
+  // 1. No API key: LLM returns stub
   try {
-    const origKey = process.env.ANTHROPIC_API_KEY;
-    delete process.env.ANTHROPIC_API_KEY;
+    const origKey = process.env.OPENAI_API_KEY;
+    delete process.env.OPENAI_API_KEY;
     try {
       const result = await ctx.call("llm", {
         messages: [{ role: "user", content: "test" }],
       });
-      if (result.id !== "stub")
-        throw new Error(`expected stub id, got ${result.id}`);
+      if (result.api !== "stub")
+        throw new Error(`expected stub api, got ${result.api}`);
       if (result.role !== "assistant")
         throw new Error(`expected assistant role, got ${result.role}`);
       if (
         !result.content[0].text.includes(
-          "No ANTHROPIC_API_KEY set"
+          "No API key set"
         )
       )
         throw new Error(
           "stub response doesn't mention missing key"
         );
       ok(
-        "graceful: no ANTHROPIC_API_KEY returns stub response with clear message"
+        "graceful: no API key returns stub response with clear message"
       );
     } finally {
-      if (origKey) process.env.ANTHROPIC_API_KEY = origKey;
+      if (origKey) process.env.OPENAI_API_KEY = origKey;
     }
   } catch (e) {
     fail("graceful: no ANTHROPIC_API_KEY", e);
@@ -5536,8 +5536,8 @@ async function testGracefulDegradation(ctx: Ctx) {
 
   // 5. Agent loop works in stub mode (no API key)
   try {
-    const origKey = process.env.ANTHROPIC_API_KEY;
-    delete process.env.ANTHROPIC_API_KEY;
+    const origKey = process.env.OPENAI_API_KEY;
+    delete process.env.OPENAI_API_KEY;
     try {
       const result = await ctx.call("agent:loop", {
         prompt: "hello from degradation test",
@@ -5548,7 +5548,7 @@ async function testGracefulDegradation(ctx: Ctx) {
         throw new Error("missing response");
       // Response should mention the stub
       if (
-        !result.response.includes("No ANTHROPIC_API_KEY")
+        !result.response.includes("No API key")
       )
         throw new Error(
           "stub response not propagated through agent:loop"
@@ -5557,7 +5557,7 @@ async function testGracefulDegradation(ctx: Ctx) {
         "graceful: agent:loop works end-to-end in stub mode without API key"
       );
     } finally {
-      if (origKey) process.env.ANTHROPIC_API_KEY = origKey;
+      if (origKey) process.env.OPENAI_API_KEY = origKey;
     }
   } catch (e) {
     fail("graceful: agent:loop stub mode", e);

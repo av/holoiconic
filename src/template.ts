@@ -222,19 +222,26 @@ return stdout;
   // ── llm ─────────────────────────────────────────────────────────
   // Real Anthropic API integration via fetch.
   "llm": `
-const apiKey = typeof Bun !== 'undefined' ? Bun.env.ANTHROPIC_API_KEY : process.env.ANTHROPIC_API_KEY;
+const piAi = await import('@mariozechner/pi-ai');
+const { getModel, complete, getEnvApiKey } = piAi;
+
+// Resolve provider and model from args, defaulting to OpenAI-compatible
+const providerName = (args && args.provider) || 'openai';
+const modelId = (args && args.model) || (providerName === 'anthropic' ? 'claude-sonnet-4-20250514' : 'gpt-4o');
+
+// Check for API key — fall back to deterministic stub
+const apiKey = (args && args.apiKey) || getEnvApiKey(providerName);
 if (!apiKey) {
-  // Fallback stub when no API key is configured
-  const messages = args && args.messages;
-  const model = (args && args.model) || 'default';
   return {
-    id: 'stub',
-    type: 'message',
     role: 'assistant',
-    content: [{ type: 'text', text: '[llm] No ANTHROPIC_API_KEY set. Model: ' + model }],
-    stop_reason: 'end_turn',
-    model: model,
-    usage: { input_tokens: 0, output_tokens: 0 },
+    content: [{ type: 'text', text: '[llm] No API key set for provider ' + providerName + '. Model: ' + modelId }],
+    model: modelId,
+    provider: providerName,
+    stopReason: 'stop',
+    usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
+    api: 'stub',
+    responseId: 'stub',
+    timestamp: Date.now(),
   };
 }
 
@@ -243,35 +250,20 @@ if (!messages || !Array.isArray(messages)) {
   throw new Error('[llm] args.messages (array) is required');
 }
 
-const model = (args && args.model) || 'claude-sonnet-4-20250514';
-const maxTokens = (args && args.max_tokens) || 4096;
-const temperature = args && args.temperature;
+// Build pi-ai context
+const piContext = { messages };
+if (args && args.system) piContext.systemPrompt = args.system;
+if (args && args.tools && args.tools.length > 0) piContext.tools = args.tools;
 
-const body = {
-  model,
-  max_tokens: maxTokens,
-  messages,
-};
-if (args && args.system) body.system = args.system;
-if (args && args.tools && args.tools.length > 0) body.tools = args.tools;
-if (temperature !== undefined) body.temperature = temperature;
+// Get the pi-ai model descriptor
+const model = getModel(providerName, modelId);
 
-const resp = await fetch('https://api.anthropic.com/v1/messages', {
-  method: 'POST',
-  headers: {
-    'Content-Type': 'application/json',
-    'x-api-key': apiKey,
-    'anthropic-version': '2023-06-01',
-  },
-  body: JSON.stringify(body),
-});
+// Options
+const opts = { apiKey };
+if (args && args.max_tokens) opts.maxTokens = args.max_tokens;
+if (args && args.temperature !== undefined) opts.temperature = args.temperature;
 
-if (!resp.ok) {
-  const errText = await resp.text();
-  throw new Error('[llm] API error (' + resp.status + '): ' + errText);
-}
-
-const result = await resp.json();
+const result = await complete(model, piContext, opts);
 return result;
 `,
 
@@ -540,6 +532,9 @@ console.log('[agent:tools] registered 18 tools');
   // Returns { session, response, tool_calls } where tool_calls captures every
   // tool invocation for visibility in the WebUI.
   "agent:loop": `
+const piAi = await import('@mariozechner/pi-ai');
+const { getModel, complete, stream, getEnvApiKey } = piAi;
+
 const prompt = args && args.prompt;
 if (!prompt) throw new Error('[agent:loop] args.prompt is required');
 
@@ -580,48 +575,73 @@ for (const q of historyQuads.sort((a, b) => a.id - b.id)) {
 // Determine next sequence number
 let seq = historyQuads.length;
 
-// Add the new user message
-const userMsg = { role: 'user', content: prompt };
+// Add the new user message — pi-ai UserMessage format
+const userMsg = { role: 'user', content: prompt, timestamp: Date.now() };
 await ctx.assert(sessionId, 'message', JSON.stringify({ seq: seq++, msg: userMsg }), sessionId);
 history.push(userMsg);
 
-// Collect available tools
+// Collect available tools and convert to pi-ai Tool format
 const toolQuads = await ctx.query({ p: 'type', o: 'Tool' });
 const tools = [];
 for (const tq of toolQuads) {
   const schemaQuads = await ctx.query({ s: tq.s, p: 'tool_schema' });
   if (schemaQuads.length > 0) {
     try {
-      tools.push(JSON.parse(schemaQuads[0].o));
+      const schema = JSON.parse(schemaQuads[0].o);
+      // Convert from Anthropic tool format to pi-ai Tool format
+      tools.push({
+        name: schema.name,
+        description: schema.description || '',
+        parameters: schema.input_schema || schema.parameters || { type: 'object', properties: {} },
+      });
     } catch {}
   }
 }
 
+// Resolve provider and model — pi-ai supports OpenAI, Anthropic, Google, Mistral, etc.
+const providerName = (args && args.provider) || 'openai';
+const modelId = (args && args.model) || (providerName === 'anthropic' ? 'claude-sonnet-4-20250514' : 'gpt-4o');
+
 // Track all tool calls for visibility
 const allToolCalls = [];
 
-// Agentic loop — keep calling LLM until we get a text response (no tool_use)
+// Agentic loop — keep calling LLM until we get a text response (no tool calls)
 let messages = [...history];
 const maxIterations = 20;
 
 for (let i = 0; i < maxIterations; i++) {
-  const llmArgs = {
+  // Build pi-ai context
+  const piContext = {
+    systemPrompt,
     messages,
-    system: systemPrompt,
     tools: tools.length > 0 ? tools : undefined,
   };
 
-  const response = await ctx.call('llm', llmArgs);
+  // Check for API key — use stub if none available
+  const apiKey = (args && args.apiKey) || getEnvApiKey(providerName);
+  let response;
+
+  if (!apiKey) {
+    // Deterministic stub when no API key is set
+    const stubText = '[agent:loop] No API key for provider ' + providerName + '. Model: ' + modelId;
+    const stubAssistantMsg = { role: 'assistant', content: [{ type: 'text', text: stubText }], model: modelId, provider: providerName, api: 'stub', stopReason: 'stop', timestamp: Date.now() };
+    await ctx.assert(sessionId, 'message', JSON.stringify({ seq: seq++, msg: stubAssistantMsg }), sessionId);
+    return { session: sessionId, response: stubText, tool_calls: allToolCalls };
+  }
+
+  // Use pi-ai complete for the LLM call
+  const model = getModel(providerName, modelId);
+  response = await complete(model, piContext, { apiKey });
 
   // Store the assistant message in the graph
-  const assistantMsg = { role: 'assistant', content: response.content };
+  const assistantMsg = { role: 'assistant', content: response.content, model: response.model, provider: response.provider, api: response.api, usage: response.usage, stopReason: response.stopReason, timestamp: response.timestamp };
   await ctx.assert(sessionId, 'message', JSON.stringify({ seq: seq++, msg: assistantMsg }), sessionId);
   messages.push(assistantMsg);
 
-  // Check if response contains tool_use
-  const toolUseBlocks = (response.content || []).filter(b => b.type === 'tool_use');
+  // Check if response contains tool calls (pi-ai uses type: 'toolCall')
+  const toolCallBlocks = (response.content || []).filter(b => b.type === 'toolCall');
 
-  if (toolUseBlocks.length === 0) {
+  if (toolCallBlocks.length === 0) {
     // Pure text response — extract and return it
     const textBlocks = (response.content || []).filter(b => b.type === 'text');
     const text = textBlocks.map(b => b.text).join('\\n');
@@ -629,10 +649,9 @@ for (let i = 0; i < maxIterations; i++) {
   }
 
   // Execute each tool call
-  const toolResults = [];
-  for (const toolBlock of toolUseBlocks) {
+  for (const toolBlock of toolCallBlocks) {
     const toolName = toolBlock.name;
-    const toolInput = toolBlock.input;
+    const toolInput = toolBlock.arguments;
     let result;
 
     try {
@@ -676,7 +695,6 @@ for (let i = 0; i < maxIterations; i++) {
       } else if (toolName === 'version_restore') {
         result = JSON.stringify(await ctx.call('version:restore', toolInput));
       } else if (toolName === 'cron_create') {
-        // Spawn cron as a supervised node so it can be stopped
         const cronResult = await ctx.call('cron', toolInput);
         result = JSON.stringify(cronResult);
       } else if (toolName === 'cron_list') {
@@ -703,17 +721,18 @@ for (let i = 0; i < maxIterations; i++) {
       result: resultStr,
     });
 
-    toolResults.push({
-      type: 'tool_result',
-      tool_use_id: toolBlock.id,
-      content: resultStr,
-    });
+    // Build pi-ai ToolResultMessage and append to messages
+    const toolResultMsg = {
+      role: 'toolResult',
+      toolCallId: toolBlock.id,
+      toolName: toolName,
+      content: [{ type: 'text', text: resultStr }],
+      isError: resultStr.startsWith('Error: '),
+      timestamp: Date.now(),
+    };
+    await ctx.assert(sessionId, 'message', JSON.stringify({ seq: seq++, msg: toolResultMsg }), sessionId);
+    messages.push(toolResultMsg);
   }
-
-  // Add tool results as a user message and loop
-  const toolResultMsg = { role: 'user', content: toolResults };
-  await ctx.assert(sessionId, 'message', JSON.stringify({ seq: seq++, msg: toolResultMsg }), sessionId);
-  messages.push(toolResultMsg);
 }
 
 return { session: sessionId, response: '[agent:loop] max iterations reached', tool_calls: allToolCalls };
@@ -1591,7 +1610,8 @@ return { path: dest };
 const text = args && args.text;
 if (!text) throw new Error('[embed] args.text is required');
 
-const apiKey = typeof Bun !== 'undefined' ? Bun.env.OPENAI_API_KEY : (typeof process !== 'undefined' ? process.env.OPENAI_API_KEY : undefined);
+const { getEnvApiKey } = await import('@mariozechner/pi-ai');
+const apiKey = (args && args.apiKey) || getEnvApiKey('openai');
 
 if (!apiKey) {
   // Stub: deterministic-ish random vector based on text hash
@@ -1622,29 +1642,20 @@ if (!apiKey) {
   return { embedding: vec, model: 'stub', dimensions: dim };
 }
 
-const resp = await fetch('https://api.openai.com/v1/embeddings', {
-  method: 'POST',
-  headers: {
-    'Content-Type': 'application/json',
-    'Authorization': 'Bearer ' + apiKey,
-  },
-  body: JSON.stringify({
-    model: 'text-embedding-3-small',
-    input: text,
-  }),
+// Use the openai SDK (bundled with pi-ai) instead of raw fetch
+const OpenAI = (await import('openai')).default;
+const client = new OpenAI({ apiKey });
+const embModel = (args && args.model) || 'text-embedding-3-small';
+
+const result = await client.embeddings.create({
+  model: embModel,
+  input: text,
 });
 
-if (!resp.ok) {
-  const errText = await resp.text();
-  throw new Error('[embed] API error (' + resp.status + '): ' + errText);
-}
-
-const result = await resp.json();
 const embedding = result.data[0].embedding;
 
 // Persist the embedding in the graph for future lookup
 try {
-  // Use a hash of the text as the subject identifier
   let hash = 0;
   for (let i = 0; i < text.length; i++) {
     hash = ((hash << 5) - hash + text.charCodeAt(i)) | 0;
@@ -1655,7 +1666,7 @@ try {
   // Silently skip if vector column is unavailable
 }
 
-return { embedding, model: 'text-embedding-3-small', dimensions: embedding.length };
+return { embedding, model: embModel, dimensions: embedding.length };
 `,
 
   // ── vector:search ──────────────────────────────────────────────
