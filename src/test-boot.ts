@@ -9500,6 +9500,646 @@ async function testInspectNode(ctx: Ctx) {
   }
 }
 
+// ── Cron deep tests ──────────────────────────────────────────────
+
+async function testCronDeep(ctx: Ctx) {
+  console.log("\n── Cron deep ──");
+
+  // Test 1: Cron fires within expected time window
+  try {
+    await ctx.assert("test:crondeep1", "type", "Function");
+    await ctx.assert("test:crondeep1", "source", `
+const ts = Date.now();
+await ctx.assert('test:crondeep1', 'fired:' + ts, String(ts));
+return ts;
+`);
+
+    const ac = new AbortController();
+    const cronPromise = ctx.call("cron", { node: "test:crondeep1", interval: 150, signal: ac.signal });
+
+    await new Promise(r => setTimeout(r, 500));
+    ac.abort();
+    await new Promise(r => setTimeout(r, 50));
+
+    const fired = await ctx.query({ s: "test:crondeep1" });
+    const firedQuads = fired.filter((q: any) => q.p.startsWith("fired:"));
+    // 500ms / 150ms interval = ~3 ticks (give margin: 2-5)
+    if (firedQuads.length < 2)
+      throw new Error(`expected >= 2 ticks in 500ms with 150ms interval, got ${firedQuads.length}`);
+    if (firedQuads.length > 5)
+      throw new Error(`expected <= 5 ticks in 500ms with 150ms interval, got ${firedQuads.length}`);
+    ok("cron fires correct number of times (" + firedQuads.length + " in 500ms@150ms)");
+  } catch (e) {
+    fail("cron firing count", e);
+  }
+
+  // Test 2: Cron registers CronJob-typed quads in graph
+  try {
+    await ctx.assert("test:crondeep2", "type", "Function");
+    await ctx.assert("test:crondeep2", "source", "return 'ok'");
+
+    const ac = new AbortController();
+    const cronPromise = ctx.call("cron", { node: "test:crondeep2", interval: 200, signal: ac.signal });
+    await new Promise(r => setTimeout(r, 100));
+
+    // Check CronJob quads exist
+    const cronJobs = await ctx.query({ p: "type", o: "CronJob" });
+    const ourJob = cronJobs.find((q: any) => {
+      return q.s.includes("test:crondeep2");
+    });
+    if (!ourJob) throw new Error("CronJob quad not found for test:crondeep2");
+
+    // Verify companion quads
+    const nodeQuad = await ctx.query({ s: ourJob.s, p: "cron:node" });
+    if (nodeQuad.length === 0 || nodeQuad[0].o !== "test:crondeep2")
+      throw new Error("cron:node quad missing or incorrect");
+
+    const intervalQuad = await ctx.query({ s: ourJob.s, p: "cron:interval" });
+    if (intervalQuad.length === 0 || intervalQuad[0].o !== "200")
+      throw new Error("cron:interval quad missing or incorrect");
+
+    const statusQuad = await ctx.query({ s: ourJob.s, p: "cron:status" });
+    if (statusQuad.length === 0 || statusQuad[0].o !== "running")
+      throw new Error("cron:status should be 'running'");
+
+    const startedQuad = await ctx.query({ s: ourJob.s, p: "cron:started" });
+    if (startedQuad.length === 0)
+      throw new Error("cron:started timestamp missing");
+    // Validate ISO format
+    const ts = new Date(startedQuad[0].o);
+    if (isNaN(ts.getTime()))
+      throw new Error("cron:started is not valid ISO timestamp");
+
+    ac.abort();
+    await new Promise(r => setTimeout(r, 50));
+    ok("cron registers CronJob quads (type, node, interval, status, started)");
+  } catch (e) {
+    fail("cron CronJob quads", e);
+  }
+
+  // Test 3: Stop cron via AbortSignal updates status to 'stopped'
+  try {
+    await ctx.assert("test:crondeep3", "type", "Function");
+    await ctx.assert("test:crondeep3", "source", "return 'tick'");
+
+    const ac = new AbortController();
+    const cronPromise = ctx.call("cron", { node: "test:crondeep3", interval: 100, signal: ac.signal });
+    await new Promise(r => setTimeout(r, 250));
+    ac.abort();
+    await cronPromise;
+
+    // Verify status changed to stopped
+    const cronJobs = await ctx.query({ p: "cron:node", o: "test:crondeep3" });
+    if (cronJobs.length === 0) throw new Error("no cron job found");
+    const cronId = cronJobs[cronJobs.length - 1].s;
+
+    const statusQuad = await ctx.query({ s: cronId, p: "cron:status" });
+    if (statusQuad.length === 0 || statusQuad[0].o !== "stopped")
+      throw new Error(`expected status='stopped', got '${statusQuad[0]?.o}'`);
+
+    const stoppedQuad = await ctx.query({ s: cronId, p: "cron:stopped" });
+    if (stoppedQuad.length === 0)
+      throw new Error("cron:stopped timestamp not set after abort");
+
+    const ticksQuad = await ctx.query({ s: cronId, p: "cron:ticks" });
+    if (ticksQuad.length === 0)
+      throw new Error("cron:ticks not recorded after abort");
+    const ticks = parseInt(ticksQuad[0].o);
+    if (ticks < 1)
+      throw new Error(`expected >= 1 tick before abort, got ${ticks}`);
+
+    ok("cron abort sets stopped status, timestamp, and tick count (" + ticks + " ticks)");
+  } catch (e) {
+    fail("cron abort status", e);
+  }
+
+  // Test 4: Multiple cron jobs run independently
+  try {
+    await ctx.assert("test:crona", "type", "Function");
+    await ctx.assert("test:crona", "source", `
+await ctx.assert('test:crona', 'tick:' + Date.now(), 'a');
+`);
+    await ctx.assert("test:cronb", "type", "Function");
+    await ctx.assert("test:cronb", "source", `
+await ctx.assert('test:cronb', 'tick:' + Date.now(), 'b');
+`);
+
+    const ac1 = new AbortController();
+    const ac2 = new AbortController();
+    const p1 = ctx.call("cron", { node: "test:crona", interval: 100, signal: ac1.signal });
+    const p2 = ctx.call("cron", { node: "test:cronb", interval: 100, signal: ac2.signal });
+
+    await new Promise(r => setTimeout(r, 350));
+    ac1.abort();
+    ac2.abort();
+    await Promise.all([p1, p2]);
+
+    const ticksA = (await ctx.query({ s: "test:crona" })).filter((q: any) => q.p.startsWith("tick:"));
+    const ticksB = (await ctx.query({ s: "test:cronb" })).filter((q: any) => q.p.startsWith("tick:"));
+
+    if (ticksA.length < 2) throw new Error(`crona: expected >= 2 ticks, got ${ticksA.length}`);
+    if (ticksB.length < 2) throw new Error(`cronb: expected >= 2 ticks, got ${ticksB.length}`);
+    ok("multiple cron jobs run independently (A:" + ticksA.length + ", B:" + ticksB.length + ")");
+  } catch (e) {
+    fail("cron multiple independent", e);
+  }
+
+  // Test 5: Cron with invalid/missing node arg throws
+  try {
+    await ctx.call("cron", { interval: 200 });
+    fail("cron missing node", "should have thrown");
+  } catch (e: any) {
+    if (e.message && e.message.includes("args.node is required"))
+      ok("cron throws descriptive error on missing node");
+    else
+      fail("cron missing node error", e);
+  }
+
+  // Test 6: Cron with missing interval throws
+  try {
+    await ctx.call("cron", { node: "shell" });
+    fail("cron missing interval", "should have thrown");
+  } catch (e: any) {
+    if (e.message && e.message.includes("interval"))
+      ok("cron throws on missing interval");
+    else
+      fail("cron missing interval error", e);
+  }
+
+  // Test 7: Cron with non-number interval throws
+  try {
+    await ctx.call("cron", { node: "shell", interval: "fast" });
+    fail("cron string interval", "should have thrown");
+  } catch (e: any) {
+    if (e.message && e.message.includes("interval"))
+      ok("cron throws on non-number interval");
+    else
+      fail("cron string interval error", e);
+  }
+
+  // Test 8: Cron interval timing is not faster than specified
+  try {
+    const timestamps: number[] = [];
+    await ctx.assert("test:crontiming", "type", "Function");
+    await ctx.assert("test:crontiming", "source", `
+const ts = Date.now();
+await ctx.assert('test:crontiming', 'ts:' + ts, String(ts));
+`);
+
+    const ac = new AbortController();
+    const cronPromise = ctx.call("cron", { node: "test:crontiming", interval: 200, signal: ac.signal });
+    await new Promise(r => setTimeout(r, 700));
+    ac.abort();
+    await cronPromise;
+
+    const tsQuads = (await ctx.query({ s: "test:crontiming" }))
+      .filter((q: any) => q.p.startsWith("ts:"))
+      .map((q: any) => parseInt(q.o))
+      .sort((a: number, b: number) => a - b);
+
+    if (tsQuads.length >= 2) {
+      let minGap = Infinity;
+      for (let i = 1; i < tsQuads.length; i++) {
+        const gap = tsQuads[i] - tsQuads[i - 1];
+        if (gap < minGap) minGap = gap;
+      }
+      // setInterval has jitter; interval of 200ms should not fire faster than ~150ms
+      if (minGap < 140)
+        throw new Error(`interval too fast: min gap ${minGap}ms for 200ms interval`);
+      ok("cron interval timing respected (min gap: " + minGap + "ms for 200ms interval)");
+    } else {
+      ok("cron timing: not enough ticks to verify gap (" + tsQuads.length + ")");
+    }
+  } catch (e) {
+    fail("cron interval timing", e);
+  }
+
+  // Test 9: Cron with cronArgs passes args to target node
+  try {
+    await ctx.assert("test:cronwithargs", "type", "Function");
+    await ctx.assert("test:cronwithargs", "source", `
+const val = args && args.greeting;
+await ctx.set('test:cronwithargs', 'received', val || 'none');
+return val;
+`);
+
+    const ac = new AbortController();
+    const cronPromise = ctx.call("cron", {
+      node: "test:cronwithargs",
+      interval: 100,
+      cronArgs: { greeting: "hello-cron" },
+      signal: ac.signal,
+    });
+    await new Promise(r => setTimeout(r, 250));
+    ac.abort();
+    await cronPromise;
+
+    const received = await ctx.query({ s: "test:cronwithargs", p: "received" });
+    if (received.length === 0 || received[0].o !== "hello-cron")
+      throw new Error(`expected 'hello-cron', got '${received[0]?.o}'`);
+    ok("cron passes cronArgs to target node");
+  } catch (e) {
+    fail("cron cronArgs", e);
+  }
+
+  // Test 10: Cron return value includes cronId, node, interval
+  try {
+    await ctx.assert("test:cronret", "type", "Function");
+    await ctx.assert("test:cronret", "source", "return 'ok'");
+
+    const result = await ctx.call("cron", { node: "test:cronret", interval: 60000 });
+    if (!result.cronId || !result.cronId.startsWith("cron:test:cronret:"))
+      throw new Error(`unexpected cronId: ${result.cronId}`);
+    if (result.node !== "test:cronret")
+      throw new Error(`expected node='test:cronret', got '${result.node}'`);
+    if (result.interval !== 60000)
+      throw new Error(`expected interval=60000, got ${result.interval}`);
+
+    // Cleanup
+    if (ctx._cronTimers && ctx._cronTimers.has(result.cronId)) {
+      await ctx._cronTimers.get(result.cronId).stopCron();
+    }
+    ok("cron returns { cronId, node, interval }");
+  } catch (e) {
+    fail("cron return value", e);
+  }
+}
+
+// ── Shell deep tests ─────────────────────────────────────────────
+
+async function testShellDeep(ctx: Ctx) {
+  console.log("\n── Shell deep ──");
+
+  // Test 1: Execute simple echo command
+  try {
+    const result = await ctx.call("shell", { cmd: "echo 'hello world'" });
+    if (result.trim() !== "hello world")
+      throw new Error(`expected 'hello world', got '${result.trim()}'`);
+    ok("shell: echo with quoted string");
+  } catch (e) {
+    fail("shell echo quoted", e);
+  }
+
+  // Test 2: Capture multi-line stdout
+  try {
+    const result = await ctx.call("shell", { cmd: "echo 'line1'; echo 'line2'; echo 'line3'" });
+    const lines = result.trim().split("\n");
+    if (lines.length !== 3)
+      throw new Error(`expected 3 lines, got ${lines.length}: ${JSON.stringify(lines)}`);
+    if (lines[0] !== "line1" || lines[1] !== "line2" || lines[2] !== "line3")
+      throw new Error(`unexpected lines: ${JSON.stringify(lines)}`);
+    ok("shell: multi-line stdout captured correctly");
+  } catch (e) {
+    fail("shell multi-line", e);
+  }
+
+  // Test 3: Handle non-zero exit code with error details
+  try {
+    await ctx.call("shell", { cmd: "echo 'oops' >&2; exit 7" });
+    fail("shell exit code", "should have thrown");
+  } catch (e: any) {
+    if (!e.message.includes("command failed"))
+      throw new Error(`expected 'command failed' in message, got: ${e.message}`);
+    if (!e.message.includes("exit 7"))
+      throw new Error(`expected 'exit 7' in message, got: ${e.message}`);
+    if (!e.message.includes("oops"))
+      throw new Error(`expected stderr 'oops' in message, got: ${e.message}`);
+    ok("shell: non-zero exit includes exit code and stderr");
+  }
+
+  // Test 4: Pass arguments via shell interpolation
+  try {
+    const result = await ctx.call("shell", { cmd: "echo $((2 + 3))" });
+    if (result.trim() !== "5")
+      throw new Error(`expected '5', got '${result.trim()}'`);
+    ok("shell: arithmetic expansion works");
+  } catch (e) {
+    fail("shell args arithmetic", e);
+  }
+
+  // Test 5: Handle missing/nonexistent command
+  try {
+    await ctx.call("shell", { cmd: "nonexistent_cmd_xyz_12345" });
+    fail("shell missing command", "should have thrown");
+  } catch (e: any) {
+    if (!e.message.includes("command failed"))
+      throw new Error(`expected error for nonexistent command, got: ${e.message}`);
+    ok("shell: nonexistent command throws with error");
+  }
+
+  // Test 6: Missing cmd arg throws
+  try {
+    await ctx.call("shell", {});
+    fail("shell missing cmd", "should have thrown");
+  } catch (e: any) {
+    if (!e.message.includes("args.cmd is required"))
+      throw new Error(`expected 'args.cmd is required', got: ${e.message}`);
+    ok("shell: missing cmd arg throws descriptive error");
+  }
+
+  // Test 7: No args at all throws
+  try {
+    await ctx.call("shell");
+    fail("shell no args", "should have thrown");
+  } catch (e: any) {
+    if (!e.message.includes("args.cmd is required"))
+      throw new Error(`expected 'args.cmd is required', got: ${e.message}`);
+    ok("shell: no args throws descriptive error");
+  }
+
+  // Test 8: Command with special characters
+  try {
+    const result = await ctx.call("shell", { cmd: "echo 'hello \"world\" & <test>'" });
+    if (!result.includes("hello") || !result.includes("world"))
+      throw new Error(`unexpected output: ${result}`);
+    ok("shell: special characters handled correctly");
+  } catch (e) {
+    fail("shell special chars", e);
+  }
+
+  // Test 9: Command with pipe
+  try {
+    const result = await ctx.call("shell", { cmd: "echo 'abc def ghi' | wc -w" });
+    if (result.trim() !== "3")
+      throw new Error(`expected '3', got '${result.trim()}'`);
+    ok("shell: pipe commands work (echo | wc)");
+  } catch (e) {
+    fail("shell pipe", e);
+  }
+
+  // Test 10: Command producing binary-ish output (ls)
+  try {
+    const result = await ctx.call("shell", { cmd: "ls /tmp" });
+    if (typeof result !== "string")
+      throw new Error(`expected string output, got ${typeof result}`);
+    ok("shell: ls command returns string output");
+  } catch (e) {
+    fail("shell ls", e);
+  }
+
+  // Test 11: Environment variable access
+  try {
+    const result = await ctx.call("shell", { cmd: "echo $HOME" });
+    if (!result.trim() || result.trim() === "$HOME")
+      throw new Error(`expected home dir, got '${result.trim()}'`);
+    ok("shell: environment variables accessible ($HOME=" + result.trim() + ")");
+  } catch (e) {
+    fail("shell env var", e);
+  }
+
+  // Test 12: Command with whitespace-only output
+  try {
+    const result = await ctx.call("shell", { cmd: "echo '   '" });
+    if (result !== "   \n")
+      // echo adds trailing newline
+      if (!result.includes("   "))
+        throw new Error(`expected whitespace, got '${result}'`);
+    ok("shell: whitespace-only output preserved");
+  } catch (e) {
+    fail("shell whitespace output", e);
+  }
+
+  // Test 13: Empty stdout (successful but no output)
+  try {
+    const result = await ctx.call("shell", { cmd: "true" });
+    if (result !== "")
+      throw new Error(`expected empty string for 'true', got '${result}'`);
+    ok("shell: 'true' command returns empty string");
+  } catch (e) {
+    fail("shell empty output", e);
+  }
+
+  // Test 14: Exit code 1 specifically
+  try {
+    await ctx.call("shell", { cmd: "false" });
+    fail("shell false", "should have thrown");
+  } catch (e: any) {
+    if (!e.message.includes("exit 1"))
+      throw new Error(`expected 'exit 1', got: ${e.message}`);
+    ok("shell: 'false' command throws with exit 1");
+  }
+}
+
+// ── Embed & vector:search deep tests ─────────────────────────────
+
+async function testEmbedVectorSearchDeep(ctx: Ctx) {
+  console.log("\n── Embed & vector:search deep ──");
+
+  // Test 1: Embed returns unit vector (normalized)
+  try {
+    const result = await ctx.call("embed", { text: "normalization test" });
+    let sumSq = 0;
+    for (const v of result.embedding) sumSq += v * v;
+    const norm = Math.sqrt(sumSq);
+    if (Math.abs(norm - 1.0) > 0.001)
+      throw new Error(`expected unit vector (norm=1.0), got norm=${norm}`);
+    ok("embed: returns normalized unit vector (norm=" + norm.toFixed(6) + ")");
+  } catch (e) {
+    fail("embed normalization", e);
+  }
+
+  // Test 2: Embed with very short text
+  try {
+    const result = await ctx.call("embed", { text: "a" });
+    if (result.embedding.length !== 1536)
+      throw new Error(`dimensions: ${result.embedding.length}`);
+    if (result.model !== "stub")
+      throw new Error(`model: ${result.model}`);
+    ok("embed: single character text produces valid 1536-dim vector");
+  } catch (e) {
+    fail("embed short text", e);
+  }
+
+  // Test 3: Embed with long text
+  try {
+    const longText = "word ".repeat(1000);
+    const result = await ctx.call("embed", { text: longText });
+    if (result.embedding.length !== 1536)
+      throw new Error(`dimensions: ${result.embedding.length}`);
+    ok("embed: long text (5000 chars) produces valid vector");
+  } catch (e) {
+    fail("embed long text", e);
+  }
+
+  // Test 4: Embed stores in graph with graph='embeddings'
+  try {
+    const uniqueText = "unique_embed_test_" + Date.now();
+    await ctx.call("embed", { text: uniqueText });
+
+    const embQuads = await ctx.query({ p: "embedding", g: "embeddings" });
+    const match = embQuads.find((q: any) => q.o === uniqueText);
+    if (!match)
+      throw new Error("embedding quad not found for unique text");
+    if (match.g !== "embeddings")
+      throw new Error(`expected graph='embeddings', got '${match.g}'`);
+    if (!match.s.startsWith("emb:"))
+      throw new Error(`expected subject starting with 'emb:', got '${match.s}'`);
+    ok("embed: stores result in graph with graph='embeddings' and emb: prefix");
+  } catch (e) {
+    fail("embed graph storage", e);
+  }
+
+  // Test 5: Embed is deterministic in stub mode (same input = same output)
+  try {
+    const r1 = await ctx.call("embed", { text: "determinism redux" });
+    const r2 = await ctx.call("embed", { text: "determinism redux" });
+    const r3 = await ctx.call("embed", { text: "determinism redux" });
+    for (let i = 0; i < 1536; i++) {
+      if (r1.embedding[i] !== r2.embedding[i] || r2.embedding[i] !== r3.embedding[i])
+        throw new Error(`mismatch at index ${i}`);
+    }
+    ok("embed: triple call deterministic (all 1536 dims match)");
+  } catch (e) {
+    fail("embed deterministic triple", e);
+  }
+
+  // Test 6: Embed with different inputs produces vectors with different cosine similarity
+  try {
+    const rA = await ctx.call("embed", { text: "the quick brown fox" });
+    const rB = await ctx.call("embed", { text: "quantum physics experiment" });
+    // Compute cosine similarity
+    let dot = 0;
+    for (let i = 0; i < 1536; i++) dot += rA.embedding[i] * rB.embedding[i];
+    // For normalized vectors, dot product = cosine similarity
+    // Different inputs should not have similarity = 1.0
+    if (Math.abs(dot - 1.0) < 0.001)
+      throw new Error(`different texts have cosine similarity 1.0 (identical vectors)`);
+    ok("embed: different inputs have cosine similarity < 1.0 (cos=" + dot.toFixed(4) + ")");
+  } catch (e) {
+    fail("embed different cosine", e);
+  }
+
+  // Test 7: Embed requires text arg
+  try {
+    await ctx.call("embed", {});
+    fail("embed missing text", "should have thrown");
+  } catch (e: any) {
+    if (!e.message.includes("args.text is required"))
+      throw new Error(`expected 'args.text is required', got: ${e.message}`);
+    ok("embed: throws on missing text arg");
+  }
+
+  // Test 8: vector:search finds stored items and returns similarity scores
+  try {
+    // Store some embeddings with known texts
+    const uniqueA = "vsearch_test_alpha_" + Date.now();
+    const uniqueB = "vsearch_test_beta_" + Date.now();
+    await ctx.call("embed", { text: uniqueA });
+    await ctx.call("embed", { text: uniqueB });
+
+    // Search for the exact text — should find it with high similarity
+    const results = await ctx.call("vector:search", { text: uniqueA, k: 20 });
+    const embResults = results.filter((r: any) => r.quad.g === "embeddings");
+
+    // Find the exact match
+    const exactMatch = embResults.find((r: any) => r.quad.o === uniqueA);
+    if (!exactMatch)
+      throw new Error("exact text not found in vector:search results");
+    // Exact same text -> same embedding -> cosine similarity should be 1.0
+    if (exactMatch.similarity < 0.99)
+      throw new Error(`exact match similarity should be ~1.0, got ${exactMatch.similarity}`);
+    ok("vector:search: finds stored item with similarity ~1.0 for exact text match");
+  } catch (e) {
+    fail("vector:search find stored items", e);
+  }
+
+  // Test 9: vector:search respects topK parameter
+  try {
+    const results = await ctx.call("vector:search", { text: "test query for topK", k: 2 });
+    if (results.length > 2)
+      throw new Error(`k=2 but got ${results.length} results`);
+    ok("vector:search: respects k=2 limit (got " + results.length + " results)");
+  } catch (e) {
+    fail("vector:search topK", e);
+  }
+
+  // Test 10: vector:search with pre-computed embedding vector
+  try {
+    const embedResult = await ctx.call("embed", { text: "pre-computed test" });
+    const results = await ctx.call("vector:search", { embedding: embedResult.embedding, k: 5 });
+    if (!Array.isArray(results))
+      throw new Error(`expected array, got ${typeof results}`);
+    // First result should be exact match (similarity ~1.0 since same embedding)
+    const exactMatch = results.find((r: any) => r.quad.o === "pre-computed test");
+    if (exactMatch) {
+      if (exactMatch.similarity < 0.99)
+        throw new Error(`exact match similarity should be ~1.0, got ${exactMatch.similarity}`);
+      ok("vector:search: exact match via pre-computed embedding has similarity ~1.0");
+    } else {
+      ok("vector:search: pre-computed embedding search returns " + results.length + " results");
+    }
+  } catch (e) {
+    fail("vector:search pre-computed", e);
+  }
+
+  // Test 11: vector:search with no args throws
+  try {
+    await ctx.call("vector:search", {});
+    fail("vector:search no args", "should have thrown");
+  } catch (e: any) {
+    if (!e.message.includes("args.text or args.embedding is required"))
+      throw new Error(`expected validation error, got: ${e.message}`);
+    ok("vector:search: throws on missing text and embedding");
+  }
+
+  // Test 12: vector:search results have correct structure
+  try {
+    const results = await ctx.call("vector:search", { text: "structure test", k: 3 });
+    if (results.length > 0) {
+      const first = results[0];
+      if (!first.quad) throw new Error("result missing 'quad' field");
+      if (typeof first.quad.s !== "string") throw new Error("quad.s not string");
+      if (typeof first.quad.p !== "string") throw new Error("quad.p not string");
+      if (typeof first.quad.o !== "string") throw new Error("quad.o not string");
+      if (typeof first.quad.g !== "string") throw new Error("quad.g not string");
+      if (typeof first.similarity !== "number") throw new Error("similarity not number");
+      if (first.similarity < -1 || first.similarity > 1.001)
+        throw new Error(`similarity out of range: ${first.similarity}`);
+    }
+    ok("vector:search: results have { quad: {s,p,o,g}, similarity } structure");
+  } catch (e) {
+    fail("vector:search structure", e);
+  }
+
+  // Test 13: vector:search results are sorted descending by similarity
+  try {
+    const results = await ctx.call("vector:search", { text: "sorting check", k: 10 });
+    for (let i = 1; i < results.length; i++) {
+      if (results[i].similarity > results[i - 1].similarity + 0.0001)
+        throw new Error(`results not sorted: index ${i-1}=${results[i-1].similarity} < index ${i}=${results[i].similarity}`);
+    }
+    ok("vector:search: results sorted descending by similarity (" + results.length + " results)");
+  } catch (e) {
+    fail("vector:search sorting", e);
+  }
+
+  // Test 14: vector:search with large k returns all available (not more)
+  try {
+    const results = await ctx.call("vector:search", { text: "large k test", k: 99999 });
+    if (!Array.isArray(results))
+      throw new Error(`expected array, got ${typeof results}`);
+    // Should not crash; just returns what's available
+    ok("vector:search: large k (" + results.length + " results) does not crash");
+  } catch (e) {
+    fail("vector:search large k", e);
+  }
+
+  // Test 15: Embed with unicode text
+  try {
+    const result = await ctx.call("embed", { text: "café ☃ \u{1F600} 世界" });
+    if (result.embedding.length !== 1536)
+      throw new Error(`dimensions: ${result.embedding.length}`);
+    let sumSq = 0;
+    for (const v of result.embedding) sumSq += v * v;
+    const norm = Math.sqrt(sumSq);
+    if (Math.abs(norm - 1.0) > 0.001)
+      throw new Error(`expected unit vector, got norm=${norm}`);
+    ok("embed: unicode text (emoji, CJK, combining chars) produces valid normalized vector");
+  } catch (e) {
+    fail("embed unicode", e);
+  }
+}
+
 // ── Main ──────────────────────────────────────────────────────────
 
 async function main() {
@@ -9635,6 +10275,9 @@ async function main() {
   await testGraphSubjects(ctx);
   await testGraphDeps(ctx);
   await testInspectNode(ctx);
+  await testCronDeep(ctx);
+  await testShellDeep(ctx);
+  await testEmbedVectorSearchDeep(ctx);
 
   // Summary
   console.log("\n── Summary ──");
