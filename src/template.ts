@@ -1470,19 +1470,25 @@ const server = Bun.serve({
     // API: update node source (POST /api/node/:name/source)
     if (url.pathname.match(/^\\/api\\/node\\/.+\\/source$/) && req.method === 'POST') {
       try {
-        // Extract node name: everything between /api/node/ and /source
+        // Extract node name: everything between /api/node/ and the final /source
         const pathParts = url.pathname.slice('/api/node/'.length);
-        const name = decodeURIComponent(pathParts.slice(0, pathParts.lastIndexOf('/source')));
+        const candidateName = decodeURIComponent(pathParts.slice(0, pathParts.lastIndexOf('/source')));
+        // Verify the candidate is a known Function node to avoid route ambiguity
+        // (e.g. POST /api/node/my/source should not create a phantom "my" node)
+        const fnCheck = await ctx.query({ subject: candidateName, predicate: 'type', object: 'Function' });
+        if (fnCheck.length === 0) {
+          return Response.json({ error: 'Node not found: ' + candidateName }, { status: 404, headers: corsHeaders });
+        }
         const body = await req.json();
         const newSource = body.source;
         if (typeof newSource !== 'string') {
           return Response.json({ error: 'source (string) is required' }, { status: 400, headers: corsHeaders });
         }
 
-        await ctx.remove(name, 'source');
-        await ctx.insert(name, 'source', newSource);
+        await ctx.remove(candidateName, 'source');
+        await ctx.insert(candidateName, 'source', newSource);
 
-        return Response.json({ ok: true, name }, { headers: corsHeaders });
+        return Response.json({ ok: true, name: candidateName }, { headers: corsHeaders });
       } catch (err) {
         const isSyntaxError = err instanceof SyntaxError || (err.message && err.message.includes('JSON'));
         return Response.json({ error: err.message || String(err) }, { status: isSyntaxError ? 400 : 500, headers: corsHeaders });
@@ -1490,7 +1496,7 @@ const server = Bun.serve({
     }
 
     // API: delete a node (DELETE /api/node/:name)
-    if (url.pathname.startsWith('/api/node/') && !url.pathname.includes('/source') && req.method === 'DELETE') {
+    if (url.pathname.startsWith('/api/node/') && req.method === 'DELETE') {
       try {
         const name = decodeURIComponent(url.pathname.slice('/api/node/'.length));
         // Retract ALL quads where this subject appears
@@ -1517,7 +1523,7 @@ const server = Bun.serve({
     }
 
     // API: get node source (GET /api/node/:name)
-    if (url.pathname.startsWith('/api/node/') && !url.pathname.includes('/deps') && req.method === 'GET') {
+    if (url.pathname.startsWith('/api/node/') && req.method === 'GET') {
       const name = decodeURIComponent(url.pathname.slice('/api/node/'.length));
       const sourceQuads = await ctx.query({ subject: name, predicate: 'source' });
       const source = sourceQuads.length > 0 ? sourceQuads[0].object : null;
@@ -1650,11 +1656,9 @@ const embedding = result.data[0].embedding;
 
 // Persist the embedding in the graph for future lookup
 try {
-  let hash = 0;
-  for (let i = 0; i < text.length; i++) {
-    hash = ((hash << 5) - hash + text.charCodeAt(i)) | 0;
-  }
-  const textId = 'emb:' + Math.abs(hash).toString(36);
+  const hashBuf = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(text));
+  const hashHex = [...new Uint8Array(hashBuf)].map(b => b.toString(16).padStart(2, '0')).join('');
+  const textId = 'emb:' + hashHex.slice(0, 16);
   await ctx.insert(textId, 'embedding', text, 'embeddings', embedding);
 } catch (e) {
   // Silently skip if vector column is unavailable
@@ -1786,7 +1790,7 @@ const result = [...subjects].sort();
 if (!typeFilter) {
   const enriched = [];
   for (const s of result) {
-    const typeQuads = await ctx.query({ s, predicate: 'type' });
+    const typeQuads = await ctx.query({ subject: s, predicate: 'type' });
     const types = typeQuads.map(q => q.object);
     enriched.push({ subject: s, types });
   }
@@ -2064,30 +2068,43 @@ const error = record.error;
 if (!name) throw new Error('[metrics] record.name is required');
 if (typeof durationMs !== 'number') throw new Error('[metrics] record.durationMs (number) is required');
 
-// Read current values
-const callsQuads = await ctx.query({ subject: name, predicate: 'metric:calls', graph: 'metrics' });
-const durationQuads = await ctx.query({ subject: name, predicate: 'metric:duration_ms', graph: 'metrics' });
-
-const prevCalls = callsQuads.length > 0 ? parseInt(callsQuads[0].object) : 0;
-const prevDuration = durationQuads.length > 0 ? parseFloat(durationQuads[0].object) : 0;
-
-const newCalls = prevCalls + 1;
-const newDuration = prevDuration + durationMs;
-
-await ctx.set(name, 'metric:calls', String(newCalls), 'metrics');
-await ctx.set(name, 'metric:duration_ms', String(newDuration), 'metrics');
-
-let newErrors = 0;
-if (error) {
-  const errorsQuads = await ctx.query({ subject: name, predicate: 'metric:errors', graph: 'metrics' });
-  newErrors = (errorsQuads.length > 0 ? parseInt(errorsQuads[0].object) : 0) + 1;
-  await ctx.set(name, 'metric:errors', String(newErrors), 'metrics');
-} else {
-  const errorsQuads = await ctx.query({ subject: name, predicate: 'metric:errors', graph: 'metrics' });
-  newErrors = errorsQuads.length > 0 ? parseInt(errorsQuads[0].object) : 0;
+// Serialize per-node to prevent read-modify-write races from concurrent calls
+if (!ctx._metricsLocks) ctx._metricsLocks = new Map();
+while (ctx._metricsLocks.get(name)) {
+  await ctx._metricsLocks.get(name);
 }
+let unlock;
+const gate = new Promise(r => { unlock = r; });
+ctx._metricsLocks.set(name, gate);
 
-return { name, calls: newCalls, duration_ms: newDuration, errors: newErrors };
+try {
+  const callsQuads = await ctx.query({ subject: name, predicate: 'metric:calls', graph: 'metrics' });
+  const durationQuads = await ctx.query({ subject: name, predicate: 'metric:duration_ms', graph: 'metrics' });
+
+  const prevCalls = callsQuads.length > 0 ? parseInt(callsQuads[0].object) : 0;
+  const prevDuration = durationQuads.length > 0 ? parseFloat(durationQuads[0].object) : 0;
+
+  const newCalls = prevCalls + 1;
+  const newDuration = prevDuration + durationMs;
+
+  await ctx.set(name, 'metric:calls', String(newCalls), 'metrics');
+  await ctx.set(name, 'metric:duration_ms', String(newDuration), 'metrics');
+
+  let newErrors = 0;
+  if (error) {
+    const errorsQuads = await ctx.query({ subject: name, predicate: 'metric:errors', graph: 'metrics' });
+    newErrors = (errorsQuads.length > 0 ? parseInt(errorsQuads[0].object) : 0) + 1;
+    await ctx.set(name, 'metric:errors', String(newErrors), 'metrics');
+  } else {
+    const errorsQuads = await ctx.query({ subject: name, predicate: 'metric:errors', graph: 'metrics' });
+    newErrors = errorsQuads.length > 0 ? parseInt(errorsQuads[0].object) : 0;
+  }
+
+  return { name, calls: newCalls, duration_ms: newDuration, errors: newErrors };
+} finally {
+  ctx._metricsLocks.delete(name);
+  unlock();
+}
 `,
 
   // ── metrics:report ─────────────────────────────────────────────
@@ -2483,10 +2500,10 @@ for await (const line of rl) {
         const oldSource = rs[0].object;
         console.log('--- current source for ' + name + ' ---');
         console.log(oldSource);
-        console.log('--- enter new source (end with a blank line) ---');
+        console.log('--- enter new source (type .done on its own line to finish) ---');
         const lines = [];
         for await (const editLine of rl) {
-          if (editLine.trim() === '') break;
+          if (editLine.trim() === '.done') break;
           lines.push(editLine);
         }
         if (lines.length === 0) {
@@ -2505,10 +2522,10 @@ for await (const line of rl) {
       if (existing.length > 0) {
         console.log('node already exists: ' + name);
       } else {
-        console.log('enter source for ' + name + ' (end with a blank line):');
+        console.log('enter source for ' + name + ' (type .done on its own line to finish):');
         const lines = [];
         for await (const editLine of rl) {
-          if (editLine.trim() === '') break;
+          if (editLine.trim() === '.done') break;
           lines.push(editLine);
         }
         if (lines.length === 0) {
