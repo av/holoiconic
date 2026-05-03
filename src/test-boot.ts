@@ -38,8 +38,8 @@ async function testBootChain(ctx: Ctx) {
 
   // Test 1: Graph is seeded
   try {
-    const nodes = await ctx.query({ p: "type", o: "Function" });
-    const names = nodes.map((q) => q.s).sort();
+    const nodes = await ctx.query({ predicate: "type", object: "Function" });
+    const names = nodes.map((q) => q.subject).sort();
     if (names.length < 7)
       throw new Error(`expected >=7 nodes, got ${names.length}: ${names}`);
     ok("graph seeded with 7+ nodes");
@@ -62,7 +62,7 @@ async function testBootChain(ctx: Ctx) {
   try {
     await ctx.call("spawn", { node: "sys:supervisor" });
     await new Promise((r) => setTimeout(r, 50));
-    const spawned = await ctx.query({ s: "sys:supervisor", p: "type", o: "Spawned" });
+    const spawned = await ctx.query({ subject: "sys:supervisor", predicate: "type", object: "Spawned" });
     if (spawned.length === 0) throw new Error("supervisor not marked as Spawned");
     if (!ctx._supervisorControllers)
       throw new Error("_supervisorControllers not set");
@@ -75,8 +75,8 @@ async function testBootChain(ctx: Ctx) {
   try {
     await ctx.call("spawn", { node: "mock:llm" });
     await new Promise((r) => setTimeout(r, 100));
-    const status = await ctx.query({ s: "mock:llm", p: "status" });
-    if (status.length === 0 || status[0].o !== "running")
+    const status = await ctx.query({ subject: "mock:llm", predicate: "status" });
+    if (status.length === 0 || status[0].object !== "running")
       throw new Error("mock:llm not running");
     if (!ctx._mockFaux)
       throw new Error("_mockFaux not set on ctx");
@@ -135,17 +135,17 @@ async function testAgentTools(ctx: Ctx) {
     await ctx.call("agent:tools");
 
     // Verify tool quads were registered
-    const toolQuads = await ctx.query({ p: "type", o: "Tool" });
-    const toolNames = toolQuads.map(q => q.s).sort();
+    const toolQuads = await ctx.query({ predicate: "type", object: "Tool" });
+    const toolNames = toolQuads.map(q => q.subject).sort();
     if (toolNames.length < 5)
       throw new Error(`expected >=5 tools, got ${toolNames.length}: ${toolNames}`);
     ok("agent:tools registered 5+ tools");
 
     // Verify shell tool has schema
-    const shellSchema = await ctx.query({ s: "shell", p: "tool_schema" });
+    const shellSchema = await ctx.query({ subject: "shell", predicate: "tool_schema" });
     if (shellSchema.length === 0)
       throw new Error("shell tool has no schema");
-    const schema = JSON.parse(shellSchema[0].o);
+    const schema = JSON.parse(shellSchema[0].object);
     if (schema.name !== "shell")
       throw new Error(`expected shell schema name, got: ${schema.name}`);
     ok("shell tool has valid schema");
@@ -167,7 +167,7 @@ async function testAgentLoop(ctx: Ctx) {
     ok("agent:loop returns session + response (via mock:llm)");
 
     // Verify conversation was stored in graph
-    const msgs = await ctx.query({ p: "message", g: result.session });
+    const msgs = await ctx.query({ predicate: "message", graph: result.session });
     if (msgs.length < 2)
       throw new Error(`expected >=2 messages in session, got ${msgs.length}`);
     ok("agent:loop stores conversation history in graph");
@@ -192,13 +192,13 @@ async function testSessionContinuity(ctx: Ctx) {
       throw new Error(`expected same session, got '${result2.session}'`);
 
     // Verify conversation history has all messages (at least 4: user1, assistant1, user2, assistant2)
-    const msgs = await ctx.query({ p: "message", g: sessionId });
+    const msgs = await ctx.query({ predicate: "message", graph: sessionId });
     if (msgs.length < 4)
       throw new Error(`expected >=4 messages in session, got ${msgs.length}`);
 
     // Verify messages are properly ordered (user, assistant, user, assistant)
     const sorted = msgs.sort((a: any, b: any) => a.id - b.id);
-    const parsed = sorted.map((q: any) => { const w = JSON.parse(q.o); return w.msg || w; });
+    const parsed = sorted.map((q: any) => { const w = JSON.parse(q.object); return w.msg || w; });
     if (parsed[0].role !== "user" || parsed[0].content !== "first message")
       throw new Error(`first message wrong: ${JSON.stringify(parsed[0])}`);
     if (parsed[1].role !== "assistant")
@@ -247,29 +247,29 @@ async function testSessionResume(ctx: Ctx) {
       throw new Error(`expected same session, got '${result2.session}'`);
 
     // Verify messages exist in the session
-    const msgs = await ctx.query({ p: "message", g: sessionId });
+    const msgs = await ctx.query({ predicate: "message", graph: sessionId });
     if (msgs.length < 4)
       throw new Error(`expected >=4 messages in session, got ${msgs.length}`);
     ok("session resume: created session with messages");
 
     // 2. Verify the .resume command exists in the repl source
-    const replSource = await ctx.query({ s: "repl", p: "source" });
+    const replSource = await ctx.query({ subject: "repl", predicate: "source" });
     if (replSource.length === 0)
       throw new Error("repl node source not found");
-    if (!replSource[0].o.includes(".resume"))
+    if (!replSource[0].object.includes(".resume"))
       throw new Error("repl source does not contain .resume command");
     ok("session resume: .resume command exists in repl source");
 
     // 3. Verify session can be found via .sessions query pattern
-    const allMsgQuads = await ctx.query({ p: "message" });
+    const allMsgQuads = await ctx.query({ predicate: "message" });
     const sessions = new Set<string>();
-    for (const q of allMsgQuads) sessions.add(q.g);
+    for (const q of allMsgQuads) sessions.add(q.graph);
     if (!sessions.has(sessionId))
       throw new Error(`session ${sessionId} not found in sessions list`);
     ok("session resume: session appears in sessions list");
 
     // 4. Verify that loading messages from a session works (the core of .resume)
-    const loadedMsgs = await ctx.query({ p: "message", g: sessionId });
+    const loadedMsgs = await ctx.query({ predicate: "message", graph: sessionId });
     if (loadedMsgs.length < 4)
       throw new Error(`expected >=4 messages when loading session, got ${loadedMsgs.length}`);
 
@@ -277,7 +277,7 @@ async function testSessionResume(ctx: Ctx) {
     const parsed = loadedMsgs
       .sort((a: any, b: any) => a.id - b.id)
       .map((q: any) => {
-        const w = JSON.parse(q.o);
+        const w = JSON.parse(q.object);
         return w.msg || w;
       });
     if (parsed[0].role !== "user")
@@ -286,7 +286,7 @@ async function testSessionResume(ctx: Ctx) {
 
     // 5. Verify that a different session ID yields different messages
     const otherSession = "test:resume:other:" + Date.now();
-    const otherMsgs = await ctx.query({ p: "message", g: otherSession });
+    const otherMsgs = await ctx.query({ predicate: "message", graph: otherSession });
     if (otherMsgs.length !== 0)
       throw new Error(`expected 0 messages in non-existent session, got ${otherMsgs.length}`);
     ok("session resume: non-existent session returns no messages");
@@ -300,8 +300,8 @@ async function testReactiveCompilation(ctx: Ctx) {
 
   // Create a test node
   try {
-    await ctx.assert("test:adder", "source", "return (args.a || 0) + (args.b || 0)");
-    await ctx.assert("test:adder", "type", "Function");
+    await ctx.insert("test:adder", "source", "return (args.a || 0) + (args.b || 0)");
+    await ctx.insert("test:adder", "type", "Function");
 
     // Call it
     const r1 = await ctx.call("test:adder", { a: 2, b: 3 });
@@ -309,12 +309,12 @@ async function testReactiveCompilation(ctx: Ctx) {
     ok("test:adder(2,3) = 5");
 
     // Update source (must retract old, assert new — since (s,p,o,g) is unique)
-    await ctx.retract(
+    await ctx.remove(
       "test:adder",
       "source",
       "return (args.a || 0) + (args.b || 0)"
     );
-    await ctx.assert(
+    await ctx.insert(
       "test:adder",
       "source",
       "return (args.a || 0) * (args.b || 0)"
@@ -334,18 +334,18 @@ async function testSpawnLifecycle(ctx: Ctx) {
 
   try {
     // Create a spawned test node that sets a flag and waits for abort
-    await ctx.assert(
+    await ctx.insert(
       "test:worker",
       "source",
       `
-await ctx.assert('test:worker', 'status', 'v1-running');
+await ctx.insert('test:worker', 'status', 'v1-running');
 const signal = args && args.signal;
 if (signal) {
   await new Promise(r => signal.addEventListener('abort', r, { once: true }));
 }
 `
     );
-    await ctx.assert("test:worker", "type", "Function");
+    await ctx.insert("test:worker", "type", "Function");
 
     // Spawn it
     await ctx.call("spawn", { node: "test:worker" });
@@ -353,30 +353,30 @@ if (signal) {
 
     // Verify it started
     const status1 = await ctx.query({
-      s: "test:worker",
-      p: "status",
-      o: "v1-running",
+      subject: "test:worker",
+      predicate: "status",
+      object: "v1-running",
     });
     if (status1.length === 0) throw new Error("test:worker did not start (no v1-running status)");
     ok("spawned test:worker is running (v1)");
 
     // Now update source — supervisor should restart it
-    await ctx.retract(
+    await ctx.remove(
       "test:worker",
       "source",
       `
-await ctx.assert('test:worker', 'status', 'v1-running');
+await ctx.insert('test:worker', 'status', 'v1-running');
 const signal = args && args.signal;
 if (signal) {
   await new Promise(r => signal.addEventListener('abort', r, { once: true }));
 }
 `
     );
-    await ctx.assert(
+    await ctx.insert(
       "test:worker",
       "source",
       `
-await ctx.assert('test:worker', 'status', 'v2-running');
+await ctx.insert('test:worker', 'status', 'v2-running');
 const signal = args && args.signal;
 if (signal) {
   await new Promise(r => signal.addEventListener('abort', r, { once: true }));
@@ -388,9 +388,9 @@ if (signal) {
 
     // Check v2 is running
     const status2 = await ctx.query({
-      s: "test:worker",
-      p: "status",
-      o: "v2-running",
+      subject: "test:worker",
+      predicate: "status",
+      object: "v2-running",
     });
     if (status2.length === 0) throw new Error("test:worker was not restarted (no v2-running status)");
     ok("supervisor restarted test:worker with new source (v2)");
@@ -592,8 +592,8 @@ async function testWebUi(ctx: Ctx) {
     // Test POST /api/node/:name/source — update node source
     try {
       // Create a test node first
-      await ctx.assert("test:editable", "type", "Function");
-      await ctx.assert("test:editable", "source", "return 'v1'");
+      await ctx.insert("test:editable", "type", "Function");
+      await ctx.insert("test:editable", "source", "return 'v1'");
 
       const res = await fetch(`http://localhost:${port}/api/node/test:editable/source`, {
         method: "POST",
@@ -607,11 +607,11 @@ async function testWebUi(ctx: Ctx) {
         throw new Error(`expected ok=true, got ${JSON.stringify(data)}`);
 
       // Verify the source was updated in the graph
-      const sourceQuads = await ctx.query({ s: "test:editable", p: "source" });
+      const sourceQuads = await ctx.query({ subject: "test:editable", predicate: "source" });
       if (sourceQuads.length !== 1)
         throw new Error(`expected 1 source quad, got ${sourceQuads.length}`);
-      if (sourceQuads[0].o !== "return 'v2'")
-        throw new Error(`expected source='return \\'v2\\'', got '${sourceQuads[0].o}'`);
+      if (sourceQuads[0].object !== "return 'v2'")
+        throw new Error(`expected source='return \\'v2\\'', got '${sourceQuads[0].object}'`);
 
       // Verify reactive recompilation works — calling the node should use new source
       const result = await ctx.call("test:editable");
@@ -651,10 +651,10 @@ async function testWebUi(ctx: Ctx) {
         throw new Error(`expected ok=true, got ${JSON.stringify(data)}`);
 
       // Verify the node exists in the graph
-      const typeQuads = await ctx.query({ s: "test:created", p: "type", o: "Function" });
+      const typeQuads = await ctx.query({ subject: "test:created", predicate: "type", object: "Function" });
       if (typeQuads.length !== 1)
         throw new Error(`expected 1 type quad, got ${typeQuads.length}`);
-      const sourceQuads = await ctx.query({ s: "test:created", p: "source" });
+      const sourceQuads = await ctx.query({ subject: "test:created", predicate: "source" });
       if (sourceQuads.length !== 1)
         throw new Error(`expected 1 source quad, got ${sourceQuads.length}`);
 
@@ -721,7 +721,7 @@ async function testSnapshotExportImport(ctx: Ctx) {
       throw new Error(`expected non-empty array, got ${typeof quads} with length ${quads.length || 0}`);
     // Every quad should have s, p, o, g
     const first = quads[0];
-    if (!first.s || !first.p || typeof first.o !== "string" || !first.g)
+    if (!first.subject || !first.predicate || typeof first.object !== "string" || !first.graph)
       throw new Error(`quad missing fields: ${JSON.stringify(first)}`);
     ok("snapshot:export returns JSON array of quads (" + quads.length + " quads)");
   } catch (e) {
@@ -748,8 +748,8 @@ async function testSnapshotExportImport(ctx: Ctx) {
     // Import from file into a fresh context to verify round-trip
     // We'll use the same ctx but import a known subset
     const testData = [
-      { s: "rt:test1", p: "value", o: "hello", g: "_" },
-      { s: "rt:test2", p: "value", o: "world", g: "_" },
+      { subject: "rt:test1", predicate: "value", object: "hello", graph: "_" },
+      { subject: "rt:test2", predicate: "value", object: "world", graph: "_" },
     ];
     const testJson = JSON.stringify(testData);
 
@@ -758,24 +758,24 @@ async function testSnapshotExportImport(ctx: Ctx) {
       throw new Error(`expected import count=2, got ${importResult.count}`);
 
     // Verify the quads exist
-    const q1 = await ctx.query({ s: "rt:test1", p: "value" });
-    if (q1.length === 0 || q1[0].o !== "hello")
+    const q1 = await ctx.query({ subject: "rt:test1", predicate: "value" });
+    if (q1.length === 0 || q1[0].object !== "hello")
       throw new Error(`rt:test1 not found or wrong value`);
-    const q2 = await ctx.query({ s: "rt:test2", p: "value" });
-    if (q2.length === 0 || q2[0].o !== "world")
+    const q2 = await ctx.query({ subject: "rt:test2", predicate: "value" });
+    if (q2.length === 0 || q2[0].object !== "world")
       throw new Error(`rt:test2 not found or wrong value`);
     ok("snapshot:import round-trip (data string) — 2 quads imported and verified");
 
     // Import from file
     const testFilePath = "/tmp/test-holo-import-" + Date.now() + ".json";
     await Bun.write(testFilePath, JSON.stringify([
-      { s: "rt:test3", p: "value", o: "from-file", g: "_" },
+      { subject: "rt:test3", predicate: "value", object: "from-file", graph: "_" },
     ]));
     const importFileResult = await ctx.call("snapshot:import", { path: testFilePath });
     if (importFileResult.count !== 1)
       throw new Error(`expected import count=1, got ${importFileResult.count}`);
-    const q3 = await ctx.query({ s: "rt:test3", p: "value" });
-    if (q3.length === 0 || q3[0].o !== "from-file")
+    const q3 = await ctx.query({ subject: "rt:test3", predicate: "value" });
+    if (q3.length === 0 || q3[0].object !== "from-file")
       throw new Error("rt:test3 not found after file import");
     ok("snapshot:import from file path — 1 quad imported and verified");
 
@@ -883,30 +883,30 @@ async function testEmbeddingPersistence(ctx: Ctx) {
     await ctx.call("embed", { text: "persistence test text" });
 
     // Verify embedding quad was stored in the 'embeddings' graph
-    const embQuads = await ctx.query({ p: "embedding", g: "embeddings" });
+    const embQuads = await ctx.query({ predicate: "embedding", graph: "embeddings" });
     if (embQuads.length === 0)
       throw new Error("expected embedding quads in 'embeddings' graph, got 0");
 
     // Find the one for our text
-    const match = embQuads.find((q: any) => q.o === "persistence test text");
+    const match = embQuads.find((q: any) => q.object === "persistence test text");
     if (!match)
       throw new Error("expected embedding quad with o='persistence test text'");
-    if (!match.s.startsWith("emb:"))
-      throw new Error(`expected subject starting with 'emb:', got '${match.s}'`);
+    if (!match.subject.startsWith("emb:"))
+      throw new Error(`expected subject starting with 'emb:', got '${match.subject}'`);
     ok("embed persists embedding quads in graph");
   } catch (e) {
     fail("embedding persistence", e);
   }
 
   try {
-    // ctx.assert with embedding parameter should work
+    // ctx.insert with embedding parameter should work
     const testVec = new Array(1536).fill(0).map((_, i) => (i % 2 === 0 ? 0.1 : -0.1));
-    const quad = await ctx.assert("test:vec", "has_embedding", "test_value", "_", testVec);
-    if (!quad || quad.s !== "test:vec")
+    const quad = await ctx.insert("test:vec", "has_embedding", "test_value", "_", testVec);
+    if (!quad || quad.subject !== "test:vec")
       throw new Error(`expected quad with s='test:vec', got ${JSON.stringify(quad)}`);
-    ok("ctx.assert accepts embedding parameter");
+    ok("ctx.insert accepts embedding parameter");
   } catch (e) {
-    fail("ctx.assert with embedding", e);
+    fail("ctx.insert with embedding", e);
   }
 
   try {
@@ -915,7 +915,7 @@ async function testEmbeddingPersistence(ctx: Ctx) {
     if (!Array.isArray(results) || results.length === 0)
       throw new Error("expected search results");
     // The search should return results from the embeddings graph
-    const embResult = results.find((r: any) => r.quad.o === "persistence test text");
+    const embResult = results.find((r: any) => r.quad.object === "persistence test text");
     if (!embResult)
       throw new Error("expected to find persisted embedding in search results");
     ok("vector:search finds persisted embeddings");
@@ -973,20 +973,20 @@ async function testSetNode(ctx: Ctx) {
 
   try {
     // Set a single-valued predicate
-    await ctx.assert("test:setnode", "type", "Function");
-    await ctx.assert("test:setnode", "status", "init");
+    await ctx.insert("test:setnode", "type", "Function");
+    await ctx.insert("test:setnode", "status", "init");
 
     // Call set to update status — should retract old and assert new
-    const result = await ctx.call("set", { s: "test:setnode", p: "status", o: "running" });
-    if (!result || result.o !== "running")
-      throw new Error(`expected o='running', got '${result && result.o}'`);
+    const result = await ctx.call("set", { subject: "test:setnode", predicate: "status", object: "running" });
+    if (!result || result.object !== "running")
+      throw new Error(`expected o='running', got '${result && result.object}'`);
 
     // Verify only one status quad exists
-    const statusQuads = await ctx.query({ s: "test:setnode", p: "status" });
+    const statusQuads = await ctx.query({ subject: "test:setnode", predicate: "status" });
     if (statusQuads.length !== 1)
       throw new Error(`expected 1 status quad, got ${statusQuads.length}`);
-    if (statusQuads[0].o !== "running")
-      throw new Error(`expected 'running', got '${statusQuads[0].o}'`);
+    if (statusQuads[0].object !== "running")
+      throw new Error(`expected 'running', got '${statusQuads[0].object}'`);
 
     ok("set: replaces single-valued predicate");
   } catch (e) {
@@ -995,12 +995,12 @@ async function testSetNode(ctx: Ctx) {
 
   try {
     // Set again to verify it replaces the previous value
-    await ctx.call("set", { s: "test:setnode", p: "status", o: "stopped" });
-    const statusQuads = await ctx.query({ s: "test:setnode", p: "status" });
+    await ctx.call("set", { subject: "test:setnode", predicate: "status", object: "stopped" });
+    const statusQuads = await ctx.query({ subject: "test:setnode", predicate: "status" });
     if (statusQuads.length !== 1)
       throw new Error(`expected 1 quad after second set, got ${statusQuads.length}`);
-    if (statusQuads[0].o !== "stopped")
-      throw new Error(`expected 'stopped', got '${statusQuads[0].o}'`);
+    if (statusQuads[0].object !== "stopped")
+      throw new Error(`expected 'stopped', got '${statusQuads[0].object}'`);
     ok("set: second call replaces previous value");
   } catch (e) {
     fail("set node replace", e);
@@ -1008,19 +1008,19 @@ async function testSetNode(ctx: Ctx) {
 
   try {
     // Set with multiple existing values (retract all)
-    await ctx.assert("test:multival", "tag", "a");
-    await ctx.assert("test:multival", "tag", "b");
-    await ctx.assert("test:multival", "tag", "c");
-    const before = await ctx.query({ s: "test:multival", p: "tag" });
+    await ctx.insert("test:multival", "tag", "a");
+    await ctx.insert("test:multival", "tag", "b");
+    await ctx.insert("test:multival", "tag", "c");
+    const before = await ctx.query({ subject: "test:multival", predicate: "tag" });
     if (before.length !== 3)
       throw new Error(`expected 3 tags before set, got ${before.length}`);
 
-    await ctx.call("set", { s: "test:multival", p: "tag", o: "only" });
-    const after = await ctx.query({ s: "test:multival", p: "tag" });
+    await ctx.call("set", { subject: "test:multival", predicate: "tag", object: "only" });
+    const after = await ctx.query({ subject: "test:multival", predicate: "tag" });
     if (after.length !== 1)
       throw new Error(`expected 1 tag after set, got ${after.length}`);
-    if (after[0].o !== "only")
-      throw new Error(`expected 'only', got '${after[0].o}'`);
+    if (after[0].object !== "only")
+      throw new Error(`expected 'only', got '${after[0].object}'`);
     ok("set: retracts all existing values before asserting");
   } catch (e) {
     fail("set node multi-retract", e);
@@ -1028,7 +1028,7 @@ async function testSetNode(ctx: Ctx) {
 
   try {
     // Set validation: missing required fields
-    await ctx.call("set", { s: "test:setnode", p: "status" });
+    await ctx.call("set", { subject: "test:setnode", predicate: "status" });
     fail("set validation", "should have thrown for missing o");
   } catch (e: any) {
     if (e.message && e.message.includes("required")) {
@@ -1045,28 +1045,28 @@ async function testSupervisorRetry(ctx: Ctx) {
   try {
     // Create a node that crashes on first call but succeeds after
     // We use a quad to track how many times the node was called
-    await ctx.assert("test:crasher", "call_count", "0");
+    await ctx.insert("test:crasher", "call_count", "0");
 
-    await ctx.assert("test:crasher", "source", `
-const countQuads = await ctx.query({ s: 'test:crasher', p: 'call_count' });
-const count = parseInt(countQuads[0].o);
+    await ctx.insert("test:crasher", "source", `
+const countQuads = await ctx.query({ subject: 'test:crasher', predicate: 'call_count' });
+const count = parseInt(countQuads[0].object);
 const newCount = count + 1;
 // Update the count using retract+assert
-await ctx.retract('test:crasher', 'call_count', String(count));
-await ctx.assert('test:crasher', 'call_count', String(newCount));
+await ctx.remove('test:crasher', 'call_count', String(count));
+await ctx.insert('test:crasher', 'call_count', String(newCount));
 
 if (newCount <= 2) {
   throw new Error('deliberate crash #' + newCount);
 }
 
 // On 3rd call, succeed and stay alive
-await ctx.assert('test:crasher', 'status', 'recovered');
+await ctx.insert('test:crasher', 'status', 'recovered');
 const signal = args && args.signal;
 if (signal) {
   await new Promise(r => signal.addEventListener('abort', r, { once: true }));
 }
 `);
-    await ctx.assert("test:crasher", "type", "Function");
+    await ctx.insert("test:crasher", "type", "Function");
 
     // Spawn it via supervisor
     await ctx.call("spawn", { node: "test:crasher" });
@@ -1075,12 +1075,12 @@ if (signal) {
     await new Promise((r) => setTimeout(r, 2500));
 
     // Check it was retried and eventually recovered
-    const statusQuads = await ctx.query({ s: "test:crasher", p: "status", o: "recovered" });
+    const statusQuads = await ctx.query({ subject: "test:crasher", predicate: "status", object: "recovered" });
     if (statusQuads.length === 0)
       throw new Error("test:crasher did not recover after retries");
 
-    const countQuads = await ctx.query({ s: "test:crasher", p: "call_count" });
-    const finalCount = parseInt(countQuads[0].o);
+    const countQuads = await ctx.query({ subject: "test:crasher", predicate: "call_count" });
+    const finalCount = parseInt(countQuads[0].object);
     if (finalCount < 3)
       throw new Error(`expected at least 3 calls, got ${finalCount}`);
 
@@ -1096,9 +1096,9 @@ async function testReplCommands(ctx: Ctx) {
   // We can't test the full readline loop, but we can test that the
   // REPL's help text contains the new commands by checking the source.
   try {
-    const rs = await ctx.query({ s: "repl", p: "source" });
+    const rs = await ctx.query({ subject: "repl", predicate: "source" });
     if (rs.length === 0) throw new Error("repl source not found");
-    const src = rs[0].o;
+    const src = rs[0].object;
 
     const expectedCommands = [".source", ".edit", ".create", ".spawn", ".sessions", ".export", ".import", ".eval"];
     const missing = expectedCommands.filter(cmd => !src.includes(cmd));
@@ -1115,9 +1115,9 @@ async function testMainErrorHandling(ctx: Ctx) {
   console.log("\n── Main error handling ──");
 
   try {
-    const rs = await ctx.query({ s: "main", p: "source" });
+    const rs = await ctx.query({ subject: "main", predicate: "source" });
     if (rs.length === 0) throw new Error("main source not found");
-    const src = rs[0].o;
+    const src = rs[0].object;
 
     if (!src.includes("try {") || !src.includes("catch (err)"))
       throw new Error("main source does not contain try/catch block");
@@ -1383,9 +1383,9 @@ async function testWebUiEnhancements(ctx: Ctx) {
     // Test DELETE /api/node/:name
     try {
       // Create a disposable node first
-      await ctx.assert("test:deleteme", "type", "Function");
-      await ctx.assert("test:deleteme", "source", "return 'delete me'");
-      await ctx.assert("test:deleteme", "metadata", "extra");
+      await ctx.insert("test:deleteme", "type", "Function");
+      await ctx.insert("test:deleteme", "source", "return 'delete me'");
+      await ctx.insert("test:deleteme", "metadata", "extra");
 
       const res = await fetch(`http://localhost:${port}/api/node/test:deleteme`, {
         method: "DELETE",
@@ -1401,7 +1401,7 @@ async function testWebUiEnhancements(ctx: Ctx) {
       // Verify the node is gone from the default graph
       // (version quads may exist in 'versions' graph from sys:compiler auto-versioning)
       await new Promise((r) => setTimeout(r, 100));
-      const remaining = await ctx.query({ s: "test:deleteme", g: "_" });
+      const remaining = await ctx.query({ subject: "test:deleteme", graph: "_" });
       if (remaining.length !== 0)
         throw new Error(`expected 0 remaining quads in default graph, got ${remaining.length}`);
 
@@ -1464,8 +1464,8 @@ async function testGraphDeps(ctx: Ctx) {
 
   try {
     // Test node with no deps
-    await ctx.assert("test:nodeps", "type", "Function");
-    await ctx.assert("test:nodeps", "source", "return 42");
+    await ctx.insert("test:nodeps", "type", "Function");
+    await ctx.insert("test:nodeps", "source", "return 42");
     const result = await ctx.call("graph:deps", { node: "test:nodeps" });
     if (result.calls.length !== 0)
       throw new Error(`expected 0 calls, got ${result.calls.length}`);
@@ -1604,9 +1604,9 @@ async function testReplDepsInspect(ctx: Ctx) {
   console.log("\n── REPL deps/inspect commands ──");
 
   try {
-    const rs = await ctx.query({ s: "repl", p: "source" });
+    const rs = await ctx.query({ subject: "repl", predicate: "source" });
     if (rs.length === 0) throw new Error("repl source not found");
-    const src = rs[0].o;
+    const src = rs[0].object;
 
     if (!src.includes(".deps "))
       throw new Error("REPL source missing .deps command");
@@ -1628,13 +1628,13 @@ async function testToolRegistration(ctx: Ctx) {
 
   try {
     // Verify graph_deps tool is registered
-    const depsToolQuads = await ctx.query({ s: "graph_deps", p: "type", o: "Tool" });
+    const depsToolQuads = await ctx.query({ subject: "graph_deps", predicate: "type", object: "Tool" });
     if (depsToolQuads.length === 0)
       throw new Error("graph_deps not registered as Tool");
-    const depsSchema = await ctx.query({ s: "graph_deps", p: "tool_schema" });
+    const depsSchema = await ctx.query({ subject: "graph_deps", predicate: "tool_schema" });
     if (depsSchema.length === 0)
       throw new Error("graph_deps has no tool_schema");
-    const parsed = JSON.parse(depsSchema[0].o);
+    const parsed = JSON.parse(depsSchema[0].object);
     if (parsed.name !== "graph_deps")
       throw new Error(`expected name='graph_deps', got '${parsed.name}'`);
     ok("graph_deps registered as tool with schema");
@@ -1644,13 +1644,13 @@ async function testToolRegistration(ctx: Ctx) {
 
   try {
     // Verify inspect tool is registered
-    const inspectToolQuads = await ctx.query({ s: "inspect", p: "type", o: "Tool" });
+    const inspectToolQuads = await ctx.query({ subject: "inspect", predicate: "type", object: "Tool" });
     if (inspectToolQuads.length === 0)
       throw new Error("inspect not registered as Tool");
-    const inspectSchema = await ctx.query({ s: "inspect", p: "tool_schema" });
+    const inspectSchema = await ctx.query({ subject: "inspect", predicate: "tool_schema" });
     if (inspectSchema.length === 0)
       throw new Error("inspect has no tool_schema");
-    const parsed = JSON.parse(inspectSchema[0].o);
+    const parsed = JSON.parse(inspectSchema[0].object);
     if (parsed.name !== "inspect")
       throw new Error(`expected name='inspect', got '${parsed.name}'`);
     ok("inspect registered as tool with schema");
@@ -1664,12 +1664,12 @@ async function testGenericToolFallback(ctx: Ctx) {
 
   try {
     // Create a simple test node with a colon-namespaced name
-    await ctx.assert("test:fallback", "type", "Function");
-    await ctx.assert("test:fallback", "source", "return { echo: (args && args.msg) || 'default' }");
+    await ctx.insert("test:fallback", "type", "Function");
+    await ctx.insert("test:fallback", "source", "return { echo: (args && args.msg) || 'default' }");
 
     // Register it as a tool (using underscore-named convention)
-    await ctx.assert("test_fallback", "type", "Tool");
-    await ctx.assert("test_fallback", "tool_schema", JSON.stringify({
+    await ctx.insert("test_fallback", "type", "Tool");
+    await ctx.insert("test_fallback", "tool_schema", JSON.stringify({
       name: "test_fallback",
       description: "A test tool for generic fallback dispatch",
       input_schema: {
@@ -1698,9 +1698,9 @@ async function testGenericToolFallback(ctx: Ctx) {
 
   try {
     // Verify the fallback path in agent:loop source code contains the fix
-    const loopSource = await ctx.query({ s: "agent:loop", p: "source" });
+    const loopSource = await ctx.query({ subject: "agent:loop", predicate: "source" });
     if (loopSource.length === 0) throw new Error("agent:loop source not found");
-    const src = loopSource[0].o;
+    const src = loopSource[0].object;
 
     if (!src.includes("toolName.replace(/_/g, ':')"))
       throw new Error("agent:loop fallback does not translate underscores to colons");
@@ -1716,8 +1716,8 @@ async function testVersioning(ctx: Ctx) {
 
   try {
     // Create a node with initial source
-    await ctx.assert("test:versioned", "type", "Function");
-    await ctx.assert("test:versioned", "source", "return 'v1'");
+    await ctx.insert("test:versioned", "type", "Function");
+    await ctx.insert("test:versioned", "source", "return 'v1'");
 
     // Manually save a version
     const saveResult = await ctx.call("version:save", { name: "test:versioned", source: "return 'v1'" });
@@ -1752,8 +1752,8 @@ async function testVersioning(ctx: Ctx) {
   try {
     // Update the source (this should trigger sys:compiler's version:save)
     // First update to v3
-    await ctx.retract("test:versioned", "source", "return 'v1'");
-    await ctx.assert("test:versioned", "source", "return 'v3'");
+    await ctx.remove("test:versioned", "source", "return 'v1'");
+    await ctx.insert("test:versioned", "source", "return 'v3'");
 
     // Give the async watcher time to fire
     await new Promise((r) => setTimeout(r, 100));
@@ -1775,11 +1775,11 @@ async function testVersioning(ctx: Ctx) {
       throw new Error("expected restored=true");
 
     // Verify the source was restored
-    const sourceQuads = await ctx.query({ s: "test:versioned", p: "source" });
+    const sourceQuads = await ctx.query({ subject: "test:versioned", predicate: "source" });
     if (sourceQuads.length !== 1)
       throw new Error(`expected 1 source quad, got ${sourceQuads.length}`);
-    if (sourceQuads[0].o !== "return 'v1'")
-      throw new Error(`expected restored source='return \\'v1\\'', got '${sourceQuads[0].o}'`);
+    if (sourceQuads[0].object !== "return 'v1'")
+      throw new Error(`expected restored source='return \\'v1\\'', got '${sourceQuads[0].object}'`);
 
     // Verify the restored node actually works
     const result = await ctx.call("test:versioned");
@@ -1830,14 +1830,14 @@ async function testCron(ctx: Ctx) {
 
   try {
     // Create a counter node that increments a quad value
-    await ctx.assert("test:counter", "count", "0");
-    await ctx.assert("test:counter", "type", "Function");
-    await ctx.assert("test:counter", "source", `
-const countQuads = await ctx.query({ s: 'test:counter', p: 'count' });
-const count = parseInt(countQuads[0].o);
+    await ctx.insert("test:counter", "count", "0");
+    await ctx.insert("test:counter", "type", "Function");
+    await ctx.insert("test:counter", "source", `
+const countQuads = await ctx.query({ subject: 'test:counter', predicate: 'count' });
+const count = parseInt(countQuads[0].object);
 const newCount = count + 1;
-await ctx.retract('test:counter', 'count', String(count));
-await ctx.assert('test:counter', 'count', String(newCount));
+await ctx.remove('test:counter', 'count', String(count));
+await ctx.insert('test:counter', 'count', String(newCount));
 return newCount;
 `);
 
@@ -1853,8 +1853,8 @@ return newCount;
     await new Promise((r) => setTimeout(r, 100));
 
     // Check the counter was incremented
-    const countQuads = await ctx.query({ s: "test:counter", p: "count" });
-    const count = parseInt(countQuads[0].o);
+    const countQuads = await ctx.query({ subject: "test:counter", predicate: "count" });
+    const count = parseInt(countQuads[0].object);
     if (count < 2)
       throw new Error(`expected count >= 2 after ~600ms with 200ms interval, got ${count}`);
 
@@ -1922,13 +1922,13 @@ async function testVersionToolRegistration(ctx: Ctx) {
   console.log("\n── Version/cron tool registration ──");
 
   try {
-    const versionListTool = await ctx.query({ s: "version_list", p: "type", o: "Tool" });
+    const versionListTool = await ctx.query({ subject: "version_list", predicate: "type", object: "Tool" });
     if (versionListTool.length === 0)
       throw new Error("version_list not registered as Tool");
-    const schema = await ctx.query({ s: "version_list", p: "tool_schema" });
+    const schema = await ctx.query({ subject: "version_list", predicate: "tool_schema" });
     if (schema.length === 0)
       throw new Error("version_list has no tool_schema");
-    const parsed = JSON.parse(schema[0].o);
+    const parsed = JSON.parse(schema[0].object);
     if (parsed.name !== "version_list")
       throw new Error(`expected name='version_list', got '${parsed.name}'`);
     ok("version_list registered as agent tool");
@@ -1937,7 +1937,7 @@ async function testVersionToolRegistration(ctx: Ctx) {
   }
 
   try {
-    const versionRestoreTool = await ctx.query({ s: "version_restore", p: "type", o: "Tool" });
+    const versionRestoreTool = await ctx.query({ subject: "version_restore", predicate: "type", object: "Tool" });
     if (versionRestoreTool.length === 0)
       throw new Error("version_restore not registered as Tool");
     ok("version_restore registered as agent tool");
@@ -1946,7 +1946,7 @@ async function testVersionToolRegistration(ctx: Ctx) {
   }
 
   try {
-    const cronCreateTool = await ctx.query({ s: "cron_create", p: "type", o: "Tool" });
+    const cronCreateTool = await ctx.query({ subject: "cron_create", predicate: "type", object: "Tool" });
     if (cronCreateTool.length === 0)
       throw new Error("cron_create not registered as Tool");
     ok("cron_create registered as agent tool");
@@ -1955,7 +1955,7 @@ async function testVersionToolRegistration(ctx: Ctx) {
   }
 
   try {
-    const cronListTool = await ctx.query({ s: "cron_list", p: "type", o: "Tool" });
+    const cronListTool = await ctx.query({ subject: "cron_list", predicate: "type", object: "Tool" });
     if (cronListTool.length === 0)
       throw new Error("cron_list not registered as Tool");
     ok("cron_list registered as agent tool");
@@ -1968,9 +1968,9 @@ async function testReplVersionCronCommands(ctx: Ctx) {
   console.log("\n── REPL version/cron commands ──");
 
   try {
-    const rs = await ctx.query({ s: "repl", p: "source" });
+    const rs = await ctx.query({ subject: "repl", predicate: "source" });
     if (rs.length === 0) throw new Error("repl source not found");
-    const src = rs[0].o;
+    const src = rs[0].object;
 
     const expectedCommands = [".versions ", ".restore ", ".cron ", ".crons"];
     const missing = expectedCommands.filter(cmd => !src.includes(cmd));
@@ -2002,14 +2002,14 @@ async function testMetrics(ctx: Ctx) {
 
     // Verify quads were stored in 'metrics' graph
     const callsQuads = await ctx.query({
-      s: "test:metricsTarget",
-      p: "metric:calls",
-      g: "metrics",
+      subject: "test:metricsTarget",
+      predicate: "metric:calls",
+      graph: "metrics",
     });
     if (callsQuads.length !== 1)
       throw new Error(`expected 1 calls quad, got ${callsQuads.length}`);
-    if (callsQuads[0].o !== "1")
-      throw new Error(`expected calls='1', got '${callsQuads[0].o}'`);
+    if (callsQuads[0].object !== "1")
+      throw new Error(`expected calls='1', got '${callsQuads[0].object}'`);
 
     ok("metrics records call count, duration, and stores as quads");
   } catch (e) {
@@ -2033,9 +2033,9 @@ async function testMetrics(ctx: Ctx) {
 
     // Verify only one calls quad (set semantics)
     const callsQuads = await ctx.query({
-      s: "test:metricsTarget",
-      p: "metric:calls",
-      g: "metrics",
+      subject: "test:metricsTarget",
+      predicate: "metric:calls",
+      graph: "metrics",
     });
     if (callsQuads.length !== 1)
       throw new Error(`expected 1 calls quad after updates, got ${callsQuads.length}`);
@@ -2131,8 +2131,8 @@ async function testMetricsCompilerIntegration(ctx: Ctx) {
   try {
     // Call a node and verify metrics were recorded automatically by sys:compiler
     // Use a fresh test node to get clean metrics
-    await ctx.assert("test:metricsAuto", "type", "Function");
-    await ctx.assert("test:metricsAuto", "source", "return 'measured'");
+    await ctx.insert("test:metricsAuto", "type", "Function");
+    await ctx.insert("test:metricsAuto", "source", "return 'measured'");
 
     // Call it
     const result = await ctx.call("test:metricsAuto");
@@ -2144,13 +2144,13 @@ async function testMetricsCompilerIntegration(ctx: Ctx) {
 
     // Check that metrics were recorded
     const callsQuads = await ctx.query({
-      s: "test:metricsAuto",
-      p: "metric:calls",
-      g: "metrics",
+      subject: "test:metricsAuto",
+      predicate: "metric:calls",
+      graph: "metrics",
     });
     if (callsQuads.length === 0)
       throw new Error("no metrics recorded for test:metricsAuto");
-    const calls = parseInt(callsQuads[0].o);
+    const calls = parseInt(callsQuads[0].object);
     if (calls < 1)
       throw new Error(`expected calls >= 1, got ${calls}`);
 
@@ -2162,9 +2162,9 @@ async function testMetricsCompilerIntegration(ctx: Ctx) {
   try {
     // Verify metrics are NOT recorded for the metrics node itself (no infinite recursion)
     const metricsCallsQuads = await ctx.query({
-      s: "metrics",
-      p: "metric:calls",
-      g: "metrics",
+      subject: "metrics",
+      predicate: "metric:calls",
+      graph: "metrics",
     });
     if (metricsCallsQuads.length > 0)
       throw new Error("metrics should not track calls to itself");
@@ -2179,13 +2179,13 @@ async function testMetricsToolRegistration(ctx: Ctx) {
   console.log("\n── Metrics tool registration ──");
 
   try {
-    const toolQuads = await ctx.query({ s: "metrics_report", p: "type", o: "Tool" });
+    const toolQuads = await ctx.query({ subject: "metrics_report", predicate: "type", object: "Tool" });
     if (toolQuads.length === 0)
       throw new Error("metrics_report not registered as Tool");
-    const schemaQuads = await ctx.query({ s: "metrics_report", p: "tool_schema" });
+    const schemaQuads = await ctx.query({ subject: "metrics_report", predicate: "tool_schema" });
     if (schemaQuads.length === 0)
       throw new Error("metrics_report has no tool_schema");
-    const parsed = JSON.parse(schemaQuads[0].o);
+    const parsed = JSON.parse(schemaQuads[0].object);
     if (parsed.name !== "metrics_report")
       throw new Error(`expected name='metrics_report', got '${parsed.name}'`);
 
@@ -2199,9 +2199,9 @@ async function testReplMetricsCommand(ctx: Ctx) {
   console.log("\n── REPL metrics command ──");
 
   try {
-    const rs = await ctx.query({ s: "repl", p: "source" });
+    const rs = await ctx.query({ subject: "repl", predicate: "source" });
     if (rs.length === 0) throw new Error("repl source not found");
-    const src = rs[0].o;
+    const src = rs[0].object;
 
     if (!src.includes(".metrics"))
       throw new Error("REPL source missing .metrics command");
@@ -2215,31 +2215,31 @@ async function testReplMetricsCommand(ctx: Ctx) {
 }
 
 async function testReplAssertRetractGraph(ctx: Ctx) {
-  console.log("\n── REPL .assert/.retract --g support ──");
+  console.log("\n── REPL .insert/.remove --g support ──");
 
   try {
     // Verify the REPL source has --g flag support
-    const rs = await ctx.query({ s: "repl", p: "source" });
+    const rs = await ctx.query({ subject: "repl", predicate: "source" });
     if (rs.length === 0) throw new Error("repl source not found");
-    const src = rs[0].o;
+    const src = rs[0].object;
 
     if (!src.includes("'--g'"))
-      throw new Error("REPL .assert does not support --g flag");
-    ok("REPL .assert source contains --g flag parsing");
+      throw new Error("REPL .insert does not support --g flag");
+    ok("REPL .insert source contains --g flag parsing");
   } catch (e) {
-    fail("REPL .assert --g flag", e);
+    fail("REPL .insert --g flag", e);
   }
 
   try {
     // Verify help text is updated
-    const rs = await ctx.query({ s: "repl", p: "source" });
-    const src = rs[0].o;
+    const rs = await ctx.query({ subject: "repl", predicate: "source" });
+    const src = rs[0].object;
 
-    if (!src.includes(".assert s p o [--g graph]"))
-      throw new Error("REPL help text not updated for .assert");
-    if (!src.includes(".retract s p o [--g graph]"))
-      throw new Error("REPL help text not updated for .retract");
-    ok("REPL help text mentions --g flag for .assert and .retract");
+    if (!src.includes(".insert subject predicate object [--g graph]"))
+      throw new Error("REPL help text not updated for .insert");
+    if (!src.includes(".remove subject predicate object [--g graph]"))
+      throw new Error("REPL help text not updated for .remove");
+    ok("REPL help text mentions --g flag for .insert and .remove");
   } catch (e) {
     fail("REPL help text update", e);
   }
@@ -2252,8 +2252,8 @@ async function testSnapshotImportValidation(ctx: Ctx) {
     // Import quads with missing 's' field — should be skipped, not crash
     const result = await ctx.call("snapshot:import", {
       data: JSON.stringify([
-        { p: "value", o: "hello", g: "_" },
-        { s: "valid:quad", p: "test", o: "works", g: "_" },
+        { predicate: "value", object: "hello", graph: "_" },
+        { subject: "valid:quad", predicate: "test", object: "works", graph: "_" },
       ]),
     });
     if (result.count !== 1)
@@ -2269,7 +2269,7 @@ async function testSnapshotImportValidation(ctx: Ctx) {
     // Import quads with null 'o' field — should be skipped
     const result = await ctx.call("snapshot:import", {
       data: JSON.stringify([
-        { s: "test:nullo", p: "val", o: null, g: "_" },
+        { subject: "test:nullo", predicate: "val", object: null, graph: "_" },
       ]),
     });
     if (result.skipped !== 1)
@@ -2457,7 +2457,7 @@ async function testWebUiEdgeCases(ctx: Ctx) {
     // GET deps for node with no source
     try {
       const nodeName = "test:nosrc-" + Date.now();
-      await ctx.assert(nodeName, "type", "Function");
+      await ctx.insert(nodeName, "type", "Function");
       const res = await fetch(`http://localhost:${port}/api/node/${encodeURIComponent(nodeName)}/deps`);
       const data = await res.json() as any;
       if (res.status !== 200 || !Array.isArray(data.calls) || data.calls.length !== 0)
@@ -2479,10 +2479,10 @@ async function testDoubleSpawn(ctx: Ctx) {
 
   try {
     // Create a test node that stays alive
-    await ctx.assert("test:dblspawn", "type", "Function");
-    await ctx.assert("test:dblspawn", "source", `
+    await ctx.insert("test:dblspawn", "type", "Function");
+    await ctx.insert("test:dblspawn", "source", `
 const id = 'inst:' + Date.now() + ':' + Math.random().toString(36).slice(2);
-await ctx.assert('test:dblspawn', id, 'running');
+await ctx.insert('test:dblspawn', id, 'running');
 const signal = args && args.signal;
 if (signal) {
   await new Promise(r => signal.addEventListener('abort', r, { once: true }));
@@ -2527,8 +2527,8 @@ async function testCronNoSignalCleanup(ctx: Ctx) {
   console.log("\n── Cron no-signal cleanup (BUG-005 fix) ──");
 
   try {
-    await ctx.assert("test:cronnos", "type", "Function");
-    await ctx.assert("test:cronnos", "source", "return 'tick'");
+    await ctx.insert("test:cronnos", "type", "Function");
+    await ctx.insert("test:cronnos", "source", "return 'tick'");
 
     // Start cron without signal
     const result = await ctx.call("cron", {
@@ -2580,8 +2580,8 @@ async function testCompilerSubscriberCleanup(ctx: Ctx) {
     }
 
     // Verify compilation still works after re-invocation
-    await ctx.assert("test:compilerresub", "type", "Function");
-    await ctx.assert("test:compilerresub", "source", "return 'works'");
+    await ctx.insert("test:compilerresub", "type", "Function");
+    await ctx.insert("test:compilerresub", "source", "return 'works'");
     const result = await ctx.call("test:compilerresub");
     if (result !== "works") throw new Error(`expected 'works', got '${result}'`);
     ok("compiler-unsub: compilation works correctly after re-invocation");
@@ -2596,22 +2596,22 @@ async function testConcurrentSetFix(ctx: Ctx) {
   console.log("\n── Concurrent set fix (BUG-007 fix) ──");
 
   try {
-    await ctx.assert("test:setrace", "value", "initial");
+    await ctx.insert("test:setrace", "value", "initial");
 
     // Call set concurrently — with the fix, operations should be serialized
-    const p1 = ctx.call("set", { s: "test:setrace", p: "value", o: "winner1" });
-    const p2 = ctx.call("set", { s: "test:setrace", p: "value", o: "winner2" });
+    const p1 = ctx.call("set", { subject: "test:setrace", predicate: "value", object: "winner1" });
+    const p2 = ctx.call("set", { subject: "test:setrace", predicate: "value", object: "winner2" });
 
     await Promise.all([p1, p2]);
 
     // Check: only one value should exist
-    const values = await ctx.query({ s: "test:setrace", p: "value" });
+    const values = await ctx.query({ subject: "test:setrace", predicate: "value" });
     if (values.length === 1) {
-      ok("concurrent-set: serialized — only one value survives (" + values[0].o + ")");
+      ok("concurrent-set: serialized — only one value survives (" + values[0].object + ")");
     } else {
       fail(
         "concurrent-set",
-        `race condition still exists — ${values.length} values: ${values.map((q) => q.o).join(", ")}`
+        `race condition still exists — ${values.length} values: ${values.map((q) => q.object).join(", ")}`
       );
     }
   } catch (e) {
@@ -2626,8 +2626,8 @@ async function testToolResultUndefined(ctx: Ctx) {
 
   try {
     // Create a node that returns undefined
-    await ctx.assert("test:voidnode", "type", "Function");
-    await ctx.assert("test:voidnode", "source", "// returns undefined");
+    await ctx.insert("test:voidnode", "type", "Function");
+    await ctx.insert("test:voidnode", "source", "// returns undefined");
 
     // Simulate what agent:loop does in the generic fallback
     const callResult = await ctx.call("test:voidnode");
@@ -2644,8 +2644,8 @@ async function testToolResultUndefined(ctx: Ctx) {
 
   try {
     // Verify the fix is in the agent:loop source
-    const loopSource = await ctx.query({ s: "agent:loop", p: "source" });
-    const src = loopSource[0].o;
+    const loopSource = await ctx.query({ subject: "agent:loop", predicate: "source" });
+    const src = loopSource[0].object;
     if (src.includes("'(no return value)'")) {
       ok("tool-result-undefined: agent:loop source handles undefined results");
     } else {
@@ -2674,12 +2674,12 @@ async function testSqlInjectionSafety(ctx: Ctx) {
     }
 
     // Attempt SQL injection via assert values
-    const q = await ctx.assert(
+    const q = await ctx.insert(
       "test'; DROP TABLE quads; --",
       "pred'; DROP --",
       "val'; DROP --"
     );
-    if (q && q.s.includes("DROP TABLE")) {
+    if (q && q.subject.includes("DROP TABLE")) {
       ok("sql-injection: malicious values stored literally, not executed");
     } else {
       fail("sql-injection", "unexpected assert result");
@@ -2711,8 +2711,8 @@ async function testXssSafety(ctx: Ctx) {
 
     // Create a node with XSS payload in the name
     const xssName = "test:<script>alert('xss')</script>";
-    await ctx.assert(xssName, "type", "Function");
-    await ctx.assert(xssName, "source", "return '<img onerror=alert(1)>'");
+    await ctx.insert(xssName, "type", "Function");
+    await ctx.insert(xssName, "source", "return '<img onerror=alert(1)>'");
 
     // Fetch the node list API
     const res = await fetch(`http://localhost:${port}/api/nodes`);
@@ -2761,7 +2761,7 @@ async function testPrototypePollution(ctx: Ctx) {
 
   try {
     const payload = JSON.stringify({ __proto__: { polluted: true } });
-    await ctx.assert("test:proto", "data", payload);
+    await ctx.insert("test:proto", "data", payload);
 
     const obj = {} as any;
     if (obj.polluted === true) {
@@ -2771,7 +2771,7 @@ async function testPrototypePollution(ctx: Ctx) {
     }
 
     // Clean up
-    await ctx.retract("test:proto", "data", payload);
+    await ctx.remove("test:proto", "data", payload);
   } catch (e) {
     fail("prototype-pollution", e);
   }
@@ -2826,8 +2826,8 @@ async function testStreamCancelHandler(ctx: Ctx) {
     await new Promise((r) => setTimeout(r, 200));
 
     // Verify the source contains the cancel handler
-    const sourceQuads = await ctx.query({ s: "api:server", p: "source" });
-    const src = sourceQuads[0].o;
+    const sourceQuads = await ctx.query({ subject: "api:server", predicate: "source" });
+    const src = sourceQuads[0].object;
     if (src.includes("cancel()") && src.includes("cancelled = true")) {
       ok("stream-cancel: ReadableStream has cancel() handler");
     } else {
@@ -3029,7 +3029,7 @@ async function testFullIntegrationFlow(ctx: Ctx) {
     // 3. Verify conversation in graph
     if (sessionId) {
       try {
-        const msgs = await ctx.query({ p: "message", g: sessionId });
+        const msgs = await ctx.query({ predicate: "message", graph: sessionId });
         if (msgs.length >= 2) ok(`flow: conversation stored (${msgs.length} messages)`);
         else fail("flow: conversation", `expected >=2 messages, got ${msgs.length}`);
       } catch (e) { fail("flow: conversation", e); }
@@ -3057,7 +3057,7 @@ async function testFullIntegrationFlow(ctx: Ctx) {
     if (snap) {
       try {
         await ctx.call("snapshot:import", { data: snap });
-        const check = await ctx.query({ s: "test:flow", p: "source" });
+        const check = await ctx.query({ subject: "test:flow", predicate: "source" });
         if (check.length > 0) ok("flow: deleted node restored via snapshot import");
         else fail("flow: restore", "node not found after import");
       } catch (e) { fail("flow: import", e); }
@@ -3115,7 +3115,7 @@ async function testMalformedMessageQuads(ctx: Ctx) {
     const sessionId = "test:malformed:" + Date.now();
 
     // Add a malformed message (invalid JSON)
-    await ctx.assert(sessionId, "message", "not valid json", sessionId);
+    await ctx.insert(sessionId, "message", "not valid json", sessionId);
 
     // Call agent:loop — should skip the bad quad, not crash
     const result = await ctx.call("agent:loop", { prompt: "test", session: sessionId });
@@ -3181,19 +3181,19 @@ async function testCtxOnEdgeCases(ctx: Ctx) {
 
   // Assert and retract both fire
   try {
-    let assertFired = false;
-    let retractFired = false;
-    const unsub = ctx.on({ s: "test:onedge" }, (change) => {
-      if (change.type === "assert") assertFired = true;
-      if (change.type === "retract") retractFired = true;
+    let insertFired = false;
+    let removeFired = false;
+    const unsub = ctx.on({ subject: "test:onedge" }, (change) => {
+      if (change.type === "insert") insertFired = true;
+      if (change.type === "remove") removeFired = true;
     });
-    await ctx.assert("test:onedge", "val", "hello");
-    await ctx.retract("test:onedge", "val", "hello");
+    await ctx.insert("test:onedge", "val", "hello");
+    await ctx.remove("test:onedge", "val", "hello");
     unsub();
-    if (assertFired && retractFired) {
+    if (insertFired && removeFired) {
       ok("ctx.on: fires for both assert and retract");
     } else {
-      fail("ctx.on: assert+retract", `assert=${assertFired}, retract=${retractFired}`);
+      fail("ctx.on: assert+retract", `assert=${insertFired}, retract=${removeFired}`);
     }
   } catch (e) {
     fail("ctx.on: assert+retract", e);
@@ -3202,8 +3202,8 @@ async function testCtxOnEdgeCases(ctx: Ctx) {
   // Pattern specificity — different p should not fire
   try {
     let fired = false;
-    const unsub = ctx.on({ s: "test:specificity", p: "value" }, () => { fired = true; });
-    await ctx.assert("test:specificity", "other", "test");
+    const unsub = ctx.on({ subject: "test:specificity", predicate: "value" }, () => { fired = true; });
+    await ctx.insert("test:specificity", "other", "test");
     unsub();
     if (!fired) {
       ok("ctx.on: specific {s,p} pattern does not fire for different p");
@@ -3218,8 +3218,8 @@ async function testCtxOnEdgeCases(ctx: Ctx) {
   try {
     let count = 0;
     const unsub = ctx.on({}, () => { count++; });
-    await ctx.assert("test:emptyp1", "p", "v");
-    await ctx.assert("test:emptyp2", "p", "v");
+    await ctx.insert("test:emptyp1", "p", "v");
+    await ctx.insert("test:emptyp2", "p", "v");
     unsub();
     if (count === 2) {
       ok("ctx.on: empty pattern {} fires for all changes");
@@ -3233,9 +3233,9 @@ async function testCtxOnEdgeCases(ctx: Ctx) {
   // Duplicate assert does not fire
   try {
     let count = 0;
-    const unsub = ctx.on({ s: "test:dupfire" }, () => { count++; });
-    await ctx.assert("test:dupfire", "val", "same");
-    await ctx.assert("test:dupfire", "val", "same"); // INSERT OR IGNORE no-op
+    const unsub = ctx.on({ subject: "test:dupfire" }, () => { count++; });
+    await ctx.insert("test:dupfire", "val", "same");
+    await ctx.insert("test:dupfire", "val", "same"); // INSERT OR IGNORE no-op
     unsub();
     if (count === 1) {
       ok("ctx.on: duplicate assert (no-op) does not fire subscriber");
@@ -3251,10 +3251,10 @@ async function testCtxOnEdgeCases(ctx: Ctx) {
     const unsubs: (() => void)[] = [];
     let fires = 0;
     for (let i = 0; i < 1000; i++) {
-      unsubs.push(ctx.on({ s: "test:mass" }, () => { fires++; }));
+      unsubs.push(ctx.on({ subject: "test:mass" }, () => { fires++; }));
     }
     const start = Date.now();
-    await ctx.assert("test:mass", "event", "go");
+    await ctx.insert("test:mass", "event", "go");
     const elapsed = Date.now() - start;
     for (const u of unsubs) u();
     if (fires === 1000) {
@@ -3265,7 +3265,7 @@ async function testCtxOnEdgeCases(ctx: Ctx) {
 
     // After unsubscribe, none should fire
     fires = 0;
-    await ctx.retract("test:mass", "event", "go");
+    await ctx.remove("test:mass", "event", "go");
     if (fires === 0) {
       ok("ctx.on: after unsubscribing 1000, none fire");
     } else {
@@ -3286,13 +3286,13 @@ async function testPerformanceStress(ctx: Ctx) {
     const start = Date.now();
     const promises: Promise<any>[] = [];
     for (let i = 0; i < 1000; i++) {
-      promises.push(ctx.assert(`stress:item:${i}`, "val", `v${i}`, "stress"));
+      promises.push(ctx.insert(`stress:item:${i}`, "val", `v${i}`, "stress"));
     }
     await Promise.all(promises);
     const assertTime = Date.now() - start;
 
     const qStart = Date.now();
-    const results = await ctx.query({ p: "val", g: "stress" });
+    const results = await ctx.query({ predicate: "val", graph: "stress" });
     const queryTime = Date.now() - qStart;
 
     if (results.length === 1000) {
@@ -3306,8 +3306,8 @@ async function testPerformanceStress(ctx: Ctx) {
 
   // 500 cached calls
   try {
-    await ctx.assert("stress:simple", "type", "Function");
-    await ctx.assert("stress:simple", "source", "return 42");
+    await ctx.insert("stress:simple", "type", "Function");
+    await ctx.insert("stress:simple", "source", "return 42");
 
     const start = Date.now();
     for (let i = 0; i < 500; i++) {
@@ -3323,8 +3323,8 @@ async function testPerformanceStress(ctx: Ctx) {
   // 50 distinct nodes
   try {
     for (let i = 0; i < 50; i++) {
-      await ctx.assert(`stress:n:${i}`, "type", "Function");
-      await ctx.assert(`stress:n:${i}`, "source", `return ${i}`);
+      await ctx.insert(`stress:n:${i}`, "type", "Function");
+      await ctx.insert(`stress:n:${i}`, "source", `return ${i}`);
     }
     const start = Date.now();
     for (let i = 0; i < 50; i++) {
@@ -3375,9 +3375,9 @@ async function testBootResilience() {
     await seedTemplate(ctx);
     await ctx.call("sys:compiler");
 
-    const mainSrc = (await ctx.query({ s: "main", p: "source" }))[0];
-    await ctx.retract("main", "source", mainSrc.o);
-    await ctx.assert("main", "source", "throw new Error('boom');");
+    const mainSrc = (await ctx.query({ subject: "main", predicate: "source" }))[0];
+    await ctx.remove("main", "source", mainSrc.object);
+    await ctx.insert("main", "source", "throw new Error('boom');");
 
     try {
       await ctx.call("main");
@@ -3403,9 +3403,9 @@ async function testBootResilience() {
     const ctx = createCtx(db);
     await seedTemplate(ctx);
 
-    const compSrc = (await ctx.query({ s: "sys:compiler", p: "source" }))[0];
-    await ctx.retract("sys:compiler", "source", compSrc.o);
-    await ctx.assert("sys:compiler", "source", "throw new Error('broken compiler');");
+    const compSrc = (await ctx.query({ subject: "sys:compiler", predicate: "source" }))[0];
+    await ctx.remove("sys:compiler", "source", compSrc.object);
+    await ctx.insert("sys:compiler", "source", "throw new Error('broken compiler');");
 
     try {
       await ctx.call("sys:compiler");
@@ -3433,12 +3433,12 @@ async function testCompilerCacheEdgeCases(ctx: Ctx) {
 
   // Source deleted — cache invalidated, re-call fails
   try {
-    await ctx.assert("test:cachex", "type", "Function");
-    await ctx.assert("test:cachex", "source", "return 'cached'");
+    await ctx.insert("test:cachex", "type", "Function");
+    await ctx.insert("test:cachex", "source", "return 'cached'");
     const r1 = await ctx.call("test:cachex");
     if (r1 !== "cached") throw new Error(`got ${r1}`);
 
-    await ctx.retract("test:cachex", "source", "return 'cached'");
+    await ctx.remove("test:cachex", "source", "return 'cached'");
     try {
       await ctx.call("test:cachex");
       fail("compiler-cache: deleted source", "should have thrown");
@@ -3455,8 +3455,8 @@ async function testCompilerCacheEdgeCases(ctx: Ctx) {
 
   // Syntax error gives useful error
   try {
-    await ctx.assert("test:badsyntax", "type", "Function");
-    await ctx.assert("test:badsyntax", "source", "return {{{bad}}}");
+    await ctx.insert("test:badsyntax", "type", "Function");
+    await ctx.insert("test:badsyntax", "source", "return {{{bad}}}");
     try {
       await ctx.call("test:badsyntax");
       fail("compiler-cache: syntax error", "should have thrown");
@@ -3473,11 +3473,11 @@ async function testCompilerCacheEdgeCases(ctx: Ctx) {
 
   // Self-modifying node
   try {
-    await ctx.assert("test:selfmod", "type", "Function");
-    await ctx.assert("test:selfmod", "source", `
-      const cur = (await ctx.query({ s: 'test:selfmod', p: 'source' }))[0].o;
-      await ctx.retract('test:selfmod', 'source', cur);
-      await ctx.assert('test:selfmod', 'source', "return 'modified'");
+    await ctx.insert("test:selfmod", "type", "Function");
+    await ctx.insert("test:selfmod", "source", `
+      const cur = (await ctx.query({ subject: 'test:selfmod', predicate: 'source' }))[0].object;
+      await ctx.remove('test:selfmod', 'source', cur);
+      await ctx.insert('test:selfmod', 'source', "return 'modified'");
       return 'original';
     `);
     const r1 = await ctx.call("test:selfmod");
@@ -3502,7 +3502,7 @@ async function testGraphDescribeDeep(ctx: Ctx) {
   try {
     const subj = "test:manypreds";
     for (let i = 0; i < 12; i++) {
-      await ctx.assert(subj, `pred${i}`, `val${i}`);
+      await ctx.insert(subj, `pred${i}`, `val${i}`);
     }
     const result = await ctx.call("graph:describe", { subject: subj });
     const predKeys = Object.keys(result.predicates);
@@ -3518,12 +3518,12 @@ async function testGraphDescribeDeep(ctx: Ctx) {
   // Describe a subject with quads in multiple graphs
   try {
     const subj = "test:multigraph";
-    await ctx.assert(subj, "data", "default-graph");
-    await ctx.assert(subj, "data", "graph-a", "graphA");
-    await ctx.assert(subj, "data", "graph-b", "graphB");
+    await ctx.insert(subj, "data", "default-graph");
+    await ctx.insert(subj, "data", "graph-a", "graphA");
+    await ctx.insert(subj, "data", "graph-b", "graphB");
     const result = await ctx.call("graph:describe", { subject: subj });
     // Should include quads from all graphs
-    const graphs = result.quads.map((q: any) => q.g);
+    const graphs = result.quads.map((q: any) => q.graph);
     const uniqueGraphs = new Set(graphs);
     if (uniqueGraphs.size < 3)
       throw new Error(`expected quads in >=3 graphs, got ${uniqueGraphs.size}: ${[...uniqueGraphs]}`);
@@ -3543,8 +3543,8 @@ async function testGraphDescribeDeep(ctx: Ctx) {
   // Describe a subject with no type quad
   try {
     const subj = "test:notype";
-    await ctx.assert(subj, "value", "123");
-    await ctx.assert(subj, "label", "some-label");
+    await ctx.insert(subj, "value", "123");
+    await ctx.insert(subj, "label", "some-label");
     const result = await ctx.call("graph:describe", { subject: subj });
     const preds = Object.keys(result.predicates);
     if (preds.includes("type"))
@@ -3575,7 +3575,7 @@ async function testGraphSubjectsDeep(ctx: Ctx) {
   // 100+ subjects
   try {
     for (let i = 0; i < 100; i++) {
-      await ctx.assert(`batch:subj:${i}`, "type", "BatchItem");
+      await ctx.insert(`batch:subj:${i}`, "type", "BatchItem");
     }
     const result = await ctx.call("graph:subjects", { type: "BatchItem" });
     if (result.length < 100)
@@ -3587,7 +3587,7 @@ async function testGraphSubjectsDeep(ctx: Ctx) {
 
   // Filter matching exactly one
   try {
-    await ctx.assert("test:uniquetype", "type", "UniqueSpecialType");
+    await ctx.insert("test:uniquetype", "type", "UniqueSpecialType");
     const result = await ctx.call("graph:subjects", { type: "UniqueSpecialType" });
     if (result.length !== 1)
       throw new Error(`expected exactly 1 subject, got ${result.length}`);
@@ -3604,8 +3604,8 @@ async function testGraphDepsDeep(ctx: Ctx) {
 
   // Deps for a node that calls itself recursively
   try {
-    await ctx.assert("test:recursive", "type", "Function");
-    await ctx.assert("test:recursive", "source",
+    await ctx.insert("test:recursive", "type", "Function");
+    await ctx.insert("test:recursive", "source",
       "if (args && args.n <= 0) return 0; return await ctx.call('test:recursive', { n: (args.n || 1) - 1 });"
     );
     const result = await ctx.call("graph:deps", { node: "test:recursive" });
@@ -3621,8 +3621,8 @@ async function testGraphDepsDeep(ctx: Ctx) {
 
   // Deps for a node with template literal ctx.call (should NOT be detected)
   try {
-    await ctx.assert("test:templatecall", "type", "Function");
-    await ctx.assert("test:templatecall", "source",
+    await ctx.insert("test:templatecall", "type", "Function");
+    await ctx.insert("test:templatecall", "source",
       "const name = 'shell'; return await ctx.call(name, { cmd: 'echo hi' });"
     );
     const result = await ctx.call("graph:deps", { node: "test:templatecall" });
@@ -3638,9 +3638,9 @@ async function testGraphDepsDeep(ctx: Ctx) {
 
   // Deps for a node with multiple different ctx.call references
   try {
-    await ctx.assert("test:multicall", "type", "Function");
-    await ctx.assert("test:multicall", "source",
-      "await ctx.call('shell', { cmd: 'echo a' }); await ctx.call('set', { s: 'x', p: 'y', o: 'z' }); await ctx.call('shell', { cmd: 'echo b' });"
+    await ctx.insert("test:multicall", "type", "Function");
+    await ctx.insert("test:multicall", "source",
+      "await ctx.call('shell', { cmd: 'echo a' }); await ctx.call('set', { subject: 'x', predicate: 'y', object: 'z' }); await ctx.call('shell', { cmd: 'echo b' });"
     );
     const result = await ctx.call("graph:deps", { node: "test:multicall" });
     if (!result.calls.includes("shell"))
@@ -3658,7 +3658,7 @@ async function testGraphDepsDeep(ctx: Ctx) {
 
   // Deps for node with no source at all
   try {
-    await ctx.assert("test:nosourcefordeps", "type", "Function");
+    await ctx.insert("test:nosourcefordeps", "type", "Function");
     // No source quad asserted
     const result = await ctx.call("graph:deps", { node: "test:nosourcefordeps" });
     if (result.calls.length !== 0)
@@ -3734,8 +3734,8 @@ async function testInspectDeep(ctx: Ctx) {
   // Inspect source truncation for very long source
   try {
     const longSource = "return '" + "x".repeat(3000) + "'";
-    await ctx.assert("test:longsource", "type", "Function");
-    await ctx.assert("test:longsource", "source", longSource);
+    await ctx.insert("test:longsource", "type", "Function");
+    await ctx.insert("test:longsource", "source", longSource);
     const result = await ctx.call("inspect", { node: "test:longsource" });
     if (result.sourceLength !== longSource.length)
       throw new Error(`expected sourceLength=${longSource.length}, got ${result.sourceLength}`);
@@ -3894,11 +3894,11 @@ async function testVectorSearchDeep(ctx: Ctx) {
 
     // Search for "hello" - "hello" should rank highest
     const results = await ctx.call("vector:search", { text: "hello", k: 10 });
-    const embResults = results.filter((r: any) => r.quad.g === "embeddings");
+    const embResults = results.filter((r: any) => r.quad.graph === "embeddings");
     if (embResults.length >= 2) {
       // Find our test texts
-      const helloResult = embResults.find((r: any) => r.quad.o === "hello");
-      const goodbyeResult = embResults.find((r: any) => r.quad.o === "goodbye cruel world forever");
+      const helloResult = embResults.find((r: any) => r.quad.object === "hello");
+      const goodbyeResult = embResults.find((r: any) => r.quad.object === "goodbye cruel world forever");
       if (helloResult && goodbyeResult) {
         if (helloResult.similarity < goodbyeResult.similarity)
           throw new Error(`"hello" should rank higher than "goodbye" for query "hello"`);
@@ -3949,16 +3949,16 @@ async function testSetUnderLoad(ctx: Ctx) {
   // Call set 100 times with same (s, p) — verify only one value remains
   try {
     const subj = "test:set100";
-    await ctx.assert(subj, "type", "Function");
+    await ctx.insert(subj, "type", "Function");
 
     for (let i = 0; i < 100; i++) {
-      await ctx.call("set", { s: subj, p: "counter", o: String(i) });
+      await ctx.call("set", { subject: subj, predicate: "counter", object: String(i) });
     }
-    const vals = await ctx.query({ s: subj, p: "counter" });
+    const vals = await ctx.query({ subject: subj, predicate: "counter" });
     if (vals.length !== 1)
       throw new Error(`expected 1 value after 100 sets, got ${vals.length}`);
-    if (vals[0].o !== "99")
-      throw new Error(`expected final value '99', got '${vals[0].o}'`);
+    if (vals[0].object !== "99")
+      throw new Error(`expected final value '99', got '${vals[0].object}'`);
     ok("set: 100 sequential sets leave exactly 1 value (last wins)");
   } catch (e) {
     fail("set 100 sequential", e);
@@ -3967,19 +3967,19 @@ async function testSetUnderLoad(ctx: Ctx) {
   // Set with g parameter — verify graph is respected
   try {
     const subj = "test:setgraph";
-    await ctx.assert(subj, "val", "default-val");
-    await ctx.call("set", { s: subj, p: "val", o: "graph-val", g: "custom" });
+    await ctx.insert(subj, "val", "default-val");
+    await ctx.call("set", { subject: subj, predicate: "val", object: "graph-val", graph: "custom" });
     // Both should exist — different graphs
-    const defaultVals = await ctx.query({ s: subj, p: "val", g: "_" });
-    const customVals = await ctx.query({ s: subj, p: "val", g: "custom" });
+    const defaultVals = await ctx.query({ subject: subj, predicate: "val", graph: "_" });
+    const customVals = await ctx.query({ subject: subj, predicate: "val", graph: "custom" });
     if (defaultVals.length !== 1)
       throw new Error(`expected 1 val in default graph, got ${defaultVals.length}`);
     if (customVals.length !== 1)
       throw new Error(`expected 1 val in custom graph, got ${customVals.length}`);
-    if (defaultVals[0].o !== "default-val")
-      throw new Error(`default graph value wrong: ${defaultVals[0].o}`);
-    if (customVals[0].o !== "graph-val")
-      throw new Error(`custom graph value wrong: ${customVals[0].o}`);
+    if (defaultVals[0].object !== "default-val")
+      throw new Error(`default graph value wrong: ${defaultVals[0].object}`);
+    if (customVals[0].object !== "graph-val")
+      throw new Error(`custom graph value wrong: ${customVals[0].object}`);
     ok("set: graph parameter isolates values across graphs");
   } catch (e) {
     fail("set with graph", e);
@@ -3988,11 +3988,11 @@ async function testSetUnderLoad(ctx: Ctx) {
   // Set with very long value (100KB)
   try {
     const longVal = "x".repeat(100 * 1024);
-    const result = await ctx.call("set", { s: "test:longval", p: "big", o: longVal });
-    if (result.o.length !== longVal.length)
-      throw new Error(`expected value length ${longVal.length}, got ${result.o.length}`);
-    const check = await ctx.query({ s: "test:longval", p: "big" });
-    if (check.length !== 1 || check[0].o.length !== longVal.length)
+    const result = await ctx.call("set", { subject: "test:longval", predicate: "big", object: longVal });
+    if (result.object.length !== longVal.length)
+      throw new Error(`expected value length ${longVal.length}, got ${result.object.length}`);
+    const check = await ctx.query({ subject: "test:longval", predicate: "big" });
+    if (check.length !== 1 || check[0].object.length !== longVal.length)
       throw new Error("long value not stored correctly");
     ok("set: 100KB value stored and retrieved correctly");
   } catch (e) {
@@ -4001,11 +4001,11 @@ async function testSetUnderLoad(ctx: Ctx) {
 
   // Set with empty string value
   try {
-    const result = await ctx.call("set", { s: "test:setempty", p: "val", o: "" });
-    if (result.o !== "")
-      throw new Error(`expected empty string value, got '${result.o}'`);
-    const check = await ctx.query({ s: "test:setempty", p: "val" });
-    if (check.length !== 1 || check[0].o !== "")
+    const result = await ctx.call("set", { subject: "test:setempty", predicate: "val", object: "" });
+    if (result.object !== "")
+      throw new Error(`expected empty string value, got '${result.object}'`);
+    const check = await ctx.query({ subject: "test:setempty", predicate: "val" });
+    if (check.length !== 1 || check[0].object !== "")
       throw new Error("empty string not stored correctly");
     ok("set: empty string value handled correctly");
   } catch (e) {
@@ -4020,12 +4020,12 @@ async function testCodeSmells(ctx: Ctx) {
 
   // BUG-015: graph:subjects had redundant ternary (both branches same) — now fixed
   try {
-    const rs = await ctx.query({ s: "graph:subjects", p: "source" });
-    const src = rs[0].o;
-    if (src.includes("typeFilter ? q.s : q.s")) {
+    const rs = await ctx.query({ subject: "graph:subjects", predicate: "source" });
+    const src = rs[0].object;
+    if (src.includes("typeFilter ? q.subject : q.subject")) {
       fail("code-smell graph:subjects ternary", "redundant ternary still present");
     } else {
-      ok("code-smell: graph:subjects ternary cleaned up (was q.s : q.s)");
+      ok("code-smell: graph:subjects ternary cleaned up (was q.subject : q.subject)");
     }
   } catch (e) {
     fail("code-smell graph:subjects ternary", e);
@@ -4045,9 +4045,9 @@ async function testCodeSmells(ctx: Ctx) {
   try {
     // The set node uses `o === undefined || o === null` check
     // Numeric 0 and empty string should pass
-    const result = await ctx.call("set", { s: "test:setzero", p: "num", o: "0" });
-    if (result.o !== "0")
-      throw new Error(`expected '0', got '${result.o}'`);
+    const result = await ctx.call("set", { subject: "test:setzero", predicate: "num", object: "0" });
+    if (result.object !== "0")
+      throw new Error(`expected '0', got '${result.object}'`);
     ok("code-smell: set node correctly allows o='0' (not falsy-rejected)");
   } catch (e) {
     fail("code-smell set o=0", e);
@@ -4292,15 +4292,15 @@ async function testSnapshotImportEdgeCases(ctx: Ctx) {
   // Import with duplicate quads (should be idempotent)
   try {
     const data = JSON.stringify([
-      { s: "test:importdup", p: "val", o: "dup", g: "_" },
-      { s: "test:importdup", p: "val", o: "dup", g: "_" },
+      { subject: "test:importdup", predicate: "val", object: "dup", graph: "_" },
+      { subject: "test:importdup", predicate: "val", object: "dup", graph: "_" },
     ]);
     const result = await ctx.call("snapshot:import", { data });
     // Both should count (INSERT OR IGNORE means second is no-op but still counted)
     if (result.count !== 2)
       throw new Error(`expected count=2, got ${result.count}`);
     // But only one quad should exist in the graph
-    const check = await ctx.query({ s: "test:importdup", p: "val" });
+    const check = await ctx.query({ subject: "test:importdup", predicate: "val" });
     if (check.length !== 1)
       throw new Error(`expected 1 quad in graph, got ${check.length}`);
     ok("snapshot:import: duplicate quads handled (INSERT OR IGNORE)");
@@ -4386,8 +4386,8 @@ async function testCtxSelfEdgeCases(ctx: Ctx) {
 
   // ctx.self inside a node — verify it returns the correct name
   try {
-    await ctx.assert("test:selfcheck", "type", "Function");
-    await ctx.assert("test:selfcheck", "source", "return ctx.self;");
+    await ctx.insert("test:selfcheck", "type", "Function");
+    await ctx.insert("test:selfcheck", "source", "return ctx.self;");
     const result = await ctx.call("test:selfcheck");
     if (result !== "test:selfcheck")
       throw new Error(`expected 'test:selfcheck', got '${result}'`);
@@ -4398,10 +4398,10 @@ async function testCtxSelfEdgeCases(ctx: Ctx) {
 
   // ctx.self in a nested call — should reflect the inner node
   try {
-    await ctx.assert("test:selfinner", "type", "Function");
-    await ctx.assert("test:selfinner", "source", "return ctx.self;");
-    await ctx.assert("test:selfouter", "type", "Function");
-    await ctx.assert("test:selfouter", "source",
+    await ctx.insert("test:selfinner", "type", "Function");
+    await ctx.insert("test:selfinner", "source", "return ctx.self;");
+    await ctx.insert("test:selfouter", "type", "Function");
+    await ctx.insert("test:selfouter", "source",
       "const inner = await ctx.call('test:selfinner'); return { outer: ctx.self, inner };"
     );
     const result = await ctx.call("test:selfouter");
@@ -4422,11 +4422,11 @@ async function testQueryEdgeCases(ctx: Ctx) {
 
   // Query with all four fields specified
   try {
-    await ctx.assert("test:precise", "key", "val", "precise-g");
-    const results = await ctx.query({ s: "test:precise", p: "key", o: "val", g: "precise-g" });
+    await ctx.insert("test:precise", "key", "val", "precise-g");
+    const results = await ctx.query({ subject: "test:precise", predicate: "key", object: "val", graph: "precise-g" });
     if (results.length !== 1)
       throw new Error(`expected 1 result, got ${results.length}`);
-    if (results[0].s !== "test:precise" || results[0].o !== "val")
+    if (results[0].subject !== "test:precise" || results[0].object !== "val")
       throw new Error("returned quad doesn't match");
     ok("query: all four fields specified returns exact match");
   } catch (e) {
@@ -4435,7 +4435,7 @@ async function testQueryEdgeCases(ctx: Ctx) {
 
   // Query for non-matching pattern returns empty
   try {
-    const results = await ctx.query({ s: "nonexistent:query:test", p: "nonexistent:pred" });
+    const results = await ctx.query({ subject: "nonexistent:query:test", predicate: "nonexistent:pred" });
     if (results.length !== 0)
       throw new Error(`expected 0 results, got ${results.length}`);
     ok("query: non-matching pattern returns empty array");
@@ -4445,7 +4445,7 @@ async function testQueryEdgeCases(ctx: Ctx) {
 
   // Retract non-existent quad is a no-op
   try {
-    await ctx.retract("never:existed", "nope", "nothing");
+    await ctx.remove("never:existed", "nope", "nothing");
     ok("retract: non-existent quad is a silent no-op");
   } catch (e) {
     fail("retract non-existent", e);
@@ -4466,16 +4466,16 @@ async function testToolDispatchCompleteness(ctx: Ctx) {
   }
 
   // Get all registered Tool quads
-  const toolQuads = await ctx.query({ p: "type", o: "Tool" });
-  const toolSubjects = toolQuads.map((q) => q.s);
+  const toolQuads = await ctx.query({ predicate: "type", object: "Tool" });
+  const toolSubjects = toolQuads.map((q) => q.subject);
 
   // Get all tool schemas
   const toolSchemas: any[] = [];
   for (const subject of toolSubjects) {
-    const schemaQuads = await ctx.query({ s: subject, p: "tool_schema" });
+    const schemaQuads = await ctx.query({ subject: subject, predicate: "tool_schema" });
     if (schemaQuads.length > 0) {
       try {
-        toolSchemas.push(JSON.parse(schemaQuads[0].o));
+        toolSchemas.push(JSON.parse(schemaQuads[0].object));
       } catch {}
     }
   }
@@ -4483,7 +4483,7 @@ async function testToolDispatchCompleteness(ctx: Ctx) {
   // Verify every registered tool has a schema
   try {
     for (const subject of toolSubjects) {
-      const schemaQuads = await ctx.query({ s: subject, p: "tool_schema" });
+      const schemaQuads = await ctx.query({ subject: subject, predicate: "tool_schema" });
       if (schemaQuads.length === 0) {
         throw new Error(`Tool "${subject}" registered but has no tool_schema quad`);
       }
@@ -4569,7 +4569,7 @@ async function testToolDispatchCompleteness(ctx: Ctx) {
 
   // graph_query (dispatches to ctx.query)
   try {
-    const quads = await ctx.query({ p: "type", o: "Function" });
+    const quads = await ctx.query({ predicate: "type", object: "Function" });
     if (!Array.isArray(quads) || quads.length === 0)
       throw new Error("query returned no results");
     ok("audit dispatch: graph_query handler works");
@@ -4577,31 +4577,31 @@ async function testToolDispatchCompleteness(ctx: Ctx) {
     fail("audit dispatch: graph_query", e);
   }
 
-  // graph_assert + graph_retract
+  // graph_insert + graph_remove
   try {
-    const quad = await ctx.assert(
+    const quad = await ctx.insert(
       "audit:test",
       "dispatch",
       "check",
       "_"
     );
-    if (!quad || quad.s !== "audit:test")
-      throw new Error("assert failed");
-    await ctx.retract("audit:test", "dispatch", "check", "_");
+    if (!quad || quad.subject !== "audit:test")
+      throw new Error("insert failed");
+    await ctx.remove("audit:test", "dispatch", "check", "_");
     const after = await ctx.query({
-      s: "audit:test",
-      p: "dispatch",
-      o: "check",
+      subject: "audit:test",
+      predicate: "dispatch",
+      object: "check",
     });
-    if (after.length !== 0) throw new Error("retract failed");
-    ok("audit dispatch: graph_assert + graph_retract handlers work");
+    if (after.length !== 0) throw new Error("remove failed");
+    ok("audit dispatch: graph_insert + graph_remove handlers work");
   } catch (e) {
-    fail("audit dispatch: assert/retract", e);
+    fail("audit dispatch: insert/remove", e);
   }
 
   // list_nodes
   try {
-    const nodes = await ctx.query({ p: "type", o: "Function" });
+    const nodes = await ctx.query({ predicate: "type", object: "Function" });
     if (nodes.length === 0) throw new Error("no function nodes");
     ok("audit dispatch: list_nodes handler works");
   } catch (e) {
@@ -4693,8 +4693,8 @@ async function testToolDispatchCompleteness(ctx: Ctx) {
   // Test the generic fallback: any unregistered tool_name gets underscore->colon translation
   try {
     // Create a temporary node that the fallback would route to
-    await ctx.assert("audit:fallback", "type", "Function");
-    await ctx.assert(
+    await ctx.insert("audit:fallback", "type", "Function");
+    await ctx.insert(
       "audit:fallback",
       "source",
       "return 'fallback_works'"
@@ -4703,8 +4703,8 @@ async function testToolDispatchCompleteness(ctx: Ctx) {
     if (result !== "fallback_works")
       throw new Error(`expected 'fallback_works', got '${result}'`);
     // Cleanup
-    await ctx.retract("audit:fallback", "source", "return 'fallback_works'");
-    await ctx.retract("audit:fallback", "type", "Function");
+    await ctx.remove("audit:fallback", "source", "return 'fallback_works'");
+    await ctx.remove("audit:fallback", "type", "Function");
     ok(
       "audit dispatch: generic fallback (underscore->colon) works for unregistered tools"
     );
@@ -4716,12 +4716,12 @@ async function testToolDispatchCompleteness(ctx: Ctx) {
   // The agent:loop source contains the generic fallback, so all tool names are handled
   try {
     const loopSource = await ctx.query({
-      s: "agent:loop",
-      p: "source",
+      subject: "agent:loop",
+      predicate: "source",
     });
     if (loopSource.length === 0)
       throw new Error("agent:loop source not found");
-    const src = loopSource[0].o;
+    const src = loopSource[0].object;
     // Check that the fallback is present
     if (!src.includes("toolName.replace(/_/g, ':')"))
       throw new Error("generic fallback not found in agent:loop source");
@@ -4773,12 +4773,12 @@ async function testErrorMessageQuality(ctx: Ctx) {
 
   // 3. set with missing p and o
   try {
-    await ctx.call("set", { s: "x" });
+    await ctx.call("set", { subject: "x" });
     fail("error: set missing p/o", "should have thrown");
   } catch (e: any) {
     if (
       e.message.includes("[set]") &&
-      e.message.includes("args.s, args.p, and args.o are required")
+      e.message.includes("args.subject, args.predicate, and args.object are required")
     ) {
       ok("error quality: set tells which args are required");
     } else {
@@ -5086,8 +5086,8 @@ async function testErrorMessageQuality(ctx: Ctx) {
     // Can't call ctx.self directly in tests because we're in main() which runs via ctx.call
     // But we can verify the error message format by checking the source
     const ctxSource = await ctx.query({
-      s: "sys:compiler",
-      p: "source",
+      subject: "sys:compiler",
+      predicate: "source",
     });
     // The kernel ctx.self throws "[ctx.self] not inside a node execution"
     ok("error quality: ctx.self error format verified in source");
@@ -5097,15 +5097,15 @@ async function testErrorMessageQuality(ctx: Ctx) {
 
   // 23. All error messages use consistent [node_name] prefix format
   try {
-    const fnNodes = await ctx.query({ p: "type", o: "Function" });
+    const fnNodes = await ctx.query({ predicate: "type", object: "Function" });
     let consistent = true;
     let inconsistentNode = "";
     for (const fnQ of fnNodes) {
       // Skip test-created nodes (they use deliberate error messages for testing)
-      if (fnQ.s.startsWith("test:")) continue;
-      const srcQ = await ctx.query({ s: fnQ.s, p: "source" });
+      if (fnQ.subject.startsWith("test:")) continue;
+      const srcQ = await ctx.query({ subject: fnQ.subject, predicate: "source" });
       if (srcQ.length === 0) continue;
-      const src = srcQ[0].o;
+      const src = srcQ[0].object;
       // Check for throw new Error patterns
       const throwMatches = src.match(/throw new Error\(['"]([^'"]*)['"]/g);
       if (throwMatches) {
@@ -5120,7 +5120,7 @@ async function testErrorMessageQuality(ctx: Ctx) {
             !msgContent.startsWith("[")
           ) {
             consistent = false;
-            inconsistentNode = fnQ.s + ": " + msgContent;
+            inconsistentNode = fnQ.subject + ": " + msgContent;
           }
         }
       }
@@ -5425,8 +5425,8 @@ async function testHttpStatusCodeAudit(ctx: Ctx) {
       if (res.status !== 201)
         throw new Error(`expected 201, got ${res.status}`);
       // Cleanup
-      await ctx.retract(nodeName, "type", "Function");
-      await ctx.retract(nodeName, "source", "return 'created'");
+      await ctx.remove(nodeName, "type", "Function");
+      await ctx.remove(nodeName, "source", "return 'created'");
       ok("audit http: webui 201 for successful node creation");
     } catch (e) {
       fail("audit http: webui 201", e);
@@ -5659,12 +5659,12 @@ async function testGracefulDegradation(ctx: Ctx) {
     // The sys:compiler wraps metrics calls in try/catch for this case
     // Verify by checking compiler source contains the try/catch
     const compilerSrc = await ctx.query({
-      s: "sys:compiler",
-      p: "source",
+      subject: "sys:compiler",
+      predicate: "source",
     });
     if (compilerSrc.length === 0)
       throw new Error("compiler source not found");
-    const src = compilerSrc[0].o;
+    const src = compilerSrc[0].object;
     if (!src.includes("Silently skip"))
       throw new Error(
         "compiler should silently skip metrics errors"
@@ -5679,10 +5679,10 @@ async function testGracefulDegradation(ctx: Ctx) {
   // 8. Version save silently skips during boot (before version:save exists)
   try {
     const compilerSrc = await ctx.query({
-      s: "sys:compiler",
-      p: "source",
+      subject: "sys:compiler",
+      predicate: "source",
     });
-    const src = compilerSrc[0].o;
+    const src = compilerSrc[0].object;
     if (!src.includes("version:save may not exist yet during boot"))
       throw new Error(
         "compiler should handle missing version:save during boot"
@@ -5701,12 +5701,12 @@ async function testSupervisorSpawnedRetract(ctx: Ctx) {
   console.log("\n── Supervisor Spawned retract ──");
 
   try {
-    await ctx.assert("test:sv:retractfix", "type", "Function");
-    await ctx.assert(
+    await ctx.insert("test:sv:retractfix", "type", "Function");
+    await ctx.insert(
       "test:sv:retractfix",
       "source",
       `
-await ctx.assert('test:sv:retractfix', 'status', 'alive');
+await ctx.insert('test:sv:retractfix', 'status', 'alive');
 const signal = args && args.signal;
 if (signal) {
   await new Promise(r => signal.addEventListener('abort', r, { once: true }));
@@ -5717,11 +5717,11 @@ if (signal) {
     await new Promise((r) => setTimeout(r, 100));
 
     // Verify it's running
-    const status = await ctx.query({ s: "test:sv:retractfix", p: "status", o: "alive" });
+    const status = await ctx.query({ subject: "test:sv:retractfix", predicate: "status", object: "alive" });
     if (status.length === 0) throw new Error("node did not start");
 
     // Retract the Spawned quad -- supervisor should abort the node
-    await ctx.retract("test:sv:retractfix", "type", "Spawned");
+    await ctx.remove("test:sv:retractfix", "type", "Spawned");
     await new Promise((r) => setTimeout(r, 200));
 
     const ac = ctx._supervisorControllers && ctx._supervisorControllers.get("test:sv:retractfix");
@@ -5741,30 +5741,30 @@ async function testEmbeddingAssertEdgeCases(ctx: Ctx) {
   // Assert with embedding, query back
   try {
     const vec = new Array(1536).fill(0).map((_, i) => Math.sin(i) * 0.1);
-    const quad = await ctx.assert("emb:edgetest1", "has_vec", "value1", "_", vec);
-    if (!quad || quad.s !== "emb:edgetest1")
+    const quad = await ctx.insert("emb:edgetest1", "has_vec", "value1", "_", vec);
+    if (!quad || quad.subject !== "emb:edgetest1")
       throw new Error(`assert did not return correct quad`);
-    const results = await ctx.query({ s: "emb:edgetest1", p: "has_vec" });
+    const results = await ctx.query({ subject: "emb:edgetest1", predicate: "has_vec" });
     if (results.length !== 1)
       throw new Error(`expected 1 result, got ${results.length}`);
-    if (results[0].o !== "value1")
-      throw new Error(`expected o='value1', got '${results[0].o}'`);
-    ok("ctx.assert with embedding: stored and queryable");
+    if (results[0].object !== "value1")
+      throw new Error(`expected o='value1', got '${results[0].object}'`);
+    ok("ctx.insert with embedding: stored and queryable");
   } catch (e) {
-    fail("ctx.assert with embedding", e);
+    fail("ctx.insert with embedding", e);
   }
 
   // Two quads with different embeddings, distinguish by subject
   try {
     const vec1 = new Array(1536).fill(0.5);
     const vec2 = new Array(1536).fill(-0.5);
-    await ctx.assert("emb:edgealpha", "data", "alpha-val", "_", vec1);
-    await ctx.assert("emb:edgebeta", "data", "beta-val", "_", vec2);
-    const r1 = await ctx.query({ s: "emb:edgealpha", p: "data" });
-    const r2 = await ctx.query({ s: "emb:edgebeta", p: "data" });
-    if (r1.length !== 1 || r1[0].o !== "alpha-val")
+    await ctx.insert("emb:edgealpha", "data", "alpha-val", "_", vec1);
+    await ctx.insert("emb:edgebeta", "data", "beta-val", "_", vec2);
+    const r1 = await ctx.query({ subject: "emb:edgealpha", predicate: "data" });
+    const r2 = await ctx.query({ subject: "emb:edgebeta", predicate: "data" });
+    if (r1.length !== 1 || r1[0].object !== "alpha-val")
       throw new Error("emb:edgealpha query failed");
-    if (r2.length !== 1 || r2[0].o !== "beta-val")
+    if (r2.length !== 1 || r2[0].object !== "beta-val")
       throw new Error("emb:edgebeta query failed");
     ok("two quads with different embeddings: distinguishable by subject");
   } catch (e) {
@@ -5774,8 +5774,8 @@ async function testEmbeddingAssertEdgeCases(ctx: Ctx) {
   // Duplicate assert with embedding is idempotent
   try {
     const vec = new Array(1536).fill(0.1);
-    const q1 = await ctx.assert("emb:edgedupe", "val", "x", "_", vec);
-    const q2 = await ctx.assert("emb:edgedupe", "val", "x", "_", vec);
+    const q1 = await ctx.insert("emb:edgedupe", "val", "x", "_", vec);
+    const q2 = await ctx.insert("emb:edgedupe", "val", "x", "_", vec);
     if (q1.id !== q2.id)
       throw new Error(`duplicate assert created new row: id ${q1.id} vs ${q2.id}`);
     ok("duplicate assert with embedding is idempotent");
@@ -5785,8 +5785,8 @@ async function testEmbeddingAssertEdgeCases(ctx: Ctx) {
 
   // Empty embedding array -- treated as no embedding
   try {
-    const q = await ctx.assert("emb:edgeempty", "val", "y", "_", []);
-    if (!q || q.s !== "emb:edgeempty")
+    const q = await ctx.insert("emb:edgeempty", "val", "y", "_", []);
+    if (!q || q.subject !== "emb:edgeempty")
       throw new Error("empty embedding assert failed");
     ok("assert with empty embedding array: treated as no embedding");
   } catch (e) {
@@ -5796,9 +5796,9 @@ async function testEmbeddingAssertEdgeCases(ctx: Ctx) {
   // Retract quad with embedding
   try {
     const vec = new Array(1536).fill(0.42);
-    await ctx.assert("emb:edgeretract", "data", "to-retract", "_", vec);
-    await ctx.retract("emb:edgeretract", "data", "to-retract");
-    const after = await ctx.query({ s: "emb:edgeretract", p: "data" });
+    await ctx.insert("emb:edgeretract", "data", "to-retract", "_", vec);
+    await ctx.remove("emb:edgeretract", "data", "to-retract");
+    const after = await ctx.query({ subject: "emb:edgeretract", predicate: "data" });
     if (after.length !== 0)
       throw new Error(`expected 0 results after retract, got ${after.length}`);
     ok("retract quad with embedding: removed successfully");
@@ -5809,9 +5809,9 @@ async function testEmbeddingAssertEdgeCases(ctx: Ctx) {
   // ctx.on fires for assert with embedding
   try {
     let fired = false;
-    const unsub = ctx.on({ s: "emb:edgeontest" }, () => { fired = true; });
+    const unsub = ctx.on({ subject: "emb:edgeontest" }, () => { fired = true; });
     const vec = new Array(1536).fill(0.1);
-    await ctx.assert("emb:edgeontest", "data", "watched", "_", vec);
+    await ctx.insert("emb:edgeontest", "data", "watched", "_", vec);
     if (!fired) throw new Error("ctx.on did not fire for assert with embedding");
     ok("ctx.on fires for assert with embedding");
     unsub();
@@ -5826,15 +5826,15 @@ async function testSelfModifyingNode(ctx: Ctx) {
   console.log("\n── Self-modifying node ──");
 
   try {
-    await ctx.assert("test:selfmod2", "type", "Function");
-    await ctx.assert(
+    await ctx.insert("test:selfmod2", "type", "Function");
+    await ctx.insert(
       "test:selfmod2",
       "source",
       `
-const currentSource = (await ctx.query({ s: 'test:selfmod2', p: 'source' }))[0].o;
+const currentSource = (await ctx.query({ subject: 'test:selfmod2', predicate: 'source' }))[0].object;
 if (currentSource.includes('SELFMOD2_MARKER')) {
-  await ctx.retract('test:selfmod2', 'source', currentSource);
-  await ctx.assert('test:selfmod2', 'source', "return 'v2-self-modified';");
+  await ctx.remove('test:selfmod2', 'source', currentSource);
+  await ctx.insert('test:selfmod2', 'source', "return 'v2-self-modified';");
   return 'v1';
 }
 // SELFMOD2_MARKER
@@ -5851,10 +5851,10 @@ return 'unexpected';
       throw new Error(`expected 'v2-self-modified', got '${r2}'`);
     ok("self-modifying node: second call uses new source");
 
-    const sourceQuads = await ctx.query({ s: "test:selfmod2", p: "source" });
+    const sourceQuads = await ctx.query({ subject: "test:selfmod2", predicate: "source" });
     if (sourceQuads.length !== 1)
       throw new Error(`expected 1 source quad, got ${sourceQuads.length}`);
-    if (sourceQuads[0].o !== "return 'v2-self-modified';")
+    if (sourceQuads[0].object !== "return 'v2-self-modified';")
       throw new Error("source not updated in graph");
     ok("self-modifying node: compiler cache invalidated reactively");
   } catch (e) {
@@ -5872,12 +5872,12 @@ async function testBatchSpawnAbort(ctx: Ctx) {
     for (let i = 0; i < 10; i++) {
       const name = `test:batchsv:${i}`;
       nodeNames.push(name);
-      await ctx.assert(name, "type", "Function");
-      await ctx.assert(
+      await ctx.insert(name, "type", "Function");
+      await ctx.insert(
         name,
         "source",
         `
-await ctx.assert('${name}', 'bstatus', 'running');
+await ctx.insert('${name}', 'bstatus', 'running');
 const signal = args && args.signal;
 if (signal) {
   await new Promise(r => signal.addEventListener('abort', r, { once: true }));
@@ -5894,7 +5894,7 @@ if (signal) {
 
     let allRunning = true;
     for (const name of nodeNames) {
-      const status = await ctx.query({ s: name, p: "bstatus", o: "running" });
+      const status = await ctx.query({ subject: name, predicate: "bstatus", object: "running" });
       if (status.length === 0) { allRunning = false; break; }
     }
     if (!allRunning) throw new Error("not all 10 nodes started");
@@ -5927,9 +5927,9 @@ async function testQueryResultOrdering(ctx: Ctx) {
   // 10 quads with different subjects
   try {
     for (let i = 0; i < 10; i++) {
-      await ctx.assert(`qorder:test:${String(i).padStart(2, "0")}`, "ordering_key", "batch1");
+      await ctx.insert(`qorder:test:${String(i).padStart(2, "0")}`, "ordering_key", "batch1");
     }
-    const results = await ctx.query({ p: "ordering_key", o: "batch1" });
+    const results = await ctx.query({ predicate: "ordering_key", object: "batch1" });
     if (results.length !== 10) throw new Error(`expected 10 results, got ${results.length}`);
 
     let orderedById = true;
@@ -5938,7 +5938,7 @@ async function testQueryResultOrdering(ctx: Ctx) {
     }
     if (!orderedById) {
       // At least check determinism
-      const results2 = await ctx.query({ p: "ordering_key", o: "batch1" });
+      const results2 = await ctx.query({ predicate: "ordering_key", object: "batch1" });
       const same = results.every((r, i) => r.id === results2[i].id);
       if (!same) throw new Error("query results not deterministic");
     }
@@ -5949,13 +5949,13 @@ async function testQueryResultOrdering(ctx: Ctx) {
 
   // Same subject, different predicates
   try {
-    await ctx.assert("qorder:multi", "alpha", "1");
-    await ctx.assert("qorder:multi", "beta", "2");
-    await ctx.assert("qorder:multi", "gamma", "3");
-    await ctx.assert("qorder:multi", "delta", "4");
-    const results = await ctx.query({ s: "qorder:multi" });
+    await ctx.insert("qorder:multi", "alpha", "1");
+    await ctx.insert("qorder:multi", "beta", "2");
+    await ctx.insert("qorder:multi", "gamma", "3");
+    await ctx.insert("qorder:multi", "delta", "4");
+    const results = await ctx.query({ subject: "qorder:multi" });
     if (results.length !== 4) throw new Error(`expected 4 results, got ${results.length}`);
-    const preds = results.map((r) => r.p).sort();
+    const preds = results.map((r) => r.predicate).sort();
     if (preds.join(",") !== "alpha,beta,delta,gamma")
       throw new Error(`predicates mismatch: ${preds.join(",")}`);
     ok("query same subject, different predicates: all present");
@@ -5970,13 +5970,13 @@ async function testGraphParameterIsolation(ctx: Ctx) {
   console.log("\n── Graph parameter isolation ──");
 
   try {
-    await ctx.assert("giso:item", "value", "hello", "graph-AA");
-    await ctx.assert("giso:item", "value", "hello", "graph-BB");
-    const rA = await ctx.query({ s: "giso:item", p: "value", g: "graph-AA" });
-    const rB = await ctx.query({ s: "giso:item", p: "value", g: "graph-BB" });
-    if (rA.length !== 1 || rA[0].g !== "graph-AA")
+    await ctx.insert("giso:item", "value", "hello", "graph-AA");
+    await ctx.insert("giso:item", "value", "hello", "graph-BB");
+    const rA = await ctx.query({ subject: "giso:item", predicate: "value", graph: "graph-AA" });
+    const rB = await ctx.query({ subject: "giso:item", predicate: "value", graph: "graph-BB" });
+    if (rA.length !== 1 || rA[0].graph !== "graph-AA")
       throw new Error("graph-AA query failed");
-    if (rB.length !== 1 || rB[0].g !== "graph-BB")
+    if (rB.length !== 1 || rB[0].graph !== "graph-BB")
       throw new Error("graph-BB query failed");
     ok("graph isolation: same s/p/o in different graphs are distinct");
   } catch (e) {
@@ -5984,9 +5984,9 @@ async function testGraphParameterIsolation(ctx: Ctx) {
   }
 
   try {
-    await ctx.retract("giso:item", "value", "hello", "graph-AA");
-    const rA = await ctx.query({ s: "giso:item", p: "value", g: "graph-AA" });
-    const rB = await ctx.query({ s: "giso:item", p: "value", g: "graph-BB" });
+    await ctx.remove("giso:item", "value", "hello", "graph-AA");
+    const rA = await ctx.query({ subject: "giso:item", predicate: "value", graph: "graph-AA" });
+    const rB = await ctx.query({ subject: "giso:item", predicate: "value", graph: "graph-BB" });
     if (rA.length !== 0) throw new Error("graph-AA not retracted");
     if (rB.length !== 1) throw new Error("graph-BB affected by retract");
     ok("graph isolation: retract from one graph does not affect the other");
@@ -5995,11 +5995,11 @@ async function testGraphParameterIsolation(ctx: Ctx) {
   }
 
   try {
-    await ctx.assert("giso:both", "shared", "data", "gXX");
-    await ctx.assert("giso:both", "shared", "data", "gYY");
-    const all = await ctx.query({ s: "giso:both", p: "shared" });
+    await ctx.insert("giso:both", "shared", "data", "gXX");
+    await ctx.insert("giso:both", "shared", "data", "gYY");
+    const all = await ctx.query({ subject: "giso:both", predicate: "shared" });
     if (all.length !== 2) throw new Error(`expected 2, got ${all.length}`);
-    const graphs = all.map((r) => r.g).sort();
+    const graphs = all.map((r) => r.graph).sort();
     if (graphs[0] !== "gXX" || graphs[1] !== "gYY")
       throw new Error(`expected [gXX, gYY], got ${graphs}`);
     ok("query without graph filter: returns quads from all graphs");
@@ -6014,8 +6014,8 @@ async function testSpecialNodeNames(ctx: Ctx) {
   console.log("\n── Special characters in node names ──");
 
   try {
-    await ctx.assert("my:custom:deep:node2", "type", "Function");
-    await ctx.assert("my:custom:deep:node2", "source", "return 'deep-colon';");
+    await ctx.insert("my:custom:deep:node2", "type", "Function");
+    await ctx.insert("my:custom:deep:node2", "source", "return 'deep-colon';");
     const result = await ctx.call("my:custom:deep:node2");
     if (result !== "deep-colon") throw new Error(`got '${result}'`);
     ok("node with multiple colons works");
@@ -6024,8 +6024,8 @@ async function testSpecialNodeNames(ctx: Ctx) {
   }
 
   try {
-    await ctx.assert("my node spaces2", "type", "Function");
-    await ctx.assert("my node spaces2", "source", "return 'spaced';");
+    await ctx.insert("my node spaces2", "type", "Function");
+    await ctx.insert("my node spaces2", "source", "return 'spaced';");
     const result = await ctx.call("my node spaces2");
     if (result !== "spaced") throw new Error(`got '${result}'`);
     ok("node with spaces works");
@@ -6034,8 +6034,8 @@ async function testSpecialNodeNames(ctx: Ctx) {
   }
 
   try {
-    await ctx.assert("unicode:test:2:🎉", "type", "Function");
-    await ctx.assert("unicode:test:2:🎉", "source", "return 'unicode';");
+    await ctx.insert("unicode:test:2:🎉", "type", "Function");
+    await ctx.insert("unicode:test:2:🎉", "source", "return 'unicode';");
     const result = await ctx.call("unicode:test:2:🎉");
     if (result !== "unicode") throw new Error(`got '${result}'`);
     ok("node with unicode/emoji works");
@@ -6044,8 +6044,8 @@ async function testSpecialNodeNames(ctx: Ctx) {
   }
 
   try {
-    await ctx.assert("test'quote\"node2", "type", "Function");
-    await ctx.assert("test'quote\"node2", "source", "return 'sql-safe';");
+    await ctx.insert("test'quote\"node2", "type", "Function");
+    await ctx.insert("test'quote\"node2", "source", "return 'sql-safe';");
     const result = await ctx.call("test'quote\"node2");
     if (result !== "sql-safe") throw new Error(`got '${result}'`);
     ok("node with SQL special chars (quotes) works safely");
@@ -6109,9 +6109,9 @@ async function testStreamingSupport(ctx: Ctx) {
 
   // Test 3: repl node source contains streaming references
   try {
-    const rs = await ctx.query({ s: "repl", p: "source" });
+    const rs = await ctx.query({ subject: "repl", predicate: "source" });
     if (rs.length === 0) throw new Error("no repl source found");
-    const source = rs[0].o;
+    const source = rs[0].object;
     if (!source.includes("stream"))
       throw new Error("repl source does not contain 'stream'");
     if (!source.includes("onDelta"))
@@ -6123,9 +6123,9 @@ async function testStreamingSupport(ctx: Ctx) {
 
   // Test 4: agent:loop source imports stream from pi-ai
   try {
-    const rs = await ctx.query({ s: "agent:loop", p: "source" });
+    const rs = await ctx.query({ subject: "agent:loop", predicate: "source" });
     if (rs.length === 0) throw new Error("no agent:loop source found");
-    const source = rs[0].o;
+    const source = rs[0].object;
     if (!source.includes("stream"))
       throw new Error("agent:loop source does not import/use 'stream'");
     if (!source.includes("onDelta"))
@@ -6312,11 +6312,11 @@ async function testAgentLoopToolDispatch(ctx: Ctx) {
   try {
     const session = "test:dispatch:msgs:" + Date.now();
     await ctx.call("agent:loop", { prompt: "stored test", session });
-    const msgs = await ctx.query({ p: "message", g: session });
+    const msgs = await ctx.query({ predicate: "message", graph: session });
     if (msgs.length < 2) throw new Error(`expected >=2 messages, got ${msgs.length}`);
     const sorted = msgs.sort((a: any, b: any) => a.id - b.id);
-    const first = JSON.parse(sorted[0].o);
-    const second = JSON.parse(sorted[1].o);
+    const first = JSON.parse(sorted[0].object);
+    const second = JSON.parse(sorted[1].object);
     // First should be user message with seq=0
     if (first.seq !== 0) throw new Error(`first seq: ${first.seq}, expected 0`);
     if (first.msg.role !== "user") throw new Error(`first role: ${first.msg.role}`);
@@ -6335,9 +6335,9 @@ async function testAgentLoopToolDispatch(ctx: Ctx) {
     const before = Date.now();
     await ctx.call("agent:loop", { prompt: "ts test", session });
     const after = Date.now();
-    const msgs = await ctx.query({ p: "message", g: session });
+    const msgs = await ctx.query({ predicate: "message", graph: session });
     const sorted = msgs.sort((a: any, b: any) => a.id - b.id);
-    const userMsg = JSON.parse(sorted[0].o).msg;
+    const userMsg = JSON.parse(sorted[0].object).msg;
     if (typeof userMsg.timestamp !== "number") throw new Error("user msg missing timestamp");
     if (userMsg.timestamp < before || userMsg.timestamp > after)
       throw new Error(`timestamp ${userMsg.timestamp} out of range [${before}, ${after}]`);
@@ -6403,8 +6403,8 @@ async function testAgentLoopEdgeCases(ctx: Ctx) {
 
   // Test 3: maxIterations is defined in the source (structural check)
   try {
-    const rs = await ctx.query({ s: "agent:loop", p: "source" });
-    const source = rs[0].o;
+    const rs = await ctx.query({ subject: "agent:loop", predicate: "source" });
+    const source = rs[0].object;
     if (!source.includes("maxIterations"))
       throw new Error("agent:loop source does not contain maxIterations");
     // Extract the value
@@ -6452,9 +6452,9 @@ async function testAgentLoopEdgeCases(ctx: Ctx) {
   try {
     const session = "test:edge:mock:" + Date.now();
     const result = await ctx.call("agent:loop", { prompt: "mock info", session });
-    const msgs = await ctx.query({ p: "message", g: session });
+    const msgs = await ctx.query({ predicate: "message", graph: session });
     const sorted = msgs.sort((a: any, b: any) => a.id - b.id);
-    const assistantMsg = JSON.parse(sorted[1].o).msg;
+    const assistantMsg = JSON.parse(sorted[1].object).msg;
     if (typeof assistantMsg.api !== "string")
       throw new Error(`expected api to be a string, got '${typeof assistantMsg.api}'`);
     if (!assistantMsg.model)
@@ -6530,8 +6530,8 @@ async function testStreamingDeep(ctx: Ctx) {
 
   // Test 4: Streaming source code paths are properly guarded
   try {
-    const rs = await ctx.query({ s: "agent:loop", p: "source" });
-    const source = rs[0].o;
+    const rs = await ctx.query({ subject: "agent:loop", predicate: "source" });
+    const source = rs[0].object;
     // Verify the stream path checks for onDelta before calling it
     if (!source.includes("args.onDelta"))
       throw new Error("source does not check args.onDelta");
@@ -6567,8 +6567,8 @@ async function testSessionResumeDeep(ctx: Ctx) {
     await ctx.call("agent:loop", { prompt: "B message 1", session: sessionB });
 
     // Now "resume" session A by loading its messages
-    const aMsgs = await ctx.query({ p: "message", g: sessionA });
-    const bMsgs = await ctx.query({ p: "message", g: sessionB });
+    const aMsgs = await ctx.query({ predicate: "message", graph: sessionA });
+    const bMsgs = await ctx.query({ predicate: "message", graph: sessionB });
 
     // Session A should have 4 messages (2 user + 2 assistant)
     if (aMsgs.length < 4)
@@ -6579,16 +6579,16 @@ async function testSessionResumeDeep(ctx: Ctx) {
 
     // Verify A's messages are unaffected by B
     const aSorted = aMsgs.sort((a: any, b: any) => a.id - b.id);
-    const aFirst = JSON.parse(aSorted[0].o).msg;
+    const aFirst = JSON.parse(aSorted[0].object).msg;
     if (aFirst.content !== "A message 1")
       throw new Error(`A first content: ${aFirst.content}`);
-    const aThird = JSON.parse(aSorted[2].o).msg;
+    const aThird = JSON.parse(aSorted[2].object).msg;
     if (aThird.content !== "A message 2")
       throw new Error(`A third content: ${aThird.content}`);
 
     // Can continue session A after interleaving with B
     await ctx.call("agent:loop", { prompt: "A message 3", session: sessionA });
-    const aFinal = await ctx.query({ p: "message", g: sessionA });
+    const aFinal = await ctx.query({ predicate: "message", graph: sessionA });
     if (aFinal.length < 6)
       throw new Error(`session A after resume: expected >=6 messages, got ${aFinal.length}`);
 
@@ -6600,7 +6600,7 @@ async function testSessionResumeDeep(ctx: Ctx) {
   // Test 2: Resume non-existent session — loading messages returns empty
   try {
     const fakeSid = "test:resume:nonexistent:" + Date.now();
-    const msgs = await ctx.query({ p: "message", g: fakeSid });
+    const msgs = await ctx.query({ predicate: "message", graph: fakeSid });
     if (msgs.length !== 0)
       throw new Error(`expected 0 messages for non-existent session, got ${msgs.length}`);
 
@@ -6608,7 +6608,7 @@ async function testSessionResumeDeep(ctx: Ctx) {
     const result = await ctx.call("agent:loop", { prompt: "new start", session: fakeSid });
     if (result.session !== fakeSid)
       throw new Error(`session mismatch: ${result.session}`);
-    const afterMsgs = await ctx.query({ p: "message", g: fakeSid });
+    const afterMsgs = await ctx.query({ predicate: "message", graph: fakeSid });
     if (afterMsgs.length < 2)
       throw new Error(`expected >=2 messages after first exchange, got ${afterMsgs.length}`);
 
@@ -6619,8 +6619,8 @@ async function testSessionResumeDeep(ctx: Ctx) {
 
   // Test 3: .resume command exists in repl source with proper handler
   try {
-    const rs = await ctx.query({ s: "repl", p: "source" });
-    const source = rs[0].o;
+    const rs = await ctx.query({ subject: "repl", predicate: "source" });
+    const source = rs[0].object;
     if (!source.includes(".resume"))
       throw new Error("repl source missing .resume");
     if (!source.includes("sessionId"))
@@ -6640,10 +6640,10 @@ async function testSessionResumeDeep(ctx: Ctx) {
     await ctx.call("agent:loop", { prompt: "seq 2", session });
     await ctx.call("agent:loop", { prompt: "seq 3", session });
 
-    const msgs = await ctx.query({ p: "message", g: session });
+    const msgs = await ctx.query({ predicate: "message", graph: session });
     const seqs = msgs
       .sort((a: any, b: any) => a.id - b.id)
-      .map((q: any) => JSON.parse(q.o).seq);
+      .map((q: any) => JSON.parse(q.object).seq);
 
     // Sequence numbers should be strictly increasing
     for (let i = 1; i < seqs.length; i++) {
@@ -6661,9 +6661,9 @@ async function testSessionResumeDeep(ctx: Ctx) {
     const testContent = "special chars: !@#$%^&*() newline\ntest";
     await ctx.call("agent:loop", { prompt: testContent, session });
 
-    const msgs = await ctx.query({ p: "message", g: session });
+    const msgs = await ctx.query({ predicate: "message", graph: session });
     const sorted = msgs.sort((a: any, b: any) => a.id - b.id);
-    const userMsg = JSON.parse(sorted[0].o).msg;
+    const userMsg = JSON.parse(sorted[0].object).msg;
     if (userMsg.content !== testContent)
       throw new Error(`content mismatch: ${JSON.stringify(userMsg.content)} !== ${JSON.stringify(testContent)}`);
     ok("session preserves special characters and newlines in content");
@@ -6677,9 +6677,9 @@ async function testPiTuiIntegration(ctx: Ctx) {
 
   // Test 1: repl source imports @mariozechner/pi-tui
   try {
-    const rs = await ctx.query({ s: "repl", p: "source" });
+    const rs = await ctx.query({ subject: "repl", predicate: "source" });
     if (rs.length === 0) throw new Error("no repl source");
-    const source = rs[0].o;
+    const source = rs[0].object;
     if (!source.includes("@mariozechner/pi-tui"))
       throw new Error("repl does not import @mariozechner/pi-tui");
     ok("repl imports @mariozechner/pi-tui");
@@ -6689,8 +6689,8 @@ async function testPiTuiIntegration(ctx: Ctx) {
 
   // Test 2: repl has renderMarkdown helper
   try {
-    const rs = await ctx.query({ s: "repl", p: "source" });
-    const source = rs[0].o;
+    const rs = await ctx.query({ subject: "repl", predicate: "source" });
+    const source = rs[0].object;
     if (!source.includes("renderMarkdown") && !source.includes("Markdown"))
       throw new Error("repl source missing renderMarkdown or Markdown reference");
     ok("repl has Markdown rendering capability");
@@ -6700,8 +6700,8 @@ async function testPiTuiIntegration(ctx: Ctx) {
 
   // Test 3: repl has renderToolCall helper
   try {
-    const rs = await ctx.query({ s: "repl", p: "source" });
-    const source = rs[0].o;
+    const rs = await ctx.query({ subject: "repl", predicate: "source" });
+    const source = rs[0].object;
     if (!source.includes("renderToolCall") && !source.includes("tool_call"))
       throw new Error("repl source missing tool call rendering");
     ok("repl has tool-call rendering capability");
@@ -6711,8 +6711,8 @@ async function testPiTuiIntegration(ctx: Ctx) {
 
   // Test 4: repl renders .source output as code blocks
   try {
-    const rs = await ctx.query({ s: "repl", p: "source" });
-    const source = rs[0].o;
+    const rs = await ctx.query({ subject: "repl", predicate: "source" });
+    const source = rs[0].object;
     // .source command should use code block formatting for syntax highlighting
     if (!source.includes(".source"))
       throw new Error("repl missing .source command");
@@ -6754,10 +6754,10 @@ async function testSnapshotVersioningDeep(ctx: Ctx) {
     const withEmbedding = quads.filter((q: any) => q.embedding !== undefined);
     if (withEmbedding.length > 0)
       throw new Error(`found ${withEmbedding.length} quads with embedding key — should be stripped`);
-    // Verify every quad has only the expected keys: s, p, o, g, and optionally attrs
+    // Verify every quad has only the expected keys: subject, predicate, object, graph, and optionally attrs
     const badKeys = quads.filter((q: any) => {
       const keys = Object.keys(q);
-      return keys.some((k: string) => !["s", "p", "o", "g", "attrs"].includes(k));
+      return keys.some((k: string) => !["subject", "predicate", "object", "graph", "attrs"].includes(k));
     });
     if (badKeys.length > 0)
       throw new Error(`found quads with unexpected keys: ${JSON.stringify(Object.keys(badKeys[0]))}`);
@@ -6769,22 +6769,22 @@ async function testSnapshotVersioningDeep(ctx: Ctx) {
   // 2. Export/import roundtrip preserves graph field (non-default graph)
   try {
     const uniqueG = "test-graph-" + Date.now();
-    await ctx.assert("rt:graphtest", "marker", "preserved", uniqueG);
+    await ctx.insert("rt:graphtest", "marker", "preserved", uniqueG);
 
     const json = await ctx.call("snapshot:export");
     const quads = JSON.parse(json);
-    const found = quads.find((q: any) => q.s === "rt:graphtest" && q.g === uniqueG);
+    const found = quads.find((q: any) => q.subject === "rt:graphtest" && q.graph === uniqueG);
     if (!found) throw new Error("exported quads don't include custom graph quad");
-    if (found.g !== uniqueG)
-      throw new Error(`expected g='${uniqueG}', got g='${found.g}'`);
+    if (found.graph !== uniqueG)
+      throw new Error(`expected g='${uniqueG}', got g='${found.graph}'`);
 
     // Now import it back via a different subject to prove graph is preserved
-    const importData = JSON.stringify([{ s: "rt:graphtest2", p: "marker", o: "preserved", g: uniqueG }]);
+    const importData = JSON.stringify([{ subject: "rt:graphtest2", predicate: "marker", object: "preserved", graph: uniqueG }]);
     await ctx.call("snapshot:import", { data: importData });
-    const check = await ctx.query({ s: "rt:graphtest2", p: "marker", g: uniqueG });
+    const check = await ctx.query({ subject: "rt:graphtest2", predicate: "marker", graph: uniqueG });
     if (check.length === 0) throw new Error("imported quad not found");
-    if (check[0].g !== uniqueG)
-      throw new Error(`imported quad has g='${check[0].g}', expected '${uniqueG}'`);
+    if (check[0].graph !== uniqueG)
+      throw new Error(`imported quad has g='${check[0].graph}', expected '${uniqueG}'`);
     ok("snapshot export/import preserves custom graph field");
   } catch (e) {
     fail("snapshot graph preservation", e);
@@ -6793,28 +6793,28 @@ async function testSnapshotVersioningDeep(ctx: Ctx) {
   // 3. Import converts numeric o values to strings via String()
   try {
     const data = JSON.stringify([
-      { s: "rt:numtest", p: "count", o: 42, g: "_" },
-      { s: "rt:numtest", p: "flag", o: true, g: "_" },
-      { s: "rt:numtest", p: "zero", o: 0, g: "_" },
+      { subject: "rt:numtest", predicate: "count", object: 42, graph: "_" },
+      { subject: "rt:numtest", predicate: "flag", object: true, graph: "_" },
+      { subject: "rt:numtest", predicate: "zero", object: 0, graph: "_" },
     ]);
     const result = await ctx.call("snapshot:import", { data });
     if (result.count !== 3)
       throw new Error(`expected count=3, got ${result.count}`);
 
-    const check42 = await ctx.query({ s: "rt:numtest", p: "count" });
+    const check42 = await ctx.query({ subject: "rt:numtest", predicate: "count" });
     if (check42.length === 0) throw new Error("numeric o quad not found");
-    if (check42[0].o !== "42")
-      throw new Error(`expected o='42' (string), got o='${check42[0].o}'`);
-    if (typeof check42[0].o !== "string")
+    if (check42[0].object !== "42")
+      throw new Error(`expected o='42' (string), got o='${check42[0].object}'`);
+    if (typeof check42[0].object !== "string")
       throw new Error("o should be a string after import");
 
-    const checkBool = await ctx.query({ s: "rt:numtest", p: "flag" });
-    if (checkBool[0].o !== "true")
-      throw new Error(`expected o='true' (string), got '${checkBool[0].o}'`);
+    const checkBool = await ctx.query({ subject: "rt:numtest", predicate: "flag" });
+    if (checkBool[0].object !== "true")
+      throw new Error(`expected o='true' (string), got '${checkBool[0].object}'`);
 
-    const checkZero = await ctx.query({ s: "rt:numtest", p: "zero" });
-    if (checkZero[0].o !== "0")
-      throw new Error(`expected o='0' (string), got '${checkZero[0].o}'`);
+    const checkZero = await ctx.query({ subject: "rt:numtest", predicate: "zero" });
+    if (checkZero[0].object !== "0")
+      throw new Error(`expected o='0' (string), got '${checkZero[0].object}'`);
 
     ok("snapshot:import converts numeric/boolean o values to strings");
   } catch (e) {
@@ -6825,15 +6825,15 @@ async function testSnapshotVersioningDeep(ctx: Ctx) {
   try {
     const specialValue = 'line1\nline2\ttab "quoted" \'apos\' emoji:🎯 unicode:日本語';
     const data = JSON.stringify([
-      { s: "rt:special", p: "text", o: specialValue, g: "_" },
+      { subject: "rt:special", predicate: "text", object: specialValue, graph: "_" },
     ]);
     const result = await ctx.call("snapshot:import", { data });
     if (result.count !== 1)
       throw new Error(`expected count=1, got ${result.count}`);
-    const check = await ctx.query({ s: "rt:special", p: "text" });
+    const check = await ctx.query({ subject: "rt:special", predicate: "text" });
     if (check.length === 0) throw new Error("special char quad not found");
-    if (check[0].o !== specialValue)
-      throw new Error(`special chars mangled: got '${check[0].o}'`);
+    if (check[0].object !== specialValue)
+      throw new Error(`special chars mangled: got '${check[0].object}'`);
     ok("snapshot:import handles special characters (unicode, newlines, quotes)");
   } catch (e) {
     fail("snapshot:import special chars", e);
@@ -6842,7 +6842,7 @@ async function testSnapshotVersioningDeep(ctx: Ctx) {
   // 5. Import with missing p field is skipped (specific field test)
   try {
     const data = JSON.stringify([
-      { s: "rt:nop", o: "value", g: "_" },  // missing p
+      { subject: "rt:nop", object: "value", graph: "_" },  // missing p
     ]);
     const result = await ctx.call("snapshot:import", { data });
     if (result.skipped !== 1)
@@ -6858,38 +6858,38 @@ async function testSnapshotVersioningDeep(ctx: Ctx) {
   try {
     // Create unique test data
     const prefix = "rt:full-" + Date.now();
-    await ctx.assert(prefix + ":a", "val", "alpha");
-    await ctx.assert(prefix + ":b", "val", "beta");
-    await ctx.assert(prefix + ":c", "val", "gamma");
+    await ctx.insert(prefix + ":a", "val", "alpha");
+    await ctx.insert(prefix + ":b", "val", "beta");
+    await ctx.insert(prefix + ":c", "val", "gamma");
 
     // Export and filter to just our test data
     const json = await ctx.call("snapshot:export");
     const allQuads = JSON.parse(json);
-    const testQuads = allQuads.filter((q: any) => q.s.startsWith(prefix));
+    const testQuads = allQuads.filter((q: any) => q.subject.startsWith(prefix));
     if (testQuads.length !== 3)
       throw new Error(`expected 3 test quads in export, got ${testQuads.length}`);
 
     // Retract the originals
-    await ctx.retract(prefix + ":a", "val");
-    await ctx.retract(prefix + ":b", "val");
-    await ctx.retract(prefix + ":c", "val");
+    await ctx.remove(prefix + ":a", "val");
+    await ctx.remove(prefix + ":b", "val");
+    await ctx.remove(prefix + ":c", "val");
 
     // Verify they're gone
-    const gone = await ctx.query({ s: prefix + ":a", p: "val" });
+    const gone = await ctx.query({ subject: prefix + ":a", predicate: "val" });
     if (gone.length !== 0) throw new Error("retract didn't work");
 
     // Import them back
     await ctx.call("snapshot:import", { data: JSON.stringify(testQuads) });
 
     // Verify all three are restored
-    const restored = await ctx.query({ s: prefix + ":a", p: "val" });
-    if (restored.length !== 1 || restored[0].o !== "alpha")
+    const restored = await ctx.query({ subject: prefix + ":a", predicate: "val" });
+    if (restored.length !== 1 || restored[0].object !== "alpha")
       throw new Error("alpha not restored correctly");
-    const restoredB = await ctx.query({ s: prefix + ":b", p: "val" });
-    if (restoredB.length !== 1 || restoredB[0].o !== "beta")
+    const restoredB = await ctx.query({ subject: prefix + ":b", predicate: "val" });
+    if (restoredB.length !== 1 || restoredB[0].object !== "beta")
       throw new Error("beta not restored correctly");
-    const restoredC = await ctx.query({ s: prefix + ":c", p: "val" });
-    if (restoredC.length !== 1 || restoredC[0].o !== "gamma")
+    const restoredC = await ctx.query({ subject: prefix + ":c", predicate: "val" });
+    if (restoredC.length !== 1 || restoredC[0].object !== "gamma")
       throw new Error("gamma not restored correctly");
     ok("snapshot full roundtrip: export -> retract -> import restores data");
   } catch (e) {
@@ -6899,21 +6899,21 @@ async function testSnapshotVersioningDeep(ctx: Ctx) {
   // 7. Export to file and import from that file — end-to-end file roundtrip
   try {
     const prefix = "rt:file-" + Date.now();
-    await ctx.assert(prefix, "kind", "file-roundtrip");
+    await ctx.insert(prefix, "kind", "file-roundtrip");
 
     const tmpPath = "/tmp/test-holo-file-rt-" + Date.now() + ".json";
     const exportResult = await ctx.call("snapshot:export", { path: tmpPath });
     if (exportResult.count < 1) throw new Error("export count 0");
 
     // Retract our test quad
-    await ctx.retract(prefix, "kind");
+    await ctx.remove(prefix, "kind");
 
     // Import from the file
     await ctx.call("snapshot:import", { path: tmpPath });
 
     // Verify it's back
-    const check = await ctx.query({ s: prefix, p: "kind" });
-    if (check.length !== 1 || check[0].o !== "file-roundtrip")
+    const check = await ctx.query({ subject: prefix, predicate: "kind" });
+    if (check.length !== 1 || check[0].object !== "file-roundtrip")
       throw new Error("file roundtrip failed");
 
     ok("snapshot file roundtrip: export to file -> retract -> import from file");
@@ -6927,23 +6927,23 @@ async function testSnapshotVersioningDeep(ctx: Ctx) {
   try {
     const prefix = "rt:idemp-" + Date.now();
     const data = JSON.stringify([
-      { s: prefix, p: "val", o: "same", g: "_" },
+      { subject: prefix, predicate: "val", object: "same", graph: "_" },
     ]);
 
     // Import once
     await ctx.call("snapshot:import", { data });
-    const first = await ctx.query({ s: prefix, p: "val" });
+    const first = await ctx.query({ subject: prefix, predicate: "val" });
     if (first.length !== 1) throw new Error(`first import: expected 1 quad, got ${first.length}`);
 
     // Import again (same data)
     await ctx.call("snapshot:import", { data });
-    const second = await ctx.query({ s: prefix, p: "val" });
+    const second = await ctx.query({ subject: prefix, predicate: "val" });
     if (second.length !== 1)
       throw new Error(`second import: expected still 1 quad, got ${second.length}`);
 
     // Import a third time
     await ctx.call("snapshot:import", { data });
-    const third = await ctx.query({ s: prefix, p: "val" });
+    const third = await ctx.query({ subject: prefix, predicate: "val" });
     if (third.length !== 1)
       throw new Error(`third import: expected still 1 quad, got ${third.length}`);
 
@@ -6956,16 +6956,16 @@ async function testSnapshotVersioningDeep(ctx: Ctx) {
   try {
     const prefix = "rt:empty-o-" + Date.now();
     const data = JSON.stringify([
-      { s: prefix, p: "val", o: "", g: "_" },
+      { subject: prefix, predicate: "val", object: "", graph: "_" },
     ]);
     const result = await ctx.call("snapshot:import", { data });
-    // Empty string is falsy but not undefined/null, so the check is (q.o === undefined || q.o === null)
+    // Empty string is falsy but not undefined/null, so the check is (q.object === undefined || q.object === null)
     // Empty string should pass
     if (result.count !== 1)
       throw new Error(`expected count=1 (empty string is valid), got count=${result.count}, skipped=${result.skipped}`);
-    const check = await ctx.query({ s: prefix, p: "val" });
+    const check = await ctx.query({ subject: prefix, predicate: "val" });
     if (check.length !== 1) throw new Error("empty string o quad not found");
-    if (check[0].o !== "") throw new Error(`expected empty string, got '${check[0].o}'`);
+    if (check[0].object !== "") throw new Error(`expected empty string, got '${check[0].object}'`);
     ok("snapshot:import accepts empty string as valid o value");
   } catch (e) {
     fail("snapshot:import empty string o", e);
@@ -6979,8 +6979,8 @@ async function testVersioningDeep(ctx: Ctx) {
 
   // 1. Version save returns valid ISO timestamp
   try {
-    await ctx.assert(nodeId, "type", "Function");
-    await ctx.assert(nodeId, "source", "return 'original'");
+    await ctx.insert(nodeId, "type", "Function");
+    await ctx.insert(nodeId, "source", "return 'original'");
 
     const result = await ctx.call("version:save", { name: nodeId, source: "return 'original'" });
     // Verify the timestamp is a valid ISO date
@@ -6998,9 +6998,9 @@ async function testVersioningDeep(ctx: Ctx) {
 
   // 2. Version data stored as JSON with correct structure
   try {
-    const versionQuads = await ctx.query({ s: nodeId, p: "version", g: "versions" });
+    const versionQuads = await ctx.query({ subject: nodeId, predicate: "version", graph: "versions" });
     if (versionQuads.length === 0) throw new Error("no version quads found");
-    const data = JSON.parse(versionQuads[0].o);
+    const data = JSON.parse(versionQuads[0].object);
     if (data.seq !== 0) throw new Error(`expected seq=0, got ${data.seq}`);
     if (typeof data.timestamp !== "string") throw new Error("timestamp should be a string");
     if (typeof data.source !== "string") throw new Error("source should be a string");
@@ -7050,15 +7050,15 @@ async function testVersioningDeep(ctx: Ctx) {
   // 5. Restored node is callable and returns correct result
   try {
     const nodeR = "test:vrestore-" + Date.now();
-    await ctx.assert(nodeR, "type", "Function");
-    await ctx.assert(nodeR, "source", "return 'hello-' + (args && args.name || 'world')");
+    await ctx.insert(nodeR, "type", "Function");
+    await ctx.insert(nodeR, "source", "return 'hello-' + (args && args.name || 'world')");
 
     // Save version 0
     await ctx.call("version:save", { name: nodeR, source: "return 'hello-' + (args && args.name || 'world')" });
 
     // Update to v2
-    await ctx.retract(nodeR, "source");
-    await ctx.assert(nodeR, "source", "return 'goodbye-' + (args && args.name || 'world')");
+    await ctx.remove(nodeR, "source");
+    await ctx.insert(nodeR, "source", "return 'goodbye-' + (args && args.name || 'world')");
     await new Promise((r) => setTimeout(r, 50));
 
     // Verify current version works
@@ -7083,8 +7083,8 @@ async function testVersioningDeep(ctx: Ctx) {
   // 6. version:restore invalidates compiler cache (node gets recompiled)
   try {
     const nodeC = "test:vcache-" + Date.now();
-    await ctx.assert(nodeC, "type", "Function");
-    await ctx.assert(nodeC, "source", "return 'cached-v1'");
+    await ctx.insert(nodeC, "type", "Function");
+    await ctx.insert(nodeC, "source", "return 'cached-v1'");
 
     // Call it to populate compiler cache
     const r1 = await ctx.call(nodeC);
@@ -7092,8 +7092,8 @@ async function testVersioningDeep(ctx: Ctx) {
 
     // Save and update
     await ctx.call("version:save", { name: nodeC, source: "return 'cached-v1'" });
-    await ctx.retract(nodeC, "source");
-    await ctx.assert(nodeC, "source", "return 'cached-v2'");
+    await ctx.remove(nodeC, "source");
+    await ctx.insert(nodeC, "source", "return 'cached-v2'");
     await new Promise((r) => setTimeout(r, 50));
 
     const r2 = await ctx.call(nodeC);
@@ -7118,13 +7118,13 @@ async function testVersioningDeep(ctx: Ctx) {
   // 7. version:restore triggers sys:compiler watcher creating a new version of pre-restore source
   try {
     const nodeW = "test:vwatch-" + Date.now();
-    await ctx.assert(nodeW, "type", "Function");
-    await ctx.assert(nodeW, "source", "return 'watch-v1'");
+    await ctx.insert(nodeW, "type", "Function");
+    await ctx.insert(nodeW, "source", "return 'watch-v1'");
     await ctx.call("version:save", { name: nodeW, source: "return 'watch-v1'" });
 
     // Update to v2
-    await ctx.retract(nodeW, "source");
-    await ctx.assert(nodeW, "source", "return 'watch-v2'");
+    await ctx.remove(nodeW, "source");
+    await ctx.insert(nodeW, "source", "return 'watch-v2'");
     await new Promise((r) => setTimeout(r, 100));
 
     // At this point sys:compiler should have auto-versioned 'watch-v1' on retract
@@ -7180,8 +7180,8 @@ async function testVersioningDeep(ctx: Ctx) {
     if (list.count !== 1) throw new Error(`expected 1 version, got ${list.count}`);
 
     // Verify the raw stored data can be round-tripped through JSON
-    const versionQuads = await ctx.query({ s: nodeJ, p: "version", g: "versions" });
-    const data = JSON.parse(versionQuads[0].o);
+    const versionQuads = await ctx.query({ subject: nodeJ, predicate: "version", graph: "versions" });
+    const data = JSON.parse(versionQuads[0].object);
     if (data.source !== jsonSource)
       throw new Error("JSON source mangled in storage");
     ok("version:save handles JSON special characters in source correctly");
@@ -7192,9 +7192,9 @@ async function testVersioningDeep(ctx: Ctx) {
   // 10. version:restore with seq=0 on a node that has many versions
   try {
     const nodeM = "test:vmany-" + Date.now();
-    await ctx.assert(nodeM, "type", "Function");
+    await ctx.insert(nodeM, "type", "Function");
     const originalSource = "return 'first-ever'";
-    await ctx.assert(nodeM, "source", originalSource);
+    await ctx.insert(nodeM, "source", originalSource);
     await ctx.call("version:save", { name: nodeM, source: originalSource });
 
     // Add 10 more versions
@@ -7220,16 +7220,16 @@ async function testVersioningDeep(ctx: Ctx) {
   // 11. version:restore to middle version
   try {
     const nodeM2 = "test:vmid-" + Date.now();
-    await ctx.assert(nodeM2, "type", "Function");
-    await ctx.assert(nodeM2, "source", "return 'mid-v0'");
+    await ctx.insert(nodeM2, "type", "Function");
+    await ctx.insert(nodeM2, "source", "return 'mid-v0'");
     await ctx.call("version:save", { name: nodeM2, source: "return 'mid-v0'" });
     await ctx.call("version:save", { name: nodeM2, source: "return 'mid-v1'" });
     await ctx.call("version:save", { name: nodeM2, source: "return 'mid-v2'" });
     await ctx.call("version:save", { name: nodeM2, source: "return 'mid-v3'" });
 
     // Restore to v2 (middle)
-    await ctx.retract(nodeM2, "source");
-    await ctx.assert(nodeM2, "source", "return 'current'");
+    await ctx.remove(nodeM2, "source");
+    await ctx.insert(nodeM2, "source", "return 'current'");
     await ctx.call("version:restore", { name: nodeM2, seq: 2 });
     await new Promise((r) => setTimeout(r, 50));
 
@@ -7291,15 +7291,15 @@ async function testVersioningDeep(ctx: Ctx) {
   try {
     const prefix = "rt:defg-" + Date.now();
     const data = JSON.stringify([
-      { s: prefix, p: "val", o: "no-graph" },
+      { subject: prefix, predicate: "val", object: "no-graph" },
     ]);
     const result = await ctx.call("snapshot:import", { data });
     if (result.count !== 1)
       throw new Error(`expected count=1, got ${result.count}`);
-    const check = await ctx.query({ s: prefix, p: "val" });
+    const check = await ctx.query({ subject: prefix, predicate: "val" });
     if (check.length === 0) throw new Error("quad with default graph not found");
-    if (check[0].g !== "_")
-      throw new Error(`expected g='_' (default), got g='${check[0].g}'`);
+    if (check[0].graph !== "_")
+      throw new Error(`expected g='_' (default), got g='${check[0].graph}'`);
     ok("snapshot:import defaults missing g field to '_'");
   } catch (e) {
     fail("snapshot:import default graph", e);
@@ -7310,7 +7310,7 @@ async function testVersioningDeep(ctx: Ctx) {
     const prefix = "rt:bulk-" + Date.now();
     const bulkData = [];
     for (let i = 0; i < 100; i++) {
-      bulkData.push({ s: `${prefix}:${i}`, p: "idx", o: String(i), g: "_" });
+      bulkData.push({ subject: `${prefix}:${i}`, predicate: "idx", object: String(i), graph: "_" });
     }
     const data = JSON.stringify(bulkData);
     const result = await ctx.call("snapshot:import", { data });
@@ -7318,11 +7318,11 @@ async function testVersioningDeep(ctx: Ctx) {
       throw new Error(`expected count=100, got ${result.count}`);
 
     // Verify a sample
-    const check50 = await ctx.query({ s: `${prefix}:50`, p: "idx" });
-    if (check50.length !== 1 || check50[0].o !== "50")
+    const check50 = await ctx.query({ subject: `${prefix}:50`, predicate: "idx" });
+    if (check50.length !== 1 || check50[0].object !== "50")
       throw new Error("bulk import: quad 50 not found or wrong value");
-    const check99 = await ctx.query({ s: `${prefix}:99`, p: "idx" });
-    if (check99.length !== 1 || check99[0].o !== "99")
+    const check99 = await ctx.query({ subject: `${prefix}:99`, predicate: "idx" });
+    if (check99.length !== 1 || check99[0].object !== "99")
       throw new Error("bulk import: quad 99 not found or wrong value");
     ok("snapshot:import handles 100-quad bulk import correctly");
   } catch (e) {
@@ -7333,43 +7333,43 @@ async function testVersioningDeep(ctx: Ctx) {
 // ── Ctx primitives edge cases ───────────────────────────────────
 
 async function testCtxPrimitivesEdgeCases(ctx: Ctx) {
-  console.log("\n── ctx.assert edge cases ──");
+  console.log("\n── ctx.insert edge cases ──");
 
   // Assert with all 4 fields and verify return shape
   try {
-    const q = await ctx.assert("cprim:a1", "pred1", "obj1", "graph1");
-    if (q.s !== "cprim:a1") throw new Error(`s: expected 'cprim:a1', got '${q.s}'`);
-    if (q.p !== "pred1") throw new Error(`p: expected 'pred1', got '${q.p}'`);
-    if (q.o !== "obj1") throw new Error(`o: expected 'obj1', got '${q.o}'`);
-    if (q.g !== "graph1") throw new Error(`g: expected 'graph1', got '${q.g}'`);
+    const q = await ctx.insert("cprim:a1", "pred1", "obj1", "graph1");
+    if (q.subject !== "cprim:a1") throw new Error(`s: expected 'cprim:a1', got '${q.subject}'`);
+    if (q.predicate !== "pred1") throw new Error(`p: expected 'pred1', got '${q.predicate}'`);
+    if (q.object !== "obj1") throw new Error(`o: expected 'obj1', got '${q.object}'`);
+    if (q.graph !== "graph1") throw new Error(`g: expected 'graph1', got '${q.graph}'`);
     if (typeof q.id !== "number") throw new Error(`id: expected number, got ${typeof q.id}`);
-    ok("ctx.assert: returns quad with correct s, p, o, g, id");
+    ok("ctx.insert: returns quad with correct s, p, o, g, id");
   } catch (e) {
-    fail("ctx.assert return shape", e);
+    fail("ctx.insert return shape", e);
   }
 
   // Assert with default graph omits g, should be '_'
   try {
-    const q = await ctx.assert("cprim:a2", "pred2", "obj2");
-    if (q.g !== "_") throw new Error(`g: expected '_', got '${q.g}'`);
-    ok("ctx.assert: omitting g defaults to '_'");
+    const q = await ctx.insert("cprim:a2", "pred2", "obj2");
+    if (q.graph !== "_") throw new Error(`g: expected '_', got '${q.graph}'`);
+    ok("ctx.insert: omitting g defaults to '_'");
   } catch (e) {
-    fail("ctx.assert default graph", e);
+    fail("ctx.insert default graph", e);
   }
 
   // Duplicate assert is a no-op — returns same quad, no new row
   try {
-    const q1 = await ctx.assert("cprim:dup", "dp", "dv", "dg");
-    const q2 = await ctx.assert("cprim:dup", "dp", "dv", "dg");
+    const q1 = await ctx.insert("cprim:dup", "dp", "dv", "dg");
+    const q2 = await ctx.insert("cprim:dup", "dp", "dv", "dg");
     if (q1.id !== q2.id) throw new Error(`duplicate assert created new row: ${q1.id} vs ${q2.id}`);
-    if (q1.s !== q2.s || q1.p !== q2.p || q1.o !== q2.o || q1.g !== q2.g)
+    if (q1.subject !== q2.subject || q1.predicate !== q2.predicate || q1.object !== q2.object || q1.graph !== q2.graph)
       throw new Error("duplicate assert returned different field values");
     // Verify only 1 row exists
-    const rows = await ctx.query({ s: "cprim:dup", p: "dp", o: "dv", g: "dg" });
+    const rows = await ctx.query({ subject: "cprim:dup", predicate: "dp", object: "dv", graph: "dg" });
     if (rows.length !== 1) throw new Error(`expected 1 row, got ${rows.length}`);
-    ok("ctx.assert: duplicate is a no-op, returns same quad");
+    ok("ctx.insert: duplicate is a no-op, returns same quad");
   } catch (e) {
-    fail("ctx.assert duplicate no-op", e);
+    fail("ctx.insert duplicate no-op", e);
   }
 
   // Assert with very long strings (50KB each for s, p, o)
@@ -7377,17 +7377,17 @@ async function testCtxPrimitivesEdgeCases(ctx: Ctx) {
     const longS = "cprim:long:" + "s".repeat(50 * 1024);
     const longP = "p".repeat(50 * 1024);
     const longO = "o".repeat(50 * 1024);
-    const q = await ctx.assert(longS, longP, longO);
-    if (q.s.length !== longS.length) throw new Error(`s length: expected ${longS.length}, got ${q.s.length}`);
-    if (q.p.length !== longP.length) throw new Error(`p length: expected ${longP.length}, got ${q.p.length}`);
-    if (q.o.length !== longO.length) throw new Error(`o length: expected ${longO.length}, got ${q.o.length}`);
+    const q = await ctx.insert(longS, longP, longO);
+    if (q.subject.length !== longS.length) throw new Error(`s length: expected ${longS.length}, got ${q.subject.length}`);
+    if (q.predicate.length !== longP.length) throw new Error(`p length: expected ${longP.length}, got ${q.predicate.length}`);
+    if (q.object.length !== longO.length) throw new Error(`o length: expected ${longO.length}, got ${q.object.length}`);
     // Query it back
-    const rows = await ctx.query({ s: longS, p: longP });
-    if (rows.length !== 1 || rows[0].o.length !== longO.length)
+    const rows = await ctx.query({ subject: longS, predicate: longP });
+    if (rows.length !== 1 || rows[0].object.length !== longO.length)
       throw new Error("long string roundtrip failed");
-    ok("ctx.assert: very long strings (50KB each) stored and queryable");
+    ok("ctx.insert: very long strings (50KB each) stored and queryable");
   } catch (e) {
-    fail("ctx.assert long strings", e);
+    fail("ctx.insert long strings", e);
   }
 
   // Assert with special characters (quotes, backslashes, tabs, newlines)
@@ -7395,25 +7395,25 @@ async function testCtxPrimitivesEdgeCases(ctx: Ctx) {
     const specS = 'cprim:sp"ec\'ial';
     const specP = "p\\back\\slash";
     const specO = "obj\twith\nnewlines";
-    const q = await ctx.assert(specS, specP, specO);
-    if (q.s !== specS) throw new Error(`special s: got '${q.s}'`);
-    if (q.p !== specP) throw new Error(`special p: got '${q.p}'`);
-    if (q.o !== specO) throw new Error(`special o: got '${q.o}'`);
-    ok("ctx.assert: special characters (quotes, backslashes, tabs, newlines)");
+    const q = await ctx.insert(specS, specP, specO);
+    if (q.subject !== specS) throw new Error(`special s: got '${q.subject}'`);
+    if (q.predicate !== specP) throw new Error(`special p: got '${q.predicate}'`);
+    if (q.object !== specO) throw new Error(`special o: got '${q.object}'`);
+    ok("ctx.insert: special characters (quotes, backslashes, tabs, newlines)");
   } catch (e) {
-    fail("ctx.assert special chars", e);
+    fail("ctx.insert special chars", e);
   }
 
   // Assert with SQL-dangerous characters (percent, underscore wildcards, semicolons)
   try {
     const sqlS = "cprim:sql%_';DROP TABLE quads;--";
     const sqlO = "100% of values; SELECT * FROM quads WHERE 1=1";
-    const q = await ctx.assert(sqlS, "sqltest", sqlO);
-    if (q.s !== sqlS) throw new Error(`sql s mismatch`);
-    if (q.o !== sqlO) throw new Error(`sql o mismatch`);
-    ok("ctx.assert: SQL-dangerous characters stored correctly (parameterized queries)");
+    const q = await ctx.insert(sqlS, "sqltest", sqlO);
+    if (q.subject !== sqlS) throw new Error(`sql s mismatch`);
+    if (q.object !== sqlO) throw new Error(`sql o mismatch`);
+    ok("ctx.insert: SQL-dangerous characters stored correctly (parameterized queries)");
   } catch (e) {
-    fail("ctx.assert SQL chars", e);
+    fail("ctx.insert SQL chars", e);
   }
 
   // Assert with unicode (emoji, CJK, RTL)
@@ -7421,135 +7421,135 @@ async function testCtxPrimitivesEdgeCases(ctx: Ctx) {
     const uniS = "cprim:\u{1F600}\u{1F680}";
     const uniP = "世界";  // 世界
     const uniO = "مرحبا";  // مرحبا
-    const q = await ctx.assert(uniS, uniP, uniO);
-    if (q.s !== uniS) throw new Error(`unicode s mismatch`);
-    if (q.p !== uniP) throw new Error(`unicode p mismatch`);
-    if (q.o !== uniO) throw new Error(`unicode o mismatch`);
-    const rows = await ctx.query({ s: uniS, p: uniP });
-    if (rows.length !== 1 || rows[0].o !== uniO)
+    const q = await ctx.insert(uniS, uniP, uniO);
+    if (q.subject !== uniS) throw new Error(`unicode s mismatch`);
+    if (q.predicate !== uniP) throw new Error(`unicode p mismatch`);
+    if (q.object !== uniO) throw new Error(`unicode o mismatch`);
+    const rows = await ctx.query({ subject: uniS, predicate: uniP });
+    if (rows.length !== 1 || rows[0].object !== uniO)
       throw new Error("unicode roundtrip failed");
-    ok("ctx.assert: unicode (emoji, CJK, RTL) stored and queryable");
+    ok("ctx.insert: unicode (emoji, CJK, RTL) stored and queryable");
   } catch (e) {
-    fail("ctx.assert unicode", e);
+    fail("ctx.insert unicode", e);
   }
 
   // Assert with embedding vector (5th arg)
   try {
     const vec = new Array(1536).fill(0).map((_, i) => Math.cos(i) * 0.01);
-    const q = await ctx.assert("cprim:emb", "has_emb", "embval", "_", vec);
-    if (q.s !== "cprim:emb" || q.o !== "embval")
+    const q = await ctx.insert("cprim:emb", "has_emb", "embval", "_", vec);
+    if (q.subject !== "cprim:emb" || q.object !== "embval")
       throw new Error("assert with embedding returned wrong quad");
-    const rows = await ctx.query({ s: "cprim:emb", p: "has_emb" });
+    const rows = await ctx.query({ subject: "cprim:emb", predicate: "has_emb" });
     if (rows.length !== 1) throw new Error(`expected 1, got ${rows.length}`);
-    ok("ctx.assert: with embedding vector stores and queries back");
+    ok("ctx.insert: with embedding vector stores and queries back");
   } catch (e) {
-    fail("ctx.assert with embedding", e);
+    fail("ctx.insert with embedding", e);
   }
 
   // Assert with empty string fields
   try {
-    const q = await ctx.assert("cprim:empty", "", "");
-    if (q.p !== "") throw new Error(`expected empty p, got '${q.p}'`);
-    if (q.o !== "") throw new Error(`expected empty o, got '${q.o}'`);
-    ok("ctx.assert: empty string p and o fields work");
+    const q = await ctx.insert("cprim:empty", "", "");
+    if (q.predicate !== "") throw new Error(`expected empty p, got '${q.predicate}'`);
+    if (q.object !== "") throw new Error(`expected empty o, got '${q.object}'`);
+    ok("ctx.insert: empty string p and o fields work");
   } catch (e) {
-    fail("ctx.assert empty strings", e);
+    fail("ctx.insert empty strings", e);
   }
 
-  console.log("\n── ctx.retract edge cases ──");
+  console.log("\n── ctx.remove edge cases ──");
 
   // Retract with full match returns retracted quad(s)
   try {
-    await ctx.assert("cprim:r1", "rp", "rv", "rg");
-    const retracted = await ctx.retract("cprim:r1", "rp", "rv", "rg");
+    await ctx.insert("cprim:r1", "rp", "rv", "rg");
+    const retracted = await ctx.remove("cprim:r1", "rp", "rv", "rg");
     if (retracted.length !== 1) throw new Error(`expected 1, got ${retracted.length}`);
-    if (retracted[0].s !== "cprim:r1") throw new Error(`retracted s mismatch`);
-    if (retracted[0].p !== "rp") throw new Error(`retracted p mismatch`);
-    if (retracted[0].o !== "rv") throw new Error(`retracted o mismatch`);
-    if (retracted[0].g !== "rg") throw new Error(`retracted g mismatch`);
+    if (retracted[0].subject !== "cprim:r1") throw new Error(`retracted s mismatch`);
+    if (retracted[0].predicate !== "rp") throw new Error(`retracted p mismatch`);
+    if (retracted[0].object !== "rv") throw new Error(`retracted o mismatch`);
+    if (retracted[0].graph !== "rg") throw new Error(`retracted g mismatch`);
     if (typeof retracted[0].id !== "number") throw new Error(`retracted id not a number`);
-    ok("ctx.retract: full match returns array of retracted quads with correct fields");
+    ok("ctx.remove: full match returns array of retracted quads with correct fields");
   } catch (e) {
-    fail("ctx.retract full match", e);
+    fail("ctx.remove full match", e);
   }
 
   // Retract with wildcards (omit o to retract all values for s, p)
   try {
-    await ctx.assert("cprim:rwild", "tag", "a");
-    await ctx.assert("cprim:rwild", "tag", "b");
-    await ctx.assert("cprim:rwild", "tag", "c");
-    const retracted = await ctx.retract("cprim:rwild", "tag");
+    await ctx.insert("cprim:rwild", "tag", "a");
+    await ctx.insert("cprim:rwild", "tag", "b");
+    await ctx.insert("cprim:rwild", "tag", "c");
+    const retracted = await ctx.remove("cprim:rwild", "tag");
     if (retracted.length !== 3) throw new Error(`expected 3 retracted, got ${retracted.length}`);
-    const values = retracted.map((q) => q.o).sort();
+    const values = retracted.map((q) => q.object).sort();
     if (values[0] !== "a" || values[1] !== "b" || values[2] !== "c")
       throw new Error(`retracted values: ${values.join(",")}`);
     // Verify they are gone
-    const after = await ctx.query({ s: "cprim:rwild", p: "tag" });
+    const after = await ctx.query({ subject: "cprim:rwild", predicate: "tag" });
     if (after.length !== 0) throw new Error(`expected 0 remaining, got ${after.length}`);
-    ok("ctx.retract: omitting o retracts all values for (s, p)");
+    ok("ctx.remove: omitting o retracts all values for (s, p)");
   } catch (e) {
-    fail("ctx.retract wildcard", e);
+    fail("ctx.remove wildcard", e);
   }
 
   // Retract non-existent quad returns empty array
   try {
-    const retracted = await ctx.retract("cprim:nonexistent", "nopred", "noval");
+    const retracted = await ctx.remove("cprim:nonexistent", "nopred", "noval");
     if (!Array.isArray(retracted)) throw new Error("retract did not return an array");
     if (retracted.length !== 0) throw new Error(`expected empty array, got ${retracted.length}`);
-    ok("ctx.retract: non-existent quad returns empty array");
+    ok("ctx.remove: non-existent quad returns empty array");
   } catch (e) {
-    fail("ctx.retract non-existent", e);
+    fail("ctx.remove non-existent", e);
   }
 
   // Retract fires change events
   try {
     const events: any[] = [];
-    const unsub = ctx.on({ s: "cprim:rfire" }, (change) => {
-      events.push({ type: change.type, s: change.quad.s, p: change.quad.p, o: change.quad.o });
+    const unsub = ctx.on({ subject: "cprim:rfire" }, (change) => {
+      events.push({ type: change.type, subject: change.quad.subject, predicate: change.quad.predicate, object: change.quad.object });
     });
-    await ctx.assert("cprim:rfire", "val", "watch-me");
-    await ctx.retract("cprim:rfire", "val", "watch-me");
+    await ctx.insert("cprim:rfire", "val", "watch-me");
+    await ctx.remove("cprim:rfire", "val", "watch-me");
     unsub();
     if (events.length !== 2) throw new Error(`expected 2 events, got ${events.length}`);
-    if (events[0].type !== "assert") throw new Error(`first event should be assert, got ${events[0].type}`);
-    if (events[1].type !== "retract") throw new Error(`second event should be retract, got ${events[1].type}`);
-    if (events[1].o !== "watch-me") throw new Error(`retract event o mismatch`);
-    ok("ctx.retract: fires change event with type='retract'");
+    if (events[0].type !== "insert") throw new Error(`first event should be assert, got ${events[0].type}`);
+    if (events[1].type !== "remove") throw new Error(`second event should be retract, got ${events[1].type}`);
+    if (events[1].object !== "watch-me") throw new Error(`retract event o mismatch`);
+    ok("ctx.remove: fires change event with type='remove'");
   } catch (e) {
-    fail("ctx.retract fires events", e);
+    fail("ctx.remove fires events", e);
   }
 
   // Retract with g omitted uses default graph '_'
   try {
-    await ctx.assert("cprim:rdefg", "val", "indefault");
-    await ctx.assert("cprim:rdefg", "val", "incustom", "custom-g");
+    await ctx.insert("cprim:rdefg", "val", "indefault");
+    await ctx.insert("cprim:rdefg", "val", "incustom", "custom-g");
     // Retract without g — should only remove the '_' graph entry
-    const retracted = await ctx.retract("cprim:rdefg", "val", "indefault");
+    const retracted = await ctx.remove("cprim:rdefg", "val", "indefault");
     if (retracted.length !== 1) throw new Error(`expected 1 retracted, got ${retracted.length}`);
-    if (retracted[0].g !== "_") throw new Error(`retracted from wrong graph: ${retracted[0].g}`);
+    if (retracted[0].graph !== "_") throw new Error(`retracted from wrong graph: ${retracted[0].graph}`);
     // custom-g entry should still exist
-    const remaining = await ctx.query({ s: "cprim:rdefg", p: "val", g: "custom-g" });
+    const remaining = await ctx.query({ subject: "cprim:rdefg", predicate: "val", graph: "custom-g" });
     if (remaining.length !== 1) throw new Error(`custom-g entry should still exist`);
-    ok("ctx.retract: omitting g defaults to '_', leaves other graphs intact");
+    ok("ctx.remove: omitting g defaults to '_', leaves other graphs intact");
   } catch (e) {
-    fail("ctx.retract default graph", e);
+    fail("ctx.remove default graph", e);
   }
 
   // Retract wildcard fires events for each retracted quad
   try {
     const events: any[] = [];
-    const unsub = ctx.on({ s: "cprim:rwildev" }, (change) => {
-      if (change.type === "retract") events.push(change.quad.o);
+    const unsub = ctx.on({ subject: "cprim:rwildev" }, (change) => {
+      if (change.type === "remove") events.push(change.quad.object);
     });
-    await ctx.assert("cprim:rwildev", "multi", "x");
-    await ctx.assert("cprim:rwildev", "multi", "y");
-    const retracted = await ctx.retract("cprim:rwildev", "multi");
+    await ctx.insert("cprim:rwildev", "multi", "x");
+    await ctx.insert("cprim:rwildev", "multi", "y");
+    const retracted = await ctx.remove("cprim:rwildev", "multi");
     unsub();
     if (retracted.length !== 2) throw new Error(`expected 2 retracted, got ${retracted.length}`);
     if (events.length !== 2) throw new Error(`expected 2 retract events, got ${events.length}`);
-    ok("ctx.retract: wildcard retract fires an event per quad");
+    ok("ctx.remove: wildcard retract fires an event per quad");
   } catch (e) {
-    fail("ctx.retract wildcard events", e);
+    fail("ctx.remove wildcard events", e);
   }
 
   console.log("\n── ctx.query edge cases ──");
@@ -7557,27 +7557,27 @@ async function testCtxPrimitivesEdgeCases(ctx: Ctx) {
   // Query with each field as wildcard individually
   try {
     // Set up test data in a unique graph
-    await ctx.assert("cprim:qw1", "qp", "qo", "qg-wild");
-    await ctx.assert("cprim:qw2", "qp", "qo", "qg-wild");
-    await ctx.assert("cprim:qw3", "qp", "qo-other", "qg-wild");
+    await ctx.insert("cprim:qw1", "qp", "qo", "qg-wild");
+    await ctx.insert("cprim:qw2", "qp", "qo", "qg-wild");
+    await ctx.insert("cprim:qw3", "qp", "qo-other", "qg-wild");
 
     // Wildcard s — match by p, o, g
-    const byPOG = await ctx.query({ p: "qp", o: "qo", g: "qg-wild" });
+    const byPOG = await ctx.query({ predicate: "qp", object: "qo", graph: "qg-wild" });
     if (byPOG.length !== 2) throw new Error(`by p,o,g: expected 2, got ${byPOG.length}`);
 
     // Wildcard p — match by s, o, g
-    const bySOG = await ctx.query({ s: "cprim:qw1", o: "qo", g: "qg-wild" });
+    const bySOG = await ctx.query({ subject: "cprim:qw1", object: "qo", graph: "qg-wild" });
     if (bySOG.length !== 1) throw new Error(`by s,o,g: expected 1, got ${bySOG.length}`);
 
     // Wildcard o — match by s, p, g
-    const bySPG = await ctx.query({ s: "cprim:qw3", p: "qp", g: "qg-wild" });
+    const bySPG = await ctx.query({ subject: "cprim:qw3", predicate: "qp", graph: "qg-wild" });
     if (bySPG.length !== 1) throw new Error(`by s,p,g: expected 1, got ${bySPG.length}`);
-    if (bySPG[0].o !== "qo-other") throw new Error(`wildcard o returned wrong value`);
+    if (bySPG[0].object !== "qo-other") throw new Error(`wildcard o returned wrong value`);
 
     // Wildcard g — match by s, p, o
-    const bySPO = await ctx.query({ s: "cprim:qw1", p: "qp", o: "qo" });
+    const bySPO = await ctx.query({ subject: "cprim:qw1", predicate: "qp", object: "qo" });
     if (bySPO.length !== 1) throw new Error(`by s,p,o: expected 1, got ${bySPO.length}`);
-    if (bySPO[0].g !== "qg-wild") throw new Error(`wildcard g returned wrong graph`);
+    if (bySPO[0].graph !== "qg-wild") throw new Error(`wildcard g returned wrong graph`);
 
     ok("ctx.query: wildcard on each individual field (s, p, o, g) works correctly");
   } catch (e) {
@@ -7586,28 +7586,28 @@ async function testCtxPrimitivesEdgeCases(ctx: Ctx) {
 
   // Query result includes all expected fields
   try {
-    await ctx.assert("cprim:qfields", "fp", "fo", "fg");
-    const rows = await ctx.query({ s: "cprim:qfields", p: "fp" });
+    await ctx.insert("cprim:qfields", "fp", "fo", "fg");
+    const rows = await ctx.query({ subject: "cprim:qfields", predicate: "fp" });
     if (rows.length !== 1) throw new Error(`expected 1, got ${rows.length}`);
     const r = rows[0];
     if (!("id" in r)) throw new Error("missing id field");
-    if (!("s" in r)) throw new Error("missing s field");
-    if (!("p" in r)) throw new Error("missing p field");
-    if (!("o" in r)) throw new Error("missing o field");
-    if (!("g" in r)) throw new Error("missing g field");
+    if (!("subject" in r)) throw new Error("missing subject field");
+    if (!("predicate" in r)) throw new Error("missing predicate field");
+    if (!("object" in r)) throw new Error("missing object field");
+    if (!("graph" in r)) throw new Error("missing graph field");
     if (typeof r.id !== "number") throw new Error(`id should be number, got ${typeof r.id}`);
-    if (r.s !== "cprim:qfields") throw new Error(`s mismatch`);
-    if (r.p !== "fp") throw new Error(`p mismatch`);
-    if (r.o !== "fo") throw new Error(`o mismatch`);
-    if (r.g !== "fg") throw new Error(`g mismatch`);
-    ok("ctx.query: result includes id, s, p, o, g with correct types");
+    if (r.subject !== "cprim:qfields") throw new Error(`subject mismatch`);
+    if (r.predicate !== "fp") throw new Error(`predicate mismatch`);
+    if (r.object !== "fo") throw new Error(`object mismatch`);
+    if (r.graph !== "fg") throw new Error(`graph mismatch`);
+    ok("ctx.query: result includes id, subject, predicate, object, graph with correct types");
   } catch (e) {
     fail("ctx.query result fields", e);
   }
 
   // Query with non-existent values returns empty array
   try {
-    const rows = await ctx.query({ s: "cprim:totallynonexistent999", p: "nope" });
+    const rows = await ctx.query({ subject: "cprim:totallynonexistent999", predicate: "nope" });
     if (!Array.isArray(rows)) throw new Error("query did not return an array");
     if (rows.length !== 0) throw new Error(`expected 0, got ${rows.length}`);
     ok("ctx.query: non-existent values returns empty array");
@@ -7622,7 +7622,7 @@ async function testCtxPrimitivesEdgeCases(ctx: Ctx) {
     if (rows.length === 0) throw new Error("query({}) returned 0 rows in a seeded database");
     // Verify they're all valid quads
     for (const r of rows.slice(0, 5)) {
-      if (typeof r.id !== "number" || typeof r.s !== "string" || typeof r.p !== "string")
+      if (typeof r.id !== "number" || typeof r.subject !== "string" || typeof r.predicate !== "string")
         throw new Error("invalid quad shape in results");
     }
     ok(`ctx.query: empty pattern {} returns all quads (${rows.length} rows)`);
@@ -7635,11 +7635,11 @@ async function testCtxPrimitivesEdgeCases(ctx: Ctx) {
   // ctx.set creates new value if none exists (via ctx.set directly, not the set node)
   try {
     const q = await ctx.set("cprim:setnew", "newp", "newv");
-    if (q.s !== "cprim:setnew") throw new Error(`s mismatch`);
-    if (q.p !== "newp") throw new Error(`p mismatch`);
-    if (q.o !== "newv") throw new Error(`o mismatch`);
-    if (q.g !== "_") throw new Error(`g should be '_', got '${q.g}'`);
-    const rows = await ctx.query({ s: "cprim:setnew", p: "newp" });
+    if (q.subject !== "cprim:setnew") throw new Error(`s mismatch`);
+    if (q.predicate !== "newp") throw new Error(`p mismatch`);
+    if (q.object !== "newv") throw new Error(`o mismatch`);
+    if (q.graph !== "_") throw new Error(`g should be '_', got '${q.graph}'`);
+    const rows = await ctx.query({ subject: "cprim:setnew", predicate: "newp" });
     if (rows.length !== 1) throw new Error(`expected 1 row, got ${rows.length}`);
     ok("ctx.set: creates new value if none exists");
   } catch (e) {
@@ -7650,10 +7650,10 @@ async function testCtxPrimitivesEdgeCases(ctx: Ctx) {
   try {
     await ctx.set("cprim:setrepl", "val", "old-value");
     const q = await ctx.set("cprim:setrepl", "val", "new-value");
-    if (q.o !== "new-value") throw new Error(`expected 'new-value', got '${q.o}'`);
-    const rows = await ctx.query({ s: "cprim:setrepl", p: "val" });
+    if (q.object !== "new-value") throw new Error(`expected 'new-value', got '${q.object}'`);
+    const rows = await ctx.query({ subject: "cprim:setrepl", predicate: "val" });
     if (rows.length !== 1) throw new Error(`expected 1 row, got ${rows.length}`);
-    if (rows[0].o !== "new-value") throw new Error(`stored value mismatch`);
+    if (rows[0].object !== "new-value") throw new Error(`stored value mismatch`);
     ok("ctx.set: replaces existing value atomically");
   } catch (e) {
     fail("ctx.set replace", e);
@@ -7663,20 +7663,20 @@ async function testCtxPrimitivesEdgeCases(ctx: Ctx) {
   try {
     await ctx.set("cprim:setev", "val", "before");
     const events: any[] = [];
-    const unsub = ctx.on({ s: "cprim:setev", p: "val" }, (change) => {
-      events.push({ type: change.type, o: change.quad.o });
+    const unsub = ctx.on({ subject: "cprim:setev", predicate: "val" }, (change) => {
+      events.push({ type: change.type, object: change.quad.object });
     });
     await ctx.set("cprim:setev", "val", "after");
     unsub();
     // Should have 2 events: retract "before", assert "after"
     if (events.length !== 2)
       throw new Error(`expected 2 events, got ${events.length}: ${JSON.stringify(events)}`);
-    const retractEv = events.find((e) => e.type === "retract");
-    const assertEv = events.find((e) => e.type === "assert");
-    if (!retractEv) throw new Error("no retract event fired");
-    if (!assertEv) throw new Error("no assert event fired");
-    if (retractEv.o !== "before") throw new Error(`retract should be 'before', got '${retractEv.o}'`);
-    if (assertEv.o !== "after") throw new Error(`assert should be 'after', got '${assertEv.o}'`);
+    const removeEv = events.find((e) => e.type === "remove");
+    const insertEv = events.find((e) => e.type === "insert");
+    if (!removeEv) throw new Error("no retract event fired");
+    if (!insertEv) throw new Error("no assert event fired");
+    if (removeEv.object !== "before") throw new Error(`retract should be 'before', got '${removeEv.object}'`);
+    if (insertEv.object !== "after") throw new Error(`assert should be 'after', got '${insertEv.object}'`);
     ok("ctx.set: fires retract for old + assert for new value");
   } catch (e) {
     fail("ctx.set events", e);
@@ -7685,16 +7685,16 @@ async function testCtxPrimitivesEdgeCases(ctx: Ctx) {
   // ctx.set when creating new (no previous value): only fires assert, no retract
   try {
     const events: any[] = [];
-    const unsub = ctx.on({ s: "cprim:setnewev" }, (change) => {
-      events.push({ type: change.type, o: change.quad.o });
+    const unsub = ctx.on({ subject: "cprim:setnewev" }, (change) => {
+      events.push({ type: change.type, object: change.quad.object });
     });
     await ctx.set("cprim:setnewev", "val", "fresh");
     unsub();
     // Should only have assert event (delete returned 0 rows, so no retract fires)
-    const assertEvents = events.filter((e) => e.type === "assert");
-    const retractEvents = events.filter((e) => e.type === "retract");
-    if (assertEvents.length !== 1) throw new Error(`expected 1 assert event, got ${assertEvents.length}`);
-    if (retractEvents.length !== 0) throw new Error(`expected 0 retract events, got ${retractEvents.length}`);
+    const insertEvents = events.filter((e) => e.type === "insert");
+    const removeEvents = events.filter((e) => e.type === "remove");
+    if (insertEvents.length !== 1) throw new Error(`expected 1 assert event, got ${insertEvents.length}`);
+    if (removeEvents.length !== 0) throw new Error(`expected 0 retract events, got ${removeEvents.length}`);
     ok("ctx.set: new value fires only assert, no retract");
   } catch (e) {
     fail("ctx.set new-only events", e);
@@ -7704,14 +7704,14 @@ async function testCtxPrimitivesEdgeCases(ctx: Ctx) {
   try {
     await ctx.set("cprim:setidem", "val", "same");
     const events: any[] = [];
-    const unsub = ctx.on({ s: "cprim:setidem", p: "val" }, (change) => {
-      events.push({ type: change.type, o: change.quad.o });
+    const unsub = ctx.on({ subject: "cprim:setidem", predicate: "val" }, (change) => {
+      events.push({ type: change.type, object: change.quad.object });
     });
     const q = await ctx.set("cprim:setidem", "val", "same");
     unsub();
     // ctx.set always deletes then inserts (batch), so it fires retract + assert even for same value
-    if (q.o !== "same") throw new Error(`expected 'same', got '${q.o}'`);
-    const rows = await ctx.query({ s: "cprim:setidem", p: "val" });
+    if (q.object !== "same") throw new Error(`expected 'same', got '${q.object}'`);
+    const rows = await ctx.query({ subject: "cprim:setidem", predicate: "val" });
     if (rows.length !== 1) throw new Error(`expected 1 row, got ${rows.length}`);
     // Note: set always fires both events even for same value (different from assert idempotency)
     if (events.length !== 2) throw new Error(`expected 2 events (retract+assert), got ${events.length}`);
@@ -7724,9 +7724,9 @@ async function testCtxPrimitivesEdgeCases(ctx: Ctx) {
   try {
     await ctx.set("cprim:setcg", "val", "v1", "cg1");
     const q = await ctx.set("cprim:setcg", "val", "v2", "cg1");
-    if (q.o !== "v2") throw new Error(`expected 'v2', got '${q.o}'`);
-    if (q.g !== "cg1") throw new Error(`expected graph 'cg1', got '${q.g}'`);
-    const rows = await ctx.query({ s: "cprim:setcg", p: "val", g: "cg1" });
+    if (q.object !== "v2") throw new Error(`expected 'v2', got '${q.object}'`);
+    if (q.graph !== "cg1") throw new Error(`expected graph 'cg1', got '${q.graph}'`);
+    const rows = await ctx.query({ subject: "cprim:setcg", predicate: "val", graph: "cg1" });
     if (rows.length !== 1) throw new Error(`expected 1 row, got ${rows.length}`);
     ok("ctx.set: custom graph parameter works correctly");
   } catch (e) {
@@ -7737,8 +7737,8 @@ async function testCtxPrimitivesEdgeCases(ctx: Ctx) {
   try {
     const vec = new Array(1536).fill(0.5);
     const q = await ctx.set("cprim:setemb", "data", "embval", "_", vec);
-    if (q.o !== "embval") throw new Error(`expected 'embval', got '${q.o}'`);
-    const rows = await ctx.query({ s: "cprim:setemb", p: "data" });
+    if (q.object !== "embval") throw new Error(`expected 'embval', got '${q.object}'`);
+    const rows = await ctx.query({ subject: "cprim:setemb", predicate: "data" });
     if (rows.length !== 1) throw new Error(`expected 1, got ${rows.length}`);
     ok("ctx.set: with embedding vector stores correctly");
   } catch (e) {
@@ -7750,11 +7750,11 @@ async function testCtxPrimitivesEdgeCases(ctx: Ctx) {
   // Unsubscribe stops further callbacks
   try {
     let count = 0;
-    const unsub = ctx.on({ s: "cprim:onsub" }, () => { count++; });
-    await ctx.assert("cprim:onsub", "v", "1");
+    const unsub = ctx.on({ subject: "cprim:onsub" }, () => { count++; });
+    await ctx.insert("cprim:onsub", "v", "1");
     if (count !== 1) throw new Error(`expected 1 before unsub, got ${count}`);
     unsub();
-    await ctx.assert("cprim:onsub", "v", "2");
+    await ctx.insert("cprim:onsub", "v", "2");
     if (count !== 1) throw new Error(`expected still 1 after unsub, got ${count}`);
     ok("ctx.on: unsubscribe stops further callbacks");
   } catch (e) {
@@ -7763,7 +7763,7 @@ async function testCtxPrimitivesEdgeCases(ctx: Ctx) {
 
   // Double unsubscribe is safe (no crash)
   try {
-    const unsub = ctx.on({ s: "cprim:dblun" }, () => {});
+    const unsub = ctx.on({ subject: "cprim:dblun" }, () => {});
     unsub();
     unsub(); // should not throw
     ok("ctx.on: double unsubscribe is safe");
@@ -7776,10 +7776,10 @@ async function testCtxPrimitivesEdgeCases(ctx: Ctx) {
     let countA = 0;
     let countB = 0;
     let countC = 0;
-    const unsubA = ctx.on({ s: "cprim:multi" }, () => { countA++; });
-    const unsubB = ctx.on({ s: "cprim:multi" }, () => { countB++; });
-    const unsubC = ctx.on({ s: "cprim:multi" }, () => { countC++; });
-    await ctx.assert("cprim:multi", "ev", "go");
+    const unsubA = ctx.on({ subject: "cprim:multi" }, () => { countA++; });
+    const unsubB = ctx.on({ subject: "cprim:multi" }, () => { countB++; });
+    const unsubC = ctx.on({ subject: "cprim:multi" }, () => { countC++; });
+    await ctx.insert("cprim:multi", "ev", "go");
     unsubA(); unsubB(); unsubC();
     if (countA !== 1 || countB !== 1 || countC !== 1)
       throw new Error(`expected all 1, got A=${countA} B=${countB} C=${countC}`);
@@ -7791,18 +7791,18 @@ async function testCtxPrimitivesEdgeCases(ctx: Ctx) {
   // Callback receives correct event shape { type, quad }
   try {
     let captured: any = null;
-    const unsub = ctx.on({ s: "cprim:shape" }, (change) => { captured = change; });
-    await ctx.assert("cprim:shape", "sp", "sv", "sg");
+    const unsub = ctx.on({ subject: "cprim:shape" }, (change) => { captured = change; });
+    await ctx.insert("cprim:shape", "sp", "sv", "sg");
     unsub();
     if (!captured) throw new Error("callback never fired");
-    if (captured.type !== "assert") throw new Error(`type: expected 'assert', got '${captured.type}'`);
+    if (captured.type !== "insert") throw new Error(`type: expected 'insert', got '${captured.type}'`);
     if (!captured.quad) throw new Error("missing quad property");
-    if (captured.quad.s !== "cprim:shape") throw new Error(`quad.s mismatch`);
-    if (captured.quad.p !== "sp") throw new Error(`quad.p mismatch`);
-    if (captured.quad.o !== "sv") throw new Error(`quad.o mismatch`);
-    if (captured.quad.g !== "sg") throw new Error(`quad.g mismatch`);
+    if (captured.quad.subject !== "cprim:shape") throw new Error(`quad.subject mismatch`);
+    if (captured.quad.predicate !== "sp") throw new Error(`quad.predicate mismatch`);
+    if (captured.quad.object !== "sv") throw new Error(`quad.object mismatch`);
+    if (captured.quad.graph !== "sg") throw new Error(`quad.graph mismatch`);
     if (typeof captured.quad.id !== "number") throw new Error(`quad.id should be number`);
-    ok("ctx.on: callback receives { type: 'assert', quad: { id, s, p, o, g } }");
+    ok("ctx.on: callback receives { type: 'insert', quad: { id, s, p, o, g } }");
   } catch (e) {
     fail("ctx.on event shape", e);
   }
@@ -7810,8 +7810,8 @@ async function testCtxPrimitivesEdgeCases(ctx: Ctx) {
   // Pattern matching: match on o field
   try {
     let fired = false;
-    const unsub = ctx.on({ o: "cprim:target-obj" }, () => { fired = true; });
-    await ctx.assert("cprim:omatch1", "any", "cprim:target-obj");
+    const unsub = ctx.on({ object: "cprim:target-obj" }, () => { fired = true; });
+    await ctx.insert("cprim:omatch1", "any", "cprim:target-obj");
     unsub();
     if (!fired) throw new Error("did not fire for matching o");
     ok("ctx.on: pattern matching on o field works");
@@ -7822,8 +7822,8 @@ async function testCtxPrimitivesEdgeCases(ctx: Ctx) {
   // Pattern matching: match on g field
   try {
     let fired = false;
-    const unsub = ctx.on({ g: "cprim-target-graph" }, () => { fired = true; });
-    await ctx.assert("cprim:gmatch", "gp", "gv", "cprim-target-graph");
+    const unsub = ctx.on({ graph: "cprim-target-graph" }, () => { fired = true; });
+    await ctx.insert("cprim:gmatch", "gp", "gv", "cprim-target-graph");
     unsub();
     if (!fired) throw new Error("did not fire for matching g");
     ok("ctx.on: pattern matching on g field works");
@@ -7834,12 +7834,12 @@ async function testCtxPrimitivesEdgeCases(ctx: Ctx) {
   // Subscriber error does not prevent other subscribers from firing
   try {
     let secondFired = false;
-    const unsub1 = ctx.on({ s: "cprim:errfirst" }, () => { throw new Error("subscriber crash"); });
-    const unsub2 = ctx.on({ s: "cprim:errfirst" }, () => { secondFired = true; });
+    const unsub1 = ctx.on({ subject: "cprim:errfirst" }, () => { throw new Error("subscriber crash"); });
+    const unsub2 = ctx.on({ subject: "cprim:errfirst" }, () => { secondFired = true; });
     // Suppress console.error for this test
     const origError = console.error;
     console.error = () => {};
-    await ctx.assert("cprim:errfirst", "p", "v");
+    await ctx.insert("cprim:errfirst", "p", "v");
     console.error = origError;
     unsub1(); unsub2();
     if (!secondFired) throw new Error("second subscriber did not fire after first threw");
@@ -7852,8 +7852,8 @@ async function testCtxPrimitivesEdgeCases(ctx: Ctx) {
 
   // Call with args passes them correctly
   try {
-    await ctx.assert("cprim:callargs", "type", "Function");
-    await ctx.assert("cprim:callargs", "source", "return { got: args.x, also: args.y };");
+    await ctx.insert("cprim:callargs", "type", "Function");
+    await ctx.insert("cprim:callargs", "source", "return { got: args.x, also: args.y };");
     const result = await ctx.call("cprim:callargs", { x: 42, y: "hello" });
     if (result.got !== 42) throw new Error(`expected x=42, got ${result.got}`);
     if (result.also !== "hello") throw new Error(`expected y='hello', got ${result.also}`);
@@ -7864,8 +7864,8 @@ async function testCtxPrimitivesEdgeCases(ctx: Ctx) {
 
   // Call returns the function's return value
   try {
-    await ctx.assert("cprim:callret", "type", "Function");
-    await ctx.assert("cprim:callret", "source", "return 'specific-return-value';");
+    await ctx.insert("cprim:callret", "type", "Function");
+    await ctx.insert("cprim:callret", "source", "return 'specific-return-value';");
     const result = await ctx.call("cprim:callret");
     if (result !== "specific-return-value")
       throw new Error(`expected 'specific-return-value', got '${result}'`);
@@ -7887,8 +7887,8 @@ async function testCtxPrimitivesEdgeCases(ctx: Ctx) {
 
   // ctx.self returns correct node name inside a called function
   try {
-    await ctx.assert("cprim:selftest", "type", "Function");
-    await ctx.assert("cprim:selftest", "source", "return ctx.self;");
+    await ctx.insert("cprim:selftest", "type", "Function");
+    await ctx.insert("cprim:selftest", "source", "return ctx.self;");
     const result = await ctx.call("cprim:selftest");
     if (result !== "cprim:selftest")
       throw new Error(`expected 'cprim:selftest', got '${result}'`);
@@ -7899,8 +7899,8 @@ async function testCtxPrimitivesEdgeCases(ctx: Ctx) {
 
   // Call with undefined args — args should be undefined
   try {
-    await ctx.assert("cprim:callnoargs", "type", "Function");
-    await ctx.assert("cprim:callnoargs", "source", "return typeof args;");
+    await ctx.insert("cprim:callnoargs", "type", "Function");
+    await ctx.insert("cprim:callnoargs", "source", "return typeof args;");
     const result = await ctx.call("cprim:callnoargs");
     if (result !== "undefined")
       throw new Error(`expected 'undefined', got '${result}'`);
@@ -7911,9 +7911,9 @@ async function testCtxPrimitivesEdgeCases(ctx: Ctx) {
 
   // Call a node that returns a promise (async behavior)
   try {
-    await ctx.assert("cprim:callasync", "type", "Function");
-    await ctx.assert("cprim:callasync", "source",
-      "const q = await ctx.assert('cprim:asyncresult', 'done', 'yes'); return q.o;"
+    await ctx.insert("cprim:callasync", "type", "Function");
+    await ctx.insert("cprim:callasync", "source",
+      "const q = await ctx.insert('cprim:asyncresult', 'done', 'yes'); return q.object;"
     );
     const result = await ctx.call("cprim:callasync");
     if (result !== "yes") throw new Error(`expected 'yes', got '${result}'`);
@@ -7924,8 +7924,8 @@ async function testCtxPrimitivesEdgeCases(ctx: Ctx) {
 
   // Call a node that throws — error propagates
   try {
-    await ctx.assert("cprim:callerr", "type", "Function");
-    await ctx.assert("cprim:callerr", "source", "throw new Error('deliberate error');");
+    await ctx.insert("cprim:callerr", "type", "Function");
+    await ctx.insert("cprim:callerr", "source", "throw new Error('deliberate error');");
     await ctx.call("cprim:callerr");
     fail("ctx.call error propagation", "should have thrown");
   } catch (e: any) {
@@ -7937,10 +7937,10 @@ async function testCtxPrimitivesEdgeCases(ctx: Ctx) {
 
   // Nested ctx.call — inner call's return is available to outer
   try {
-    await ctx.assert("cprim:inner", "type", "Function");
-    await ctx.assert("cprim:inner", "source", "return 'from-inner';");
-    await ctx.assert("cprim:outer", "type", "Function");
-    await ctx.assert("cprim:outer", "source",
+    await ctx.insert("cprim:inner", "type", "Function");
+    await ctx.insert("cprim:inner", "source", "return 'from-inner';");
+    await ctx.insert("cprim:outer", "type", "Function");
+    await ctx.insert("cprim:outer", "source",
       "const r = await ctx.call('cprim:inner'); return 'outer-got-' + r;"
     );
     const result = await ctx.call("cprim:outer");
@@ -7960,8 +7960,8 @@ async function testCompilerCacheBehavior(ctx: Ctx) {
   // After calling sys:compiler, ctx.call uses the cached version
   // Call same node twice — second call should use cache (faster)
   try {
-    await ctx.assert("test:cachehit", "type", "Function");
-    await ctx.assert("test:cachehit", "source", "return 'cached-result'");
+    await ctx.insert("test:cachehit", "type", "Function");
+    await ctx.insert("test:cachehit", "source", "return 'cached-result'");
 
     const r1 = await ctx.call("test:cachehit");
     if (r1 !== "cached-result") throw new Error(`first call: got ${r1}`);
@@ -7977,15 +7977,15 @@ async function testCompilerCacheBehavior(ctx: Ctx) {
   // Verify cache is a Map on ctx — sys:compiler stores it internally
   // The cache invalidation on retract proves it was cached in the first place
   try {
-    await ctx.assert("test:cacheinval", "type", "Function");
-    await ctx.assert("test:cacheinval", "source", "return 'v1'");
+    await ctx.insert("test:cacheinval", "type", "Function");
+    await ctx.insert("test:cacheinval", "source", "return 'v1'");
 
     const r1 = await ctx.call("test:cacheinval");
     if (r1 !== "v1") throw new Error(`first call: got ${r1}`);
 
     // Retract and assert new source — cache should be invalidated
-    await ctx.retract("test:cacheinval", "source", "return 'v1'");
-    await ctx.assert("test:cacheinval", "source", "return 'v2'");
+    await ctx.remove("test:cacheinval", "source", "return 'v1'");
+    await ctx.insert("test:cacheinval", "source", "return 'v2'");
 
     const r2 = await ctx.call("test:cacheinval");
     if (r2 !== "v2") throw new Error(`after update: expected 'v2', got '${r2}'`);
@@ -8000,10 +8000,10 @@ async function testCompilerCacheBehavior(ctx: Ctx) {
 
   // Multiple distinct nodes each get their own cache entry
   try {
-    await ctx.assert("test:cacheA", "type", "Function");
-    await ctx.assert("test:cacheA", "source", "return 'A'");
-    await ctx.assert("test:cacheB", "type", "Function");
-    await ctx.assert("test:cacheB", "source", "return 'B'");
+    await ctx.insert("test:cacheA", "type", "Function");
+    await ctx.insert("test:cacheA", "source", "return 'A'");
+    await ctx.insert("test:cacheB", "type", "Function");
+    await ctx.insert("test:cacheB", "source", "return 'B'");
 
     // Interleave calls to verify independent caching
     const rA1 = await ctx.call("test:cacheA");
@@ -8020,18 +8020,18 @@ async function testCompilerCacheBehavior(ctx: Ctx) {
 
   // Modifying one node's source does not affect another node's cache
   try {
-    await ctx.assert("test:cacheIso1", "type", "Function");
-    await ctx.assert("test:cacheIso1", "source", "return 'iso1'");
-    await ctx.assert("test:cacheIso2", "type", "Function");
-    await ctx.assert("test:cacheIso2", "source", "return 'iso2'");
+    await ctx.insert("test:cacheIso1", "type", "Function");
+    await ctx.insert("test:cacheIso1", "source", "return 'iso1'");
+    await ctx.insert("test:cacheIso2", "type", "Function");
+    await ctx.insert("test:cacheIso2", "source", "return 'iso2'");
 
     // Warm both caches
     await ctx.call("test:cacheIso1");
     await ctx.call("test:cacheIso2");
 
     // Modify only iso1
-    await ctx.retract("test:cacheIso1", "source", "return 'iso1'");
-    await ctx.assert("test:cacheIso1", "source", "return 'iso1-updated'");
+    await ctx.remove("test:cacheIso1", "source", "return 'iso1'");
+    await ctx.insert("test:cacheIso1", "source", "return 'iso1-updated'");
 
     // iso2 should still return cached value
     const r2 = await ctx.call("test:cacheIso2");
@@ -8050,26 +8050,26 @@ async function testCompilerVersionSave(ctx: Ctx) {
   // When sys:compiler detects a source retract, it calls version:save
   try {
     const nodeName = "test:compver" + Date.now();
-    await ctx.assert(nodeName, "type", "Function");
-    await ctx.assert(nodeName, "source", "return 'original-ver'");
+    await ctx.insert(nodeName, "type", "Function");
+    await ctx.insert(nodeName, "source", "return 'original-ver'");
 
     // Warm the cache
     const r1 = await ctx.call(nodeName);
     if (r1 !== "original-ver") throw new Error(`first call: got ${r1}`);
 
     // Retract old source — should trigger version:save
-    await ctx.retract(nodeName, "source", "return 'original-ver'");
-    await ctx.assert(nodeName, "source", "return 'updated-ver'");
+    await ctx.remove(nodeName, "source", "return 'original-ver'");
+    await ctx.insert(nodeName, "source", "return 'updated-ver'");
 
     // Wait for async version:save
     await new Promise((r) => setTimeout(r, 150));
 
     // Check that a version was saved
-    const versions = await ctx.query({ s: nodeName, p: "version", g: "versions" });
+    const versions = await ctx.query({ subject: nodeName, predicate: "version", graph: "versions" });
     if (versions.length === 0)
       throw new Error("no version saved after source retract");
 
-    const versionData = JSON.parse(versions[0].o);
+    const versionData = JSON.parse(versions[0].object);
     if (versionData.source !== "return 'original-ver'")
       throw new Error(`saved version has wrong source: '${versionData.source}'`);
     if (versionData.seq !== 0)
@@ -8085,26 +8085,26 @@ async function testCompilerVersionSave(ctx: Ctx) {
   // Multiple source changes create sequential versions
   try {
     const nodeName = "test:compverseq" + Date.now();
-    await ctx.assert(nodeName, "type", "Function");
-    await ctx.assert(nodeName, "source", "return 'seq-v0'");
+    await ctx.insert(nodeName, "type", "Function");
+    await ctx.insert(nodeName, "source", "return 'seq-v0'");
     await ctx.call(nodeName); // warm
 
     // First update
-    await ctx.retract(nodeName, "source", "return 'seq-v0'");
-    await ctx.assert(nodeName, "source", "return 'seq-v1'");
+    await ctx.remove(nodeName, "source", "return 'seq-v0'");
+    await ctx.insert(nodeName, "source", "return 'seq-v1'");
     await new Promise((r) => setTimeout(r, 100));
 
     // Second update
-    await ctx.retract(nodeName, "source", "return 'seq-v1'");
-    await ctx.assert(nodeName, "source", "return 'seq-v2'");
+    await ctx.remove(nodeName, "source", "return 'seq-v1'");
+    await ctx.insert(nodeName, "source", "return 'seq-v2'");
     await new Promise((r) => setTimeout(r, 100));
 
-    const versions = await ctx.query({ s: nodeName, p: "version", g: "versions" });
+    const versions = await ctx.query({ subject: nodeName, predicate: "version", graph: "versions" });
     if (versions.length < 2)
       throw new Error(`expected at least 2 versions, got ${versions.length}`);
 
     const sorted = versions
-      .map((v) => JSON.parse(v.o))
+      .map((v) => JSON.parse(v.object))
       .sort((a: any, b: any) => a.seq - b.seq);
 
     if (sorted[0].source !== "return 'seq-v0'")
@@ -8120,12 +8120,12 @@ async function testCompilerVersionSave(ctx: Ctx) {
   // version:save is NOT called on assert (only on retract)
   try {
     const nodeName = "test:compverassert" + Date.now();
-    await ctx.assert(nodeName, "type", "Function");
-    await ctx.assert(nodeName, "source", "return 'assert-only'");
+    await ctx.insert(nodeName, "type", "Function");
+    await ctx.insert(nodeName, "source", "return 'assert-only'");
     await new Promise((r) => setTimeout(r, 100));
 
     // No retract happened, so no version should be saved
-    const versions = await ctx.query({ s: nodeName, p: "version", g: "versions" });
+    const versions = await ctx.query({ subject: nodeName, predicate: "version", graph: "versions" });
     if (versions.length !== 0)
       throw new Error(`expected 0 versions on initial assert, got ${versions.length}`);
     ok("compiler: version:save NOT called on initial assert (only on retract)");
@@ -8140,8 +8140,8 @@ async function testCompilerMetricsRecording(ctx: Ctx) {
   // sys:compiler records metrics for regular node calls
   try {
     const nodeName = "test:compmetr" + Date.now();
-    await ctx.assert(nodeName, "type", "Function");
-    await ctx.assert(nodeName, "source", "return 42");
+    await ctx.insert(nodeName, "type", "Function");
+    await ctx.insert(nodeName, "source", "return 42");
 
     // Call it 3 times
     await ctx.call(nodeName);
@@ -8152,13 +8152,13 @@ async function testCompilerMetricsRecording(ctx: Ctx) {
     await new Promise((r) => setTimeout(r, 150));
 
     const callsQuads = await ctx.query({
-      s: nodeName,
-      p: "metric:calls",
-      g: "metrics",
+      subject: nodeName,
+      predicate: "metric:calls",
+      graph: "metrics",
     });
     if (callsQuads.length === 0)
       throw new Error("no metric:calls recorded");
-    const calls = parseInt(callsQuads[0].o);
+    const calls = parseInt(callsQuads[0].object);
     if (calls < 3)
       throw new Error(`expected calls >= 3, got ${calls}`);
     ok("compiler: records metric:calls for regular node calls");
@@ -8169,8 +8169,8 @@ async function testCompilerMetricsRecording(ctx: Ctx) {
   // sys:compiler records metric:duration_ms
   try {
     const nodeName = "test:compmetrdu" + Date.now();
-    await ctx.assert(nodeName, "type", "Function");
-    await ctx.assert(nodeName, "source",
+    await ctx.insert(nodeName, "type", "Function");
+    await ctx.insert(nodeName, "source",
       "await new Promise(r => setTimeout(r, 20)); return 'slow'"
     );
 
@@ -8178,13 +8178,13 @@ async function testCompilerMetricsRecording(ctx: Ctx) {
     await new Promise((r) => setTimeout(r, 150));
 
     const durQuads = await ctx.query({
-      s: nodeName,
-      p: "metric:duration_ms",
-      g: "metrics",
+      subject: nodeName,
+      predicate: "metric:duration_ms",
+      graph: "metrics",
     });
     if (durQuads.length === 0)
       throw new Error("no metric:duration_ms recorded");
-    const duration = parseFloat(durQuads[0].o);
+    const duration = parseFloat(durQuads[0].object);
     if (duration < 15)
       throw new Error(`expected duration >= 15ms for 20ms sleep, got ${duration}`);
     ok("compiler: records metric:duration_ms with plausible values");
@@ -8195,20 +8195,20 @@ async function testCompilerMetricsRecording(ctx: Ctx) {
   // sys:compiler records metric:errors when a node throws
   try {
     const nodeName = "test:compmetrerr" + Date.now();
-    await ctx.assert(nodeName, "type", "Function");
-    await ctx.assert(nodeName, "source", "throw new Error('metrics-test-error')");
+    await ctx.insert(nodeName, "type", "Function");
+    await ctx.insert(nodeName, "source", "throw new Error('metrics-test-error')");
 
     try { await ctx.call(nodeName); } catch {}
     await new Promise((r) => setTimeout(r, 150));
 
     const errQuads = await ctx.query({
-      s: nodeName,
-      p: "metric:errors",
-      g: "metrics",
+      subject: nodeName,
+      predicate: "metric:errors",
+      graph: "metrics",
     });
     if (errQuads.length === 0)
       throw new Error("no metric:errors recorded");
-    const errors = parseInt(errQuads[0].o);
+    const errors = parseInt(errQuads[0].object);
     if (errors < 1)
       throw new Error(`expected errors >= 1, got ${errors}`);
     ok("compiler: records metric:errors when node throws");
@@ -8219,9 +8219,9 @@ async function testCompilerMetricsRecording(ctx: Ctx) {
   // sys:compiler skips metrics for 'metrics' node
   try {
     const metricsQuads = await ctx.query({
-      s: "metrics",
-      p: "metric:calls",
-      g: "metrics",
+      subject: "metrics",
+      predicate: "metric:calls",
+      graph: "metrics",
     });
     if (metricsQuads.length > 0)
       throw new Error("metrics node should NOT have metric:calls");
@@ -8237,9 +8237,9 @@ async function testCompilerMetricsRecording(ctx: Ctx) {
     await new Promise((r) => setTimeout(r, 100));
 
     const reportMetrics = await ctx.query({
-      s: "metrics:report",
-      p: "metric:calls",
-      g: "metrics",
+      subject: "metrics:report",
+      predicate: "metric:calls",
+      graph: "metrics",
     });
     if (reportMetrics.length > 0)
       throw new Error("metrics:report should NOT have metric:calls");
@@ -8257,14 +8257,14 @@ async function testSupervisorMaxRetries(ctx: Ctx) {
   // Create a node that always crashes — supervisor should give up after 3 retries
   try {
     const nodeName = "test:alwayscrash" + Date.now();
-    await ctx.assert(nodeName, "call_count", "0");
-    await ctx.assert(nodeName, "type", "Function");
-    await ctx.assert(nodeName, "source", `
-const countQuads = await ctx.query({ s: '${nodeName}', p: 'call_count' });
-const count = parseInt(countQuads[0].o);
+    await ctx.insert(nodeName, "call_count", "0");
+    await ctx.insert(nodeName, "type", "Function");
+    await ctx.insert(nodeName, "source", `
+const countQuads = await ctx.query({ subject: '${nodeName}', predicate: 'call_count' });
+const count = parseInt(countQuads[0].object);
 const newCount = count + 1;
-await ctx.retract('${nodeName}', 'call_count', String(count));
-await ctx.assert('${nodeName}', 'call_count', String(newCount));
+await ctx.remove('${nodeName}', 'call_count', String(count));
+await ctx.insert('${nodeName}', 'call_count', String(newCount));
 throw new Error('always-crash #' + newCount);
 `);
 
@@ -8273,8 +8273,8 @@ throw new Error('always-crash #' + newCount);
     // Wait for all retries: 500ms + 1000ms + 2000ms + margin
     await new Promise((r) => setTimeout(r, 4500));
 
-    const countQuads = await ctx.query({ s: nodeName, p: "call_count" });
-    const finalCount = parseInt(countQuads[0].o);
+    const countQuads = await ctx.query({ subject: nodeName, predicate: "call_count" });
+    const finalCount = parseInt(countQuads[0].object);
 
     // Should have been called exactly 4 times: 1 initial + 3 retries
     if (finalCount > 4)
@@ -8285,7 +8285,7 @@ throw new Error('always-crash #' + newCount);
     ok(`supervisor: stops retrying after max retries (${finalCount} total calls)`);
 
     // The node should NOT have a 'recovered' status since it never succeeded
-    const recoveredQuads = await ctx.query({ s: nodeName, p: "status", o: "recovered" });
+    const recoveredQuads = await ctx.query({ subject: nodeName, predicate: "status", object: "recovered" });
     if (recoveredQuads.length > 0)
       throw new Error("node should not have 'recovered' status — it always crashes");
     ok("supervisor: permanently-crashing node never reaches recovered state");
@@ -8300,9 +8300,9 @@ async function testSupervisorLifecycleCleanup(ctx: Ctx) {
   // When supervisor restarts a node due to source change, it emits lifecycle=cleanup
   try {
     const nodeName = "test:svlcclean" + Date.now();
-    await ctx.assert(nodeName, "type", "Function");
-    await ctx.assert(nodeName, "source", `
-await ctx.assert('${nodeName}', 'status', 'v1-running');
+    await ctx.insert(nodeName, "type", "Function");
+    await ctx.insert(nodeName, "source", `
+await ctx.insert('${nodeName}', 'status', 'v1-running');
 const signal = args && args.signal;
 if (signal) {
   await new Promise(r => signal.addEventListener('abort', r, { once: true }));
@@ -8311,8 +8311,8 @@ if (signal) {
 
     // Track lifecycle events via ctx.on
     const lifecycleEvents: any[] = [];
-    const unsub = ctx.on({ s: nodeName, p: "lifecycle" }, (change) => {
-      lifecycleEvents.push({ type: change.type, o: change.quad.o });
+    const unsub = ctx.on({ subject: nodeName, predicate: "lifecycle" }, (change) => {
+      lifecycleEvents.push({ type: change.type, object: change.quad.object });
     });
 
     // Spawn the node
@@ -8320,19 +8320,19 @@ if (signal) {
     await new Promise((r) => setTimeout(r, 100));
 
     // Verify running
-    const status1 = await ctx.query({ s: nodeName, p: "status", o: "v1-running" });
+    const status1 = await ctx.query({ subject: nodeName, predicate: "status", object: "v1-running" });
     if (status1.length === 0) throw new Error("node did not start");
 
     // Update source to trigger supervisor restart
-    await ctx.retract(nodeName, "source", `
-await ctx.assert('${nodeName}', 'status', 'v1-running');
+    await ctx.remove(nodeName, "source", `
+await ctx.insert('${nodeName}', 'status', 'v1-running');
 const signal = args && args.signal;
 if (signal) {
   await new Promise(r => signal.addEventListener('abort', r, { once: true }));
 }
 `);
-    await ctx.assert(nodeName, "source", `
-await ctx.assert('${nodeName}', 'status', 'v2-running');
+    await ctx.insert(nodeName, "source", `
+await ctx.insert('${nodeName}', 'status', 'v2-running');
 const signal = args && args.signal;
 if (signal) {
   await new Promise(r => signal.addEventListener('abort', r, { once: true }));
@@ -8344,10 +8344,10 @@ if (signal) {
 
     // Supervisor should have emitted lifecycle=cleanup (assert then retract)
     const cleanupAsserts = lifecycleEvents.filter(
-      (e) => e.type === "assert" && e.o === "cleanup"
+      (e) => e.type === "insert" && e.object === "cleanup"
     );
     const cleanupRetracts = lifecycleEvents.filter(
-      (e) => e.type === "retract" && e.o === "cleanup"
+      (e) => e.type === "remove" && e.object === "cleanup"
     );
 
     if (cleanupAsserts.length === 0)
@@ -8359,7 +8359,7 @@ if (signal) {
     ok("supervisor: emits lifecycle=cleanup retract after abort");
 
     // Verify v2 is now running
-    const status2 = await ctx.query({ s: nodeName, p: "status", o: "v2-running" });
+    const status2 = await ctx.query({ subject: nodeName, predicate: "status", object: "v2-running" });
     if (status2.length === 0) throw new Error("v2 did not start after restart");
     ok("supervisor: node successfully restarted after lifecycle cleanup");
   } catch (e) {
@@ -8373,46 +8373,46 @@ async function testSupervisorRetryCountReset(ctx: Ctx) {
   // Source change on a spawned node resets retry count
   try {
     const nodeName = "test:svretrycountreset" + Date.now();
-    await ctx.assert(nodeName, "call_count", "0");
-    await ctx.assert(nodeName, "type", "Function");
+    await ctx.insert(nodeName, "call_count", "0");
+    await ctx.insert(nodeName, "type", "Function");
 
     // First version: crashes twice then succeeds
     const src1 = `
-const countQuads = await ctx.query({ s: '${nodeName}', p: 'call_count' });
-const count = parseInt(countQuads[0].o);
+const countQuads = await ctx.query({ subject: '${nodeName}', predicate: 'call_count' });
+const count = parseInt(countQuads[0].object);
 const newCount = count + 1;
-await ctx.retract('${nodeName}', 'call_count', String(count));
-await ctx.assert('${nodeName}', 'call_count', String(newCount));
+await ctx.remove('${nodeName}', 'call_count', String(count));
+await ctx.insert('${nodeName}', 'call_count', String(newCount));
 if (newCount <= 1) throw new Error('crash-v1 #' + newCount);
-await ctx.assert('${nodeName}', 'phase', 'v1-stable');
+await ctx.insert('${nodeName}', 'phase', 'v1-stable');
 const signal = args && args.signal;
 if (signal) {
   await new Promise(r => signal.addEventListener('abort', r, { once: true }));
 }
 `;
-    await ctx.assert(nodeName, "source", src1);
+    await ctx.insert(nodeName, "source", src1);
 
     await ctx.call("spawn", { node: nodeName });
     await new Promise((r) => setTimeout(r, 1500));
 
     // Verify v1 stabilized
-    const v1Stable = await ctx.query({ s: nodeName, p: "phase", o: "v1-stable" });
+    const v1Stable = await ctx.query({ subject: nodeName, predicate: "phase", object: "v1-stable" });
     if (v1Stable.length === 0) throw new Error("v1 did not stabilize");
 
     // Now change source — retry count should be reset to 0
-    await ctx.retract(nodeName, "source", src1);
+    await ctx.remove(nodeName, "source", src1);
     const src2 = `
-await ctx.assert('${nodeName}', 'phase', 'v2-running');
+await ctx.insert('${nodeName}', 'phase', 'v2-running');
 const signal = args && args.signal;
 if (signal) {
   await new Promise(r => signal.addEventListener('abort', r, { once: true }));
 }
 `;
-    await ctx.assert(nodeName, "source", src2);
+    await ctx.insert(nodeName, "source", src2);
 
     await new Promise((r) => setTimeout(r, 300));
 
-    const v2Running = await ctx.query({ s: nodeName, p: "phase", o: "v2-running" });
+    const v2Running = await ctx.query({ subject: nodeName, predicate: "phase", object: "v2-running" });
     if (v2Running.length === 0)
       throw new Error("v2 did not start — retry count may not have been reset");
 
@@ -8430,8 +8430,8 @@ async function testSpawnReturnsBehavior(ctx: Ctx) {
   // spawn returns an AbortController immediately (doesn't block until node finishes)
   try {
     const nodeName = "test:spawnret" + Date.now();
-    await ctx.assert(nodeName, "type", "Function");
-    await ctx.assert(nodeName, "source", `
+    await ctx.insert(nodeName, "type", "Function");
+    await ctx.insert(nodeName, "source", `
 await new Promise(r => setTimeout(r, 5000)); // long-running
 return 'done';
 `);
@@ -8465,47 +8465,47 @@ async function testSpawnSignalDelivery(ctx: Ctx) {
   // Spawned node receives args.signal and can listen for abort
   try {
     const nodeName = "test:spawnsig" + Date.now();
-    await ctx.assert(nodeName, "type", "Function");
-    await ctx.assert(nodeName, "source", `
+    await ctx.insert(nodeName, "type", "Function");
+    await ctx.insert(nodeName, "source", `
 // Verify args.signal exists and is an AbortSignal
 if (!args || !args.signal) {
-  await ctx.assert('${nodeName}', 'error', 'no-signal');
+  await ctx.insert('${nodeName}', 'error', 'no-signal');
   return;
 }
 if (typeof args.signal.aborted !== 'boolean') {
-  await ctx.assert('${nodeName}', 'error', 'bad-signal');
+  await ctx.insert('${nodeName}', 'error', 'bad-signal');
   return;
 }
-await ctx.assert('${nodeName}', 'signal', 'received');
-await ctx.assert('${nodeName}', 'aborted-before', String(args.signal.aborted));
+await ctx.insert('${nodeName}', 'signal', 'received');
+await ctx.insert('${nodeName}', 'aborted-before', String(args.signal.aborted));
 
 // Wait for abort
 await new Promise(r => args.signal.addEventListener('abort', r, { once: true }));
-await ctx.assert('${nodeName}', 'aborted-after', 'true');
+await ctx.insert('${nodeName}', 'aborted-after', 'true');
 `);
 
     const ac = await ctx.call("spawn", { node: nodeName });
     await new Promise((r) => setTimeout(r, 100));
 
     // Verify signal was received
-    const signalQuads = await ctx.query({ s: nodeName, p: "signal", o: "received" });
+    const signalQuads = await ctx.query({ subject: nodeName, predicate: "signal", object: "received" });
     if (signalQuads.length === 0) {
-      const errorQuads = await ctx.query({ s: nodeName, p: "error" });
-      throw new Error(`signal not received: ${errorQuads[0]?.o || "unknown error"}`);
+      const errorQuads = await ctx.query({ subject: nodeName, predicate: "error" });
+      throw new Error(`signal not received: ${errorQuads[0]?.object || "unknown error"}`);
     }
     ok("spawn: node receives args.signal (AbortSignal)");
 
     // Verify signal was not aborted at start
-    const abortedBefore = await ctx.query({ s: nodeName, p: "aborted-before" });
-    if (abortedBefore[0]?.o !== "false")
-      throw new Error(`signal.aborted at start was ${abortedBefore[0]?.o}`);
+    const abortedBefore = await ctx.query({ subject: nodeName, predicate: "aborted-before" });
+    if (abortedBefore[0]?.object !== "false")
+      throw new Error(`signal.aborted at start was ${abortedBefore[0]?.object}`);
     ok("spawn: signal.aborted is false when node starts");
 
     // Abort and verify the node detects it
     ac.abort();
     await new Promise((r) => setTimeout(r, 100));
 
-    const abortedAfter = await ctx.query({ s: nodeName, p: "aborted-after", o: "true" });
+    const abortedAfter = await ctx.query({ subject: nodeName, predicate: "aborted-after", object: "true" });
     if (abortedAfter.length === 0)
       throw new Error("node did not detect abort event");
     ok("spawn: node detects abort signal after ac.abort()");
@@ -8520,29 +8520,29 @@ async function testSpawnRetractCleanup(ctx: Ctx) {
   // Retracting the Spawned quad triggers abort (via supervisor watcher)
   try {
     const nodeName = "test:spawnclean" + Date.now();
-    await ctx.assert(nodeName, "type", "Function");
-    await ctx.assert(nodeName, "source", `
-await ctx.assert('${nodeName}', 'state', 'alive');
+    await ctx.insert(nodeName, "type", "Function");
+    await ctx.insert(nodeName, "source", `
+await ctx.insert('${nodeName}', 'state', 'alive');
 const signal = args && args.signal;
 if (signal) {
   await new Promise(r => signal.addEventListener('abort', r, { once: true }));
 }
-await ctx.assert('${nodeName}', 'state-final', 'aborted');
+await ctx.insert('${nodeName}', 'state-final', 'aborted');
 `);
 
     await ctx.call("spawn", { node: nodeName });
     await new Promise((r) => setTimeout(r, 100));
 
     // Verify it's running
-    const alive = await ctx.query({ s: nodeName, p: "state", o: "alive" });
+    const alive = await ctx.query({ subject: nodeName, predicate: "state", object: "alive" });
     if (alive.length === 0) throw new Error("node did not start");
 
     // Verify it has Spawned type quad
-    const spawned = await ctx.query({ s: nodeName, p: "type", o: "Spawned" });
+    const spawned = await ctx.query({ subject: nodeName, predicate: "type", object: "Spawned" });
     if (spawned.length === 0) throw new Error("no Spawned type quad");
 
     // Retract the Spawned quad — supervisor should abort the node
-    await ctx.retract(nodeName, "type", "Spawned");
+    await ctx.remove(nodeName, "type", "Spawned");
     await new Promise((r) => setTimeout(r, 200));
 
     // The controller should be aborted
@@ -8552,7 +8552,7 @@ await ctx.assert('${nodeName}', 'state-final', 'aborted');
     ok("spawn: retracting Spawned quad aborts the running node");
 
     // Verify the node's post-abort code ran (state-final)
-    const final = await ctx.query({ s: nodeName, p: "state-final", o: "aborted" });
+    const final = await ctx.query({ subject: nodeName, predicate: "state-final", object: "aborted" });
     if (final.length > 0) {
       ok("spawn: node continues execution after abort signal (cleanup path)");
     } else {
@@ -8573,12 +8573,12 @@ async function testSpawnConcurrency(ctx: Ctx) {
     for (let i = 0; i < 5; i++) {
       const name = `${prefix}:${i}`;
       names.push(name);
-      await ctx.assert(name, "type", "Function");
-      await ctx.assert(name, "source", `
+      await ctx.insert(name, "type", "Function");
+      await ctx.insert(name, "source", `
 const start = Date.now();
 await new Promise(r => setTimeout(r, 100));
-await ctx.assert('${name}', 'elapsed', String(Date.now() - start));
-await ctx.assert('${name}', 'concurrent-status', 'done');
+await ctx.insert('${name}', 'elapsed', String(Date.now() - start));
+await ctx.insert('${name}', 'concurrent-status', 'done');
 const signal = args && args.signal;
 if (signal) {
   await new Promise(r => signal.addEventListener('abort', r, { once: true }));
@@ -8600,7 +8600,7 @@ if (signal) {
     // All should be done
     let doneCount = 0;
     for (const name of names) {
-      const done = await ctx.query({ s: name, p: "concurrent-status", o: "done" });
+      const done = await ctx.query({ subject: name, predicate: "concurrent-status", object: "done" });
       if (done.length > 0) doneCount++;
     }
     if (doneCount < 5)
@@ -8630,8 +8630,8 @@ async function testSpawnSetsSpawnedType(ctx: Ctx) {
   // spawn node asserts (node, 'type', 'Spawned')
   try {
     const nodeName = "test:sptype" + Date.now();
-    await ctx.assert(nodeName, "type", "Function");
-    await ctx.assert(nodeName, "source", `
+    await ctx.insert(nodeName, "type", "Function");
+    await ctx.insert(nodeName, "source", `
 const signal = args && args.signal;
 if (signal) {
   await new Promise(r => signal.addEventListener('abort', r, { once: true }));
@@ -8640,13 +8640,13 @@ if (signal) {
 
     const ac = await ctx.call("spawn", { node: nodeName });
 
-    const spawnedQuads = await ctx.query({ s: nodeName, p: "type", o: "Spawned" });
+    const spawnedQuads = await ctx.query({ subject: nodeName, predicate: "type", object: "Spawned" });
     if (spawnedQuads.length === 0)
       throw new Error("spawn did not set type=Spawned");
     ok("spawn: sets type=Spawned quad on the node");
 
     // Node still has its Function type
-    const funcQuads = await ctx.query({ s: nodeName, p: "type", o: "Function" });
+    const funcQuads = await ctx.query({ subject: nodeName, predicate: "type", object: "Function" });
     if (funcQuads.length === 0)
       throw new Error("node lost its Function type after spawn");
     ok("spawn: node retains type=Function alongside type=Spawned");
@@ -9156,15 +9156,15 @@ async function testGraphDescribe(ctx: Ctx) {
     fail("graph:describe predicates grouped", e);
   }
 
-  // Test: quads have s, p, o, g fields
+  // Test: quads have subject, predicate, object, graph fields
   try {
     const result = await ctx.call("graph:describe", { subject: "main" });
     const q = result.quads[0];
-    if (!("s" in q) || !("p" in q) || !("o" in q) || !("g" in q))
+    if (!("subject" in q) || !("predicate" in q) || !("object" in q) || !("graph" in q))
       throw new Error(`quad missing fields, got keys: ${Object.keys(q).join(",")}`);
-    if (q.s !== "main")
-      throw new Error(`expected s='main', got '${q.s}'`);
-    ok("graph:describe quads have s, p, o, g fields");
+    if (q.subject !== "main")
+      throw new Error(`expected subject='main', got '${q.subject}'`);
+    ok("graph:describe quads have subject, predicate, object, graph fields");
   } catch (e) {
     fail("graph:describe quad fields", e);
   }
@@ -9254,10 +9254,10 @@ async function testGraphSubjects(ctx: Ctx) {
     fail("graph:subjects non-existent type", e);
   }
 
-  // Test: includes subjects that are not Function nodes (e.g., session data)
+  // Test: includes subjects that are not Function nodes (e.graph., session data)
   try {
     // Create a non-function subject
-    await ctx.assert("test:graph-subj-data", "kind", "data-item");
+    await ctx.insert("test:graph-subj-data", "kind", "data-item");
     const result = await ctx.call("graph:subjects", {});
     const subjects = result.map((r: any) => r.subject);
     if (!subjects.includes("test:graph-subj-data"))
@@ -9315,8 +9315,8 @@ async function testGraphDeps(ctx: Ctx) {
   // Test: calls are deduplicated
   try {
     // Create a node that calls the same node twice
-    await ctx.assert("test:dup-calls", "type", "Function");
-    await ctx.assert("test:dup-calls", "source", "await ctx.call('shell', {cmd:'echo 1'}); await ctx.call('shell', {cmd:'echo 2'}); return 'done';");
+    await ctx.insert("test:dup-calls", "type", "Function");
+    await ctx.insert("test:dup-calls", "source", "await ctx.call('shell', {cmd:'echo 1'}); await ctx.call('shell', {cmd:'echo 2'}); return 'done';");
     const result = await ctx.call("graph:deps", { node: "test:dup-calls" });
     const shellCount = result.calls.filter((c: string) => c === "shell").length;
     if (shellCount !== 1)
@@ -9328,8 +9328,8 @@ async function testGraphDeps(ctx: Ctx) {
 
   // Test: node with no calls returns empty calls array
   try {
-    await ctx.assert("test:no-calls", "type", "Function");
-    await ctx.assert("test:no-calls", "source", "return 42;");
+    await ctx.insert("test:no-calls", "type", "Function");
+    await ctx.insert("test:no-calls", "source", "return 42;");
     const result = await ctx.call("graph:deps", { node: "test:no-calls" });
     if (result.calls.length !== 0)
       throw new Error(`expected 0 calls, got ${result.calls.length}: [${result.calls.join(",")}]`);
@@ -9426,9 +9426,9 @@ async function testInspectNode(ctx: Ctx) {
   // Test: inspect a Tool node shows isTool and toolSchema
   try {
     // Find a node that is a Tool
-    const toolQuads = await ctx.query({ p: "type", o: "Tool" });
+    const toolQuads = await ctx.query({ predicate: "type", object: "Tool" });
     if (toolQuads.length > 0) {
-      const toolNode = toolQuads[0].s;
+      const toolNode = toolQuads[0].subject;
       const result = await ctx.call("inspect", { node: toolNode });
       if (result.isTool !== true)
         throw new Error(`expected isTool=true for '${toolNode}', got ${result.isTool}`);
@@ -9463,8 +9463,8 @@ async function testInspectNode(ctx: Ctx) {
   try {
     // Create a node with very long source
     const longSource = "return '" + "x".repeat(2500) + "';";
-    await ctx.assert("test:long-inspect", "type", "Function");
-    await ctx.assert("test:long-inspect", "source", longSource);
+    await ctx.insert("test:long-inspect", "type", "Function");
+    await ctx.insert("test:long-inspect", "source", longSource);
     const result = await ctx.call("inspect", { node: "test:long-inspect" });
     if (result.sourceLength !== longSource.length)
       throw new Error(`expected sourceLength=${longSource.length}, got ${result.sourceLength}`);
@@ -9497,10 +9497,10 @@ async function testCronDeep(ctx: Ctx) {
 
   // Test 1: Cron fires within expected time window
   try {
-    await ctx.assert("test:crondeep1", "type", "Function");
-    await ctx.assert("test:crondeep1", "source", `
+    await ctx.insert("test:crondeep1", "type", "Function");
+    await ctx.insert("test:crondeep1", "source", `
 const ts = Date.now();
-await ctx.assert('test:crondeep1', 'fired:' + ts, String(ts));
+await ctx.insert('test:crondeep1', 'fired:' + ts, String(ts));
 return ts;
 `);
 
@@ -9511,8 +9511,8 @@ return ts;
     ac.abort();
     await new Promise(r => setTimeout(r, 50));
 
-    const fired = await ctx.query({ s: "test:crondeep1" });
-    const firedQuads = fired.filter((q: any) => q.p.startsWith("fired:"));
+    const fired = await ctx.query({ subject: "test:crondeep1" });
+    const firedQuads = fired.filter((q: any) => q.predicate.startsWith("fired:"));
     // 500ms / 150ms interval = ~3 ticks (give margin: 2-5)
     if (firedQuads.length < 2)
       throw new Error(`expected >= 2 ticks in 500ms with 150ms interval, got ${firedQuads.length}`);
@@ -9525,38 +9525,38 @@ return ts;
 
   // Test 2: Cron registers CronJob-typed quads in graph
   try {
-    await ctx.assert("test:crondeep2", "type", "Function");
-    await ctx.assert("test:crondeep2", "source", "return 'ok'");
+    await ctx.insert("test:crondeep2", "type", "Function");
+    await ctx.insert("test:crondeep2", "source", "return 'ok'");
 
     const ac = new AbortController();
     const cronPromise = ctx.call("cron", { node: "test:crondeep2", interval: 200, signal: ac.signal });
     await new Promise(r => setTimeout(r, 100));
 
     // Check CronJob quads exist
-    const cronJobs = await ctx.query({ p: "type", o: "CronJob" });
+    const cronJobs = await ctx.query({ predicate: "type", object: "CronJob" });
     const ourJob = cronJobs.find((q: any) => {
-      return q.s.includes("test:crondeep2");
+      return q.subject.includes("test:crondeep2");
     });
     if (!ourJob) throw new Error("CronJob quad not found for test:crondeep2");
 
     // Verify companion quads
-    const nodeQuad = await ctx.query({ s: ourJob.s, p: "cron:node" });
-    if (nodeQuad.length === 0 || nodeQuad[0].o !== "test:crondeep2")
+    const nodeQuad = await ctx.query({ subject: ourJob.subject, predicate: "cron:node" });
+    if (nodeQuad.length === 0 || nodeQuad[0].object !== "test:crondeep2")
       throw new Error("cron:node quad missing or incorrect");
 
-    const intervalQuad = await ctx.query({ s: ourJob.s, p: "cron:interval" });
-    if (intervalQuad.length === 0 || intervalQuad[0].o !== "200")
+    const intervalQuad = await ctx.query({ subject: ourJob.subject, predicate: "cron:interval" });
+    if (intervalQuad.length === 0 || intervalQuad[0].object !== "200")
       throw new Error("cron:interval quad missing or incorrect");
 
-    const statusQuad = await ctx.query({ s: ourJob.s, p: "cron:status" });
-    if (statusQuad.length === 0 || statusQuad[0].o !== "running")
+    const statusQuad = await ctx.query({ subject: ourJob.subject, predicate: "cron:status" });
+    if (statusQuad.length === 0 || statusQuad[0].object !== "running")
       throw new Error("cron:status should be 'running'");
 
-    const startedQuad = await ctx.query({ s: ourJob.s, p: "cron:started" });
+    const startedQuad = await ctx.query({ subject: ourJob.subject, predicate: "cron:started" });
     if (startedQuad.length === 0)
       throw new Error("cron:started timestamp missing");
     // Validate ISO format
-    const ts = new Date(startedQuad[0].o);
+    const ts = new Date(startedQuad[0].object);
     if (isNaN(ts.getTime()))
       throw new Error("cron:started is not valid ISO timestamp");
 
@@ -9569,8 +9569,8 @@ return ts;
 
   // Test 3: Stop cron via AbortSignal updates status to 'stopped'
   try {
-    await ctx.assert("test:crondeep3", "type", "Function");
-    await ctx.assert("test:crondeep3", "source", "return 'tick'");
+    await ctx.insert("test:crondeep3", "type", "Function");
+    await ctx.insert("test:crondeep3", "source", "return 'tick'");
 
     const ac = new AbortController();
     const cronPromise = ctx.call("cron", { node: "test:crondeep3", interval: 100, signal: ac.signal });
@@ -9579,22 +9579,22 @@ return ts;
     await cronPromise;
 
     // Verify status changed to stopped
-    const cronJobs = await ctx.query({ p: "cron:node", o: "test:crondeep3" });
+    const cronJobs = await ctx.query({ predicate: "cron:node", object: "test:crondeep3" });
     if (cronJobs.length === 0) throw new Error("no cron job found");
-    const cronId = cronJobs[cronJobs.length - 1].s;
+    const cronId = cronJobs[cronJobs.length - 1].subject;
 
-    const statusQuad = await ctx.query({ s: cronId, p: "cron:status" });
-    if (statusQuad.length === 0 || statusQuad[0].o !== "stopped")
-      throw new Error(`expected status='stopped', got '${statusQuad[0]?.o}'`);
+    const statusQuad = await ctx.query({ subject: cronId, predicate: "cron:status" });
+    if (statusQuad.length === 0 || statusQuad[0].object !== "stopped")
+      throw new Error(`expected status='stopped', got '${statusQuad[0]?.object}'`);
 
-    const stoppedQuad = await ctx.query({ s: cronId, p: "cron:stopped" });
+    const stoppedQuad = await ctx.query({ subject: cronId, predicate: "cron:stopped" });
     if (stoppedQuad.length === 0)
       throw new Error("cron:stopped timestamp not set after abort");
 
-    const ticksQuad = await ctx.query({ s: cronId, p: "cron:ticks" });
+    const ticksQuad = await ctx.query({ subject: cronId, predicate: "cron:ticks" });
     if (ticksQuad.length === 0)
       throw new Error("cron:ticks not recorded after abort");
-    const ticks = parseInt(ticksQuad[0].o);
+    const ticks = parseInt(ticksQuad[0].object);
     if (ticks < 1)
       throw new Error(`expected >= 1 tick before abort, got ${ticks}`);
 
@@ -9605,13 +9605,13 @@ return ts;
 
   // Test 4: Multiple cron jobs run independently
   try {
-    await ctx.assert("test:crona", "type", "Function");
-    await ctx.assert("test:crona", "source", `
-await ctx.assert('test:crona', 'tick:' + Date.now(), 'a');
+    await ctx.insert("test:crona", "type", "Function");
+    await ctx.insert("test:crona", "source", `
+await ctx.insert('test:crona', 'tick:' + Date.now(), 'a');
 `);
-    await ctx.assert("test:cronb", "type", "Function");
-    await ctx.assert("test:cronb", "source", `
-await ctx.assert('test:cronb', 'tick:' + Date.now(), 'b');
+    await ctx.insert("test:cronb", "type", "Function");
+    await ctx.insert("test:cronb", "source", `
+await ctx.insert('test:cronb', 'tick:' + Date.now(), 'b');
 `);
 
     const ac1 = new AbortController();
@@ -9624,8 +9624,8 @@ await ctx.assert('test:cronb', 'tick:' + Date.now(), 'b');
     ac2.abort();
     await Promise.all([p1, p2]);
 
-    const ticksA = (await ctx.query({ s: "test:crona" })).filter((q: any) => q.p.startsWith("tick:"));
-    const ticksB = (await ctx.query({ s: "test:cronb" })).filter((q: any) => q.p.startsWith("tick:"));
+    const ticksA = (await ctx.query({ subject: "test:crona" })).filter((q: any) => q.predicate.startsWith("tick:"));
+    const ticksB = (await ctx.query({ subject: "test:cronb" })).filter((q: any) => q.predicate.startsWith("tick:"));
 
     if (ticksA.length < 2) throw new Error(`crona: expected >= 2 ticks, got ${ticksA.length}`);
     if (ticksB.length < 2) throw new Error(`cronb: expected >= 2 ticks, got ${ticksB.length}`);
@@ -9670,10 +9670,10 @@ await ctx.assert('test:cronb', 'tick:' + Date.now(), 'b');
   // Test 8: Cron interval timing is not faster than specified
   try {
     const timestamps: number[] = [];
-    await ctx.assert("test:crontiming", "type", "Function");
-    await ctx.assert("test:crontiming", "source", `
+    await ctx.insert("test:crontiming", "type", "Function");
+    await ctx.insert("test:crontiming", "source", `
 const ts = Date.now();
-await ctx.assert('test:crontiming', 'ts:' + ts, String(ts));
+await ctx.insert('test:crontiming', 'ts:' + ts, String(ts));
 `);
 
     const ac = new AbortController();
@@ -9682,9 +9682,9 @@ await ctx.assert('test:crontiming', 'ts:' + ts, String(ts));
     ac.abort();
     await cronPromise;
 
-    const tsQuads = (await ctx.query({ s: "test:crontiming" }))
-      .filter((q: any) => q.p.startsWith("ts:"))
-      .map((q: any) => parseInt(q.o))
+    const tsQuads = (await ctx.query({ subject: "test:crontiming" }))
+      .filter((q: any) => q.predicate.startsWith("ts:"))
+      .map((q: any) => parseInt(q.object))
       .sort((a: number, b: number) => a - b);
 
     if (tsQuads.length >= 2) {
@@ -9706,8 +9706,8 @@ await ctx.assert('test:crontiming', 'ts:' + ts, String(ts));
 
   // Test 9: Cron with cronArgs passes args to target node
   try {
-    await ctx.assert("test:cronwithargs", "type", "Function");
-    await ctx.assert("test:cronwithargs", "source", `
+    await ctx.insert("test:cronwithargs", "type", "Function");
+    await ctx.insert("test:cronwithargs", "source", `
 const val = args && args.greeting;
 await ctx.set('test:cronwithargs', 'received', val || 'none');
 return val;
@@ -9724,9 +9724,9 @@ return val;
     ac.abort();
     await cronPromise;
 
-    const received = await ctx.query({ s: "test:cronwithargs", p: "received" });
-    if (received.length === 0 || received[0].o !== "hello-cron")
-      throw new Error(`expected 'hello-cron', got '${received[0]?.o}'`);
+    const received = await ctx.query({ subject: "test:cronwithargs", predicate: "received" });
+    if (received.length === 0 || received[0].object !== "hello-cron")
+      throw new Error(`expected 'hello-cron', got '${received[0]?.object}'`);
     ok("cron passes cronArgs to target node");
   } catch (e) {
     fail("cron cronArgs", e);
@@ -9734,8 +9734,8 @@ return val;
 
   // Test 10: Cron return value includes cronId, node, interval
   try {
-    await ctx.assert("test:cronret", "type", "Function");
-    await ctx.assert("test:cronret", "source", "return 'ok'");
+    await ctx.insert("test:cronret", "type", "Function");
+    await ctx.insert("test:cronret", "source", "return 'ok'");
 
     const result = await ctx.call("cron", { node: "test:cronret", interval: 60000 });
     if (!result.cronId || !result.cronId.startsWith("cron:test:cronret:"))
@@ -9956,14 +9956,14 @@ async function testEmbedVectorSearchDeep(ctx: Ctx) {
     const uniqueText = "unique_embed_test_" + Date.now();
     await ctx.call("embed", { text: uniqueText });
 
-    const embQuads = await ctx.query({ p: "embedding", g: "embeddings" });
-    const match = embQuads.find((q: any) => q.o === uniqueText);
+    const embQuads = await ctx.query({ predicate: "embedding", graph: "embeddings" });
+    const match = embQuads.find((q: any) => q.object === uniqueText);
     if (!match)
       throw new Error("embedding quad not found for unique text");
-    if (match.g !== "embeddings")
-      throw new Error(`expected graph='embeddings', got '${match.g}'`);
-    if (!match.s.startsWith("emb:"))
-      throw new Error(`expected subject starting with 'emb:', got '${match.s}'`);
+    if (match.graph !== "embeddings")
+      throw new Error(`expected graph='embeddings', got '${match.graph}'`);
+    if (!match.subject.startsWith("emb:"))
+      throw new Error(`expected subject starting with 'emb:', got '${match.subject}'`);
     ok("embed: stores result in graph with graph='embeddings' and emb: prefix");
   } catch (e) {
     fail("embed graph storage", e);
@@ -10019,10 +10019,10 @@ async function testEmbedVectorSearchDeep(ctx: Ctx) {
 
     // Search for the exact text — should find it with high similarity
     const results = await ctx.call("vector:search", { text: uniqueA, k: 20 });
-    const embResults = results.filter((r: any) => r.quad.g === "embeddings");
+    const embResults = results.filter((r: any) => r.quad.graph === "embeddings");
 
     // Find the exact match
-    const exactMatch = embResults.find((r: any) => r.quad.o === uniqueA);
+    const exactMatch = embResults.find((r: any) => r.quad.object === uniqueA);
     if (!exactMatch)
       throw new Error("exact text not found in vector:search results");
     // Exact same text -> same embedding -> cosine similarity should be 1.0
@@ -10050,7 +10050,7 @@ async function testEmbedVectorSearchDeep(ctx: Ctx) {
     if (!Array.isArray(results))
       throw new Error(`expected array, got ${typeof results}`);
     // First result should be exact match (similarity ~1.0 since same embedding)
-    const exactMatch = results.find((r: any) => r.quad.o === "pre-computed test");
+    const exactMatch = results.find((r: any) => r.quad.object === "pre-computed test");
     if (exactMatch) {
       if (exactMatch.similarity < 0.99)
         throw new Error(`exact match similarity should be ~1.0, got ${exactMatch.similarity}`);
@@ -10078,10 +10078,10 @@ async function testEmbedVectorSearchDeep(ctx: Ctx) {
     if (results.length > 0) {
       const first = results[0];
       if (!first.quad) throw new Error("result missing 'quad' field");
-      if (typeof first.quad.s !== "string") throw new Error("quad.s not string");
-      if (typeof first.quad.p !== "string") throw new Error("quad.p not string");
-      if (typeof first.quad.o !== "string") throw new Error("quad.o not string");
-      if (typeof first.quad.g !== "string") throw new Error("quad.g not string");
+      if (typeof first.quad.subject !== "string") throw new Error("quad.subject not string");
+      if (typeof first.quad.predicate !== "string") throw new Error("quad.predicate not string");
+      if (typeof first.quad.object !== "string") throw new Error("quad.object not string");
+      if (typeof first.quad.graph !== "string") throw new Error("quad.graph not string");
       if (typeof first.similarity !== "number") throw new Error("similarity not number");
       if (first.similarity < -1 || first.similarity > 1.001)
         throw new Error(`similarity out of range: ${first.similarity}`);

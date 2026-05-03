@@ -19,43 +19,43 @@
 
 # quad
 
-- label: a quad is (s, p, o, g) — subject, predicate, object, graph — all strings
-  command: grep -q 's TEXT NOT NULL' src/db.ts && grep -q 'p TEXT NOT NULL' src/db.ts && grep -q 'o TEXT NOT NULL' src/db.ts && grep -q 'g TEXT NOT NULL' src/db.ts
-- label: g defaults to '_' when omitted
-  command: grep -q "DEFAULT '_'" src/db.ts && grep -q 'g: string = "_"' src/ctx.ts
-- label: o (object) holds the value — always a string: a name, source code, JSON, a number-as-string
-  command: grep -q 'o TEXT NOT NULL' src/db.ts && grep -q 'o: string' src/ctx.ts
+- label: a quad is (subject, predicate, object, graph) — all strings
+  command: grep -q 'subject TEXT NOT NULL' src/db.ts && grep -q 'predicate TEXT NOT NULL' src/db.ts && grep -q 'object TEXT NOT NULL' src/db.ts && grep -q 'graph TEXT NOT NULL' src/db.ts
+- label: graph defaults to '_' when omitted
+  command: grep -q "DEFAULT '_'" src/db.ts && grep -q 'graph: string = "_"' src/ctx.ts
+- label: object holds the value — always a string: a name, source code, JSON, a number-as-string
+  command: grep -q 'object TEXT NOT NULL' src/db.ts && grep -q 'object: string' src/ctx.ts
 - label: attrs is optional JSON metadata about the quad itself (provenance, timestamp) — never about the subject
   command: grep -q 'attrs TEXT' src/db.ts && grep -q 'attrs.*JSON.parse' src/ctx.ts
 - label: embedding is an optional F32_BLOB vector for semantic search
   command: grep -q 'F32_BLOB(1536)' src/db.ts
-- label: quads are unique on (s, p, o, g) — asserting an existing quad is a no-op
-  command: grep -q 'UNIQUE(s, p, o, g)' src/db.ts && grep -q 'INSERT OR IGNORE' src/ctx.ts
-- label: retracting a non-existent quad returns an empty array
-  command: bun -e 'const{createDatabase,initSchema}=require("./src/db.ts");const{createCtx}=require("./src/ctx.ts");(async()=>{const db=createDatabase(":memory:");await initSchema(db);const ctx=createCtx(db);const r=await ctx.retract("nonexistent","nope","nothing");if(!Array.isArray(r)||r.length!==0)process.exit(1);console.log("ok")})()'
+- label: quads are unique on (subject, predicate, object, graph) — inserting an existing quad is a no-op
+  command: grep -q 'UNIQUE(subject, predicate, object, graph)' src/db.ts && grep -q 'INSERT OR IGNORE' src/ctx.ts
+- label: removing a non-existent quad returns an empty array
+  command: bun -e 'const{createDatabase,initSchema}=require("./src/db.ts");const{createCtx}=require("./src/ctx.ts");(async()=>{const db=createDatabase(":memory:");await initSchema(db);const ctx=createCtx(db);const r=await ctx.remove("nonexistent","nope","nothing");if(!Array.isArray(r)||r.length!==0)process.exit(1);console.log("ok")})()'
 - label: convention: a function is (name, 'source', code) and (name, 'type', 'Function')
   command: grep -q '"source"' src/template.ts && grep -q '"type", "Function"' src/template.ts
-- label: convention: value always goes in o, never duplicated in attrs
+- label: convention: value always goes in object, never duplicated in attrs
   command: true
 
 # ctx
 
 - label: ctx is the single context object available everywhere — every node receives it
   command: grep -q 'export function createCtx' src/ctx.ts && grep -q 'new AsyncFunction.*ctx.*args' src/ctx.ts
-- label: ctx has 6 primitives: assert, retract, query, call, set, on
-  command: grep -A10 'export type Ctx' src/ctx.ts | grep -cE '^\s+(assert|retract|query|call|set|on)\b' | grep -q 6
-- label: ctx.assert(s, p, o, g?, embedding?) writes a quad and fires change events — embedding is an optional F32_BLOB vector
-  command: bun -e 'const{createDatabase,initSchema}=require("./src/db.ts");const{createCtx}=require("./src/ctx.ts");(async()=>{const db=createDatabase(":memory:");await initSchema(db);const ctx=createCtx(db);let fired=false;ctx.on({s:"x"},c=>{if(c.type==="assert")fired=true});const q=await ctx.assert("x","p","v");if(!q.s||!q.p||!q.o)process.exit(1);if(!fired)process.exit(1);console.log("ok")})()'
-- label: ctx.retract(s, p, o?, g?) removes matching quads and fires change events — omit o to retract all values for (s, p, g)
-  command: bun -e 'const{createDatabase,initSchema}=require("./src/db.ts");const{createCtx}=require("./src/ctx.ts");(async()=>{const db=createDatabase(":memory:");await initSchema(db);const ctx=createCtx(db);await ctx.assert("x","p","v1");await ctx.assert("x","p","v2");let fires=0;ctx.on({s:"x"},c=>{if(c.type==="retract")fires++});const r=await ctx.retract("x","p");if(r.length!==2)process.exit(1);if(fires!==2)process.exit(1);console.log("ok")})()'
-- label: ctx.query({ s?, p?, o?, g? }) returns Quad[] matching the pattern — omitted fields are wildcards
-  command: bun -e 'const{createDatabase,initSchema}=require("./src/db.ts");const{createCtx}=require("./src/ctx.ts");(async()=>{const db=createDatabase(":memory:");await initSchema(db);const ctx=createCtx(db);await ctx.assert("a","p","1");await ctx.assert("b","p","2");const all=await ctx.query({p:"p"});if(all.length!==2)process.exit(1);const one=await ctx.query({s:"a",p:"p"});if(one.length!==1||one[0].o!=="1")process.exit(1);console.log("ok")})()'
+- label: ctx has 6 primitives: insert, remove, query, call, set, on
+  command: grep -A10 'export type Ctx' src/ctx.ts | grep -cE '^\s+(insert|remove|query|call|set|on)\b' | grep -q 6
+- label: ctx.insert(subject, predicate, object, graph?, embedding?) writes a quad and fires change events — embedding is an optional F32_BLOB vector
+  command: bun -e 'const{createDatabase,initSchema}=require("./src/db.ts");const{createCtx}=require("./src/ctx.ts");(async()=>{const db=createDatabase(":memory:");await initSchema(db);const ctx=createCtx(db);let fired=false;ctx.on({subject:"x"},c=>{if(c.type==="insert")fired=true});const q=await ctx.insert("x","p","v");if(!q.subject||!q.predicate||!q.object)process.exit(1);if(!fired)process.exit(1);console.log("ok")})()'
+- label: ctx.remove(subject, predicate, object?, graph?) removes matching quads and fires change events — omit object to remove all values for (subject, predicate, graph)
+  command: bun -e 'const{createDatabase,initSchema}=require("./src/db.ts");const{createCtx}=require("./src/ctx.ts");(async()=>{const db=createDatabase(":memory:");await initSchema(db);const ctx=createCtx(db);await ctx.insert("x","p","v1");await ctx.insert("x","p","v2");let fires=0;ctx.on({subject:"x"},c=>{if(c.type==="remove")fires++});const r=await ctx.remove("x","p");if(r.length!==2)process.exit(1);if(fires!==2)process.exit(1);console.log("ok")})()'
+- label: ctx.query({ subject?, predicate?, object?, graph? }) returns Quad[] matching the pattern — omitted fields are wildcards
+  command: bun -e 'const{createDatabase,initSchema}=require("./src/db.ts");const{createCtx}=require("./src/ctx.ts");(async()=>{const db=createDatabase(":memory:");await initSchema(db);const ctx=createCtx(db);await ctx.insert("a","p","1");await ctx.insert("b","p","2");const all=await ctx.query({predicate:"p"});if(all.length!==2)process.exit(1);const one=await ctx.query({subject:"a",predicate:"p"});if(one.length!==1||one[0].object!=="1")process.exit(1);console.log("ok")})()'
 - label: ctx.call(name, args?) looks up (name, 'source', ?), compiles to AsyncFunction, and runs it
-  command: bun -e 'const{createDatabase,initSchema}=require("./src/db.ts");const{createCtx}=require("./src/ctx.ts");(async()=>{const db=createDatabase(":memory:");await initSchema(db);const ctx=createCtx(db);await ctx.assert("test:fn","source","return 42");await ctx.assert("test:fn","type","Function");const r=await ctx.call("test:fn");if(r!==42)process.exit(1);console.log("ok")})()'
-- label: ctx.on(pattern, callback) watches for quad assert/retract matching pattern, returns an unsubscribe function
-  command: bun -e 'const{createDatabase,initSchema}=require("./src/db.ts");const{createCtx}=require("./src/ctx.ts");(async()=>{const db=createDatabase(":memory:");await initSchema(db);const ctx=createCtx(db);let count=0;const unsub=ctx.on({s:"x"},()=>count++);await ctx.assert("x","p","v");if(count!==1)process.exit(1);unsub();await ctx.assert("x","p","v2");if(count!==1)process.exit(1);console.log("ok")})()'
-- label: ctx.on callback receives { type: 'assert' | 'retract', quad: { id, s, p, o, g, attrs? } }
-  command: bun -e 'const{createDatabase,initSchema}=require("./src/db.ts");const{createCtx}=require("./src/ctx.ts");(async()=>{const db=createDatabase(":memory:");await initSchema(db);const ctx=createCtx(db);let change;ctx.on({s:"x"},c=>{change=c});await ctx.assert("x","p","v");if(change.type!=="assert")process.exit(1);if(!change.quad.id||!change.quad.s||!change.quad.p||!change.quad.o||!change.quad.g)process.exit(1);console.log("ok")})()'
+  command: bun -e 'const{createDatabase,initSchema}=require("./src/db.ts");const{createCtx}=require("./src/ctx.ts");(async()=>{const db=createDatabase(":memory:");await initSchema(db);const ctx=createCtx(db);await ctx.insert("test:fn","source","return 42");await ctx.insert("test:fn","type","Function");const r=await ctx.call("test:fn");if(r!==42)process.exit(1);console.log("ok")})()'
+- label: ctx.on(pattern, callback) watches for quad insert/remove matching pattern, returns an unsubscribe function
+  command: bun -e 'const{createDatabase,initSchema}=require("./src/db.ts");const{createCtx}=require("./src/ctx.ts");(async()=>{const db=createDatabase(":memory:");await initSchema(db);const ctx=createCtx(db);let count=0;const unsub=ctx.on({subject:"x"},()=>count++);await ctx.insert("x","p","v");if(count!==1)process.exit(1);unsub();await ctx.insert("x","p","v2");if(count!==1)process.exit(1);console.log("ok")})()'
+- label: ctx.on callback receives { type: 'insert' | 'remove', quad: { id, subject, predicate, object, graph, attrs? } }
+  command: bun -e 'const{createDatabase,initSchema}=require("./src/db.ts");const{createCtx}=require("./src/ctx.ts");(async()=>{const db=createDatabase(":memory:");await initSchema(db);const ctx=createCtx(db);let change;ctx.on({subject:"x"},c=>{change=c});await ctx.insert("x","p","v");if(change.type!=="insert")process.exit(1);if(!change.quad.id||!change.quad.subject||!change.quad.predicate||!change.quad.object||!change.quad.graph)process.exit(1);console.log("ok")})()'
 - label: ctx.self is a getter that returns the name of the currently executing node via AsyncLocalStorage
   command: grep -q 'AsyncLocalStorage' src/ctx.ts && grep -q 'get self' src/ctx.ts
 - label: ctx is mutable — nodes can replace any primitive (sys:compiler replaces ctx.call)
@@ -64,7 +64,7 @@
   command: grep -q '"llm":' src/template.ts && grep -q '"shell":' src/template.ts && grep -q '"vector:search":' src/template.ts && grep -q '"spawn":' src/template.ts
 - label: set node delegates to ctx.set — the atomic single-valued predicate primitive
   command: grep -q '"set":' src/template.ts && grep -q 'return ctx.set' src/template.ts
-- label: ctx.set(s, p, o, g?) atomically replaces all values for (s, p, g) with a single new value — uses db.batch for atomicity
+- label: ctx.set(subject, predicate, object, graph?) atomically replaces all values for (subject, predicate, graph) with a single new value — uses db.batch for atomicity
   command: grep -q 'async set' src/ctx.ts && grep -q 'db.batch' src/ctx.ts
 
 # execution
@@ -73,41 +73,41 @@
   command: test -f bun.lock
 - label: the implementation language is TypeScript
   command: test -f tsconfig.json
-- label: one graph node = one callable unit — identified by subject, source in o of a 'source' predicate
-  command: grep -q "p = 'source'" src/ctx.ts
+- label: one graph node = one callable unit — identified by subject, source in object of a 'source' predicate
+  command: grep -q "predicate = 'source'" src/ctx.ts
 - label: each node's source is a function body compiled to AsyncFunction — receives ctx and args
   command: grep -q 'AsyncFunction.*ctx.*args' src/ctx.ts
 - label: nodes have access to all Bun globals (Bun, fetch, Response, console, process)
   command: grep -q 'Bun.spawn' src/template.ts && grep -q 'Bun.serve' src/template.ts && grep -q 'Bun.write' src/template.ts && grep -q 'console.log' src/template.ts
 - label: nodes can use await import() for dynamic imports of npm packages
-  command: bun -e 'const{createDatabase,initSchema}=require("./src/db.ts");const{createCtx}=require("./src/ctx.ts");(async()=>{const db=createDatabase(":memory:");await initSchema(db);const ctx=createCtx(db);await ctx.assert("test:import","source","const m = await import(\"node:path\"); return m.sep");await ctx.assert("test:import","type","Function");const r=await ctx.call("test:import");if(typeof r!=="string")process.exit(1);console.log("ok")})()'
+  command: bun -e 'const{createDatabase,initSchema}=require("./src/db.ts");const{createCtx}=require("./src/ctx.ts");(async()=>{const db=createDatabase(":memory:");await initSchema(db);const ctx=createCtx(db);await ctx.insert("test:import","source","const m = await import(\"node:path\"); return m.sep");await ctx.insert("test:import","type","Function");const r=await ctx.call("test:import");if(typeof r!=="string")process.exit(1);console.log("ok")})()'
 - label: nodes reach other nodes through ctx.call — string-addressed, always resolves current compiled form
-  command: bun -e 'const{createDatabase,initSchema}=require("./src/db.ts");const{createCtx}=require("./src/ctx.ts");(async()=>{const db=createDatabase(":memory:");await initSchema(db);const ctx=createCtx(db);await ctx.assert("a:node","source","return 42");await ctx.assert("a:node","type","Function");await ctx.assert("b:node","source","return await ctx.call(\"a:node\")");await ctx.assert("b:node","type","Function");const r=await ctx.call("b:node");if(r!==42)process.exit(1);console.log("ok")})()'
+  command: bun -e 'const{createDatabase,initSchema}=require("./src/db.ts");const{createCtx}=require("./src/ctx.ts");(async()=>{const db=createDatabase(":memory:");await initSchema(db);const ctx=createCtx(db);await ctx.insert("a:node","source","return 42");await ctx.insert("a:node","type","Function");await ctx.insert("b:node","source","return await ctx.call(\"a:node\")");await ctx.insert("b:node","type","Function");const r=await ctx.call("b:node");if(r!==42)process.exit(1);console.log("ok")})()'
 - label: nodes define local helpers and closures but are a single callable unit
-  command: bun -e 'const{createDatabase,initSchema}=require("./src/db.ts");const{createCtx}=require("./src/ctx.ts");(async()=>{const db=createDatabase(":memory:");await initSchema(db);const ctx=createCtx(db);await ctx.assert("t:fn","source","function helper(x){return x*2} const y=helper(21); return y");await ctx.assert("t:fn","type","Function");const r=await ctx.call("t:fn");if(r!==42)process.exit(1);console.log("ok")})()'
-- label: compilation is reactive — sys:compiler watches { p: 'source' } and invalidates its cache on change
-  command: grep -A50 '"sys:compiler":' src/template.ts | grep -q "ctx.on.*p: 'source'" && grep -A50 '"sys:compiler":' src/template.ts | grep -q 'cache.delete'
+  command: bun -e 'const{createDatabase,initSchema}=require("./src/db.ts");const{createCtx}=require("./src/ctx.ts");(async()=>{const db=createDatabase(":memory:");await initSchema(db);const ctx=createCtx(db);await ctx.insert("t:fn","source","function helper(x){return x*2} const y=helper(21); return y");await ctx.insert("t:fn","type","Function");const r=await ctx.call("t:fn");if(r!==42)process.exit(1);console.log("ok")})()'
+- label: compilation is reactive — sys:compiler watches { predicate: 'source' } and invalidates its cache on change
+  command: grep -A50 '"sys:compiler":' src/template.ts | grep -q "ctx.on.*predicate: 'source'" && grep -A50 '"sys:compiler":' src/template.ts | grep -q 'cache.delete'
 - label: all node source strings are syntactically valid AsyncFunction bodies
   command: bun -e 'const AF=Object.getPrototypeOf(async function(){}).constructor;const{nodes}=require("./src/template.ts");for(const[n,s]of Object.entries(nodes)){try{new AF("ctx","args",s)}catch(e){console.error(n,e.message);process.exit(1)}};console.log(Object.keys(nodes).length+" nodes OK")'
 
 # reactivity
 
-- label: all mutations through ctx.assert/ctx.retract emit events to ctx.on subscribers
-  command: grep -q 'fire({ type: "assert"' src/ctx.ts && grep -q 'fire({ type: "retract"' src/ctx.ts
+- label: all mutations through ctx.insert/ctx.remove emit events to ctx.on subscribers
+  command: grep -q 'fire({ type: "insert"' src/ctx.ts && grep -q 'fire({ type: "remove"' src/ctx.ts
 - label: subscriptions are in-process and ephemeral — nodes register them on start, they vanish on process exit
   command: grep -q 'const subscribers: Sub\[\] = \[\]' src/ctx.ts && ! grep -q 'persist.*sub\|save.*sub\|store.*sub' src/ctx.ts
 - label: on restart, nodes re-run and re-register their subscriptions naturally
   command: grep -q 'ctx.on.*source' src/template.ts && grep -q 'ctx.on.*type.*Spawned' src/template.ts
-- label: ctx.on takes a pattern { s?, p?, o?, g? } — omitted fields are wildcards
-  command: grep -q 'on(pattern: Pattern' src/ctx.ts && grep -q 's?: string' src/ctx.ts && grep -q 'p?: string' src/ctx.ts
+- label: ctx.on takes a pattern { subject?, predicate?, object?, graph? } — omitted fields are wildcards
+  command: grep -q 'on(pattern: Pattern' src/ctx.ts && grep -q 'subject?: string' src/ctx.ts && grep -q 'predicate?: string' src/ctx.ts
 - label: ctx.on returns an unsubscribe function
   command: grep -q 'on(pattern: Pattern, callback: Subscriber): () => void' src/ctx.ts
-- label: reactive callbacks fire only on actual changes — duplicate asserts and missing retracts are no-ops
-  command: bun -e 'const{createDatabase,initSchema}=require("./src/db.ts");const{createCtx}=require("./src/ctx.ts");(async()=>{const db=createDatabase(":memory:");await initSchema(db);const ctx=createCtx(db);let fires=0;ctx.on({s:"x"},()=>fires++);await ctx.assert("x","p","v");await ctx.assert("x","p","v");const r=await ctx.retract("x","p","missing");if(fires!==1)process.exit(1);if(r.length!==0)process.exit(1);console.log("ok")})()'
-- label: lifecycle events are quads, not a separate mechanism — supervisor asserts (name, 'lifecycle', 'cleanup')
-  command: grep -A80 '"sys:supervisor":' src/template.ts | grep -q "ctx.assert(name, 'lifecycle', 'cleanup')"
-- label: nodes can watch their own lifecycle via ctx.on({ s: ctx.self, p: 'lifecycle', o: 'cleanup' }, callback) — supported but not currently used by any built-in node
-  command: grep -q "ctx.assert(name, 'lifecycle', 'cleanup')" src/template.ts && grep -q 'matchesPattern' src/ctx.ts && ! grep -q "ctx.on.*ctx.self.*lifecycle" src/template.ts
+- label: reactive callbacks fire only on actual changes — duplicate inserts and missing removes are no-ops
+  command: bun -e 'const{createDatabase,initSchema}=require("./src/db.ts");const{createCtx}=require("./src/ctx.ts");(async()=>{const db=createDatabase(":memory:");await initSchema(db);const ctx=createCtx(db);let fires=0;ctx.on({subject:"x"},()=>fires++);await ctx.insert("x","p","v");await ctx.insert("x","p","v");const r=await ctx.remove("x","p","missing");if(fires!==1)process.exit(1);if(r.length!==0)process.exit(1);console.log("ok")})()'
+- label: lifecycle events are quads, not a separate mechanism — supervisor inserts (name, 'lifecycle', 'cleanup')
+  command: grep -A80 '"sys:supervisor":' src/template.ts | grep -q "ctx.insert(name, 'lifecycle', 'cleanup')"
+- label: nodes can watch their own lifecycle via ctx.on({ subject: ctx.self, predicate: 'lifecycle', object: 'cleanup' }, callback) — supported but not currently used by any built-in node
+  command: grep -q "ctx.insert(name, 'lifecycle', 'cleanup')" src/template.ts && grep -q 'matchesPattern' src/ctx.ts && ! grep -q "ctx.on.*ctx.self.*lifecycle" src/template.ts
 
 # spawn
 
@@ -117,10 +117,10 @@
   command: grep -q 'AbortController' src/template.ts
 - label: spawned nodes receive args.signal (AbortSignal) for cooperative cancellation
   command: grep -q 'args.signal' src/template.ts
-- label: when a spawned node's source changes, sys:supervisor detects it, asserts (name, 'lifecycle', 'cleanup'), aborts, and re-runs the node
-  command: grep -q "ctx.on.*p: 'source'" src/template.ts && grep -q "ctx.assert(name, 'lifecycle', 'cleanup')" src/template.ts && grep -q 'ac.abort()' src/template.ts
+- label: when a spawned node's source changes, sys:supervisor detects it, inserts (name, 'lifecycle', 'cleanup'), aborts, and re-runs the node
+  command: grep -q "ctx.on.*predicate: 'source'" src/template.ts && grep -q "ctx.insert(name, 'lifecycle', 'cleanup')" src/template.ts && grep -q 'ac.abort()' src/template.ts
 - label: multiple cleanup handlers can be registered — same mechanism as graph reactivity
-  command: bun -e 'const{createDatabase,initSchema}=require("./src/db.ts");const{createCtx}=require("./src/ctx.ts");(async()=>{const db=createDatabase(":memory:");await initSchema(db);const ctx=createCtx(db);let a=0,b=0;ctx.on({s:"n",p:"lifecycle",o:"cleanup"},()=>a++);ctx.on({s:"n",p:"lifecycle",o:"cleanup"},()=>b++);await ctx.assert("n","lifecycle","cleanup");if(a!==1||b!==1)process.exit(1);console.log("ok")})()'
+  command: bun -e 'const{createDatabase,initSchema}=require("./src/db.ts");const{createCtx}=require("./src/ctx.ts");(async()=>{const db=createDatabase(":memory:");await initSchema(db);const ctx=createCtx(db);let a=0,b=0;ctx.on({subject:"n",predicate:"lifecycle",object:"cleanup"},()=>a++);ctx.on({subject:"n",predicate:"lifecycle",object:"cleanup"},()=>b++);await ctx.insert("n","lifecycle","cleanup");if(a!==1||b!==1)process.exit(1);console.log("ok")})()'
 - label: sys:supervisor retries crashed nodes with exponential backoff — max 3 retries, delays 500/1000/2000ms — retry count resets on manual source change
   command: grep -A80 '"sys:supervisor":' src/template.ts | grep -q 'MAX_RETRIES = 3' && grep -A80 '"sys:supervisor":' src/template.ts | grep -q 'Math.pow(2.*) \* 500' && grep -A80 '"sys:supervisor":' src/template.ts | grep -q 'retryCounts.set(name, 0)'
 
@@ -131,9 +131,9 @@
 - label: kernel connects to Turso, creates ctx with the 6 primitives, and calls ctx.call('main')
   command: grep -q 'createDatabase' src/boot.ts && grep -q 'createCtx' src/boot.ts && grep -q 'call.*main' src/boot.ts
 - label: the kernel's ctx.call compiles from scratch on every call — no cache, no reactivity
-  command: grep -A12 'async call' src/ctx.ts | grep -q 'new AsyncFunction' && ! grep -A12 'async call' src/ctx.ts | grep -q 'cache\|Map'
-- label: the kernel wires assert/retract to emit events through ctx.on automatically
-  command: grep -q 'function fire' src/ctx.ts && grep -q 'fire({ type: "assert"' src/ctx.ts && grep -q 'fire({ type: "retract"' src/ctx.ts
+  command: grep -A12 'async call' src/ctx.ts && ! grep -A12 'async call' src/ctx.ts | grep -q 'cache\|Map'
+- label: the kernel wires insert/remove to emit events through ctx.on automatically
+  command: grep -q 'function fire' src/ctx.ts && grep -q 'fire({ type: "insert"' src/ctx.ts && grep -q 'fire({ type: "remove"' src/ctx.ts
 - label: if the graph is empty on boot, the kernel seeds it from a template
   command: grep -q 'length === 0' src/boot.ts && grep -q 'seedTemplate' src/boot.ts
 - label: the template seeds 29 nodes: sys:compiler, sys:supervisor, main, spawn, shell, llm, agent:tools, agent:loop, api:server, web:ui, repl, set, mock:llm, snapshots, embed, vector:search, graph introspection, versioning, cron, and metrics
@@ -145,7 +145,7 @@
 - label: before sys:compiler runs, compilation is cold — after, it is live and reactive
   command: grep -A12 'async call' src/ctx.ts | grep -q 'new AsyncFunction' && ! grep -A12 'async call' src/ctx.ts | grep -q 'cache\|Map' && grep -q 'cachedCall' src/template.ts
 - label: all sys nodes are rewritable like any other node
-  command: bun -e 'const{createDatabase,initSchema}=require("./src/db.ts");const{createCtx}=require("./src/ctx.ts");(async()=>{const db=createDatabase(":memory:");await initSchema(db);const ctx=createCtx(db);await ctx.assert("sys:compiler","source","return 1");const r=await ctx.retract("sys:compiler","source","return 1");if(r.length!==1)process.exit(1);await ctx.assert("sys:compiler","source","return 2");const q=await ctx.query({s:"sys:compiler",p:"source"});if(q[0].o!=="return 2")process.exit(1);console.log("ok")})()'
+  command: bun -e 'const{createDatabase,initSchema}=require("./src/db.ts");const{createCtx}=require("./src/ctx.ts");(async()=>{const db=createDatabase(":memory:");await initSchema(db);const ctx=createCtx(db);await ctx.insert("sys:compiler","source","return 1");const r=await ctx.remove("sys:compiler","source","return 1");if(r.length!==1)process.exit(1);await ctx.insert("sys:compiler","source","return 2");const q=await ctx.query({subject:"sys:compiler",predicate:"source"});if(q[0].object!=="return 2")process.exit(1);console.log("ok")})()'
 - label: the project builds and all integration tests pass
   command: bun run src/test-boot.ts 2>&1 | grep -q 'passed, 0 failed'
 
@@ -170,16 +170,16 @@
   command: grep -A400 '"repl":' src/template.ts | grep -q "stream.*true" && grep -A400 '"repl":' src/template.ts | grep -q "onDelta"
 - label: .query queries quads by JSON pattern
   command: grep -A400 '"repl":' src/template.ts | grep -q "\.query " && grep -A400 '"repl":' src/template.ts | grep -q "ctx.query(pattern)"
-- label: .assert inserts a quad (s p o [--g graph])
-  command: grep -A400 '"repl":' src/template.ts | grep -q "\.assert " && grep -A400 '"repl":' src/template.ts | grep -q "\.assert.*--g"
-- label: .retract removes a quad (s p o [--g graph])
-  command: grep -A400 '"repl":' src/template.ts | grep -q "\.retract " && grep -A400 '"repl":' src/template.ts | grep -q "\.retract.*--g"
+- label: .insert inserts a quad (subject predicate object [--g graph])
+  command: grep -A400 '"repl":' src/template.ts | grep -q "\.insert " && grep -A400 '"repl":' src/template.ts | grep -q "\.insert.*--g"
+- label: .remove removes a quad (subject predicate object [--g graph])
+  command: grep -A400 '"repl":' src/template.ts | grep -q "\.remove " && grep -A400 '"repl":' src/template.ts | grep -q "\.remove.*--g"
 - label: .call invokes a node by name with optional JSON args
   command: grep -A400 '"repl":' src/template.ts | grep -q "\.call " && grep -A400 '"repl":' src/template.ts | grep -q "JSON.parse(rest"
 - label: .nodes lists all Function-typed nodes
-  command: grep -A400 '"repl":' src/template.ts | grep -q "=== '.nodes'" && grep -A400 '"repl":' src/template.ts | grep -q "p: 'type', o: 'Function'"
+  command: grep -A400 '"repl":' src/template.ts | grep -q "=== '.nodes'" && grep -A400 '"repl":' src/template.ts | grep -q "predicate: 'type', object: 'Function'"
 - label: .source shows a node's source code
-  command: grep -A400 '"repl":' src/template.ts | grep -q "\.source " && grep -A400 '"repl":' src/template.ts | grep -q "s: name, p: 'source'"
+  command: grep -A400 '"repl":' src/template.ts | grep -q "\.source " && grep -A400 '"repl":' src/template.ts | grep -q "subject: name, predicate: 'source'"
 - label: .edit opens inline multi-line editing of a node's source — blank line terminates
   command: grep -A400 '"repl":' src/template.ts | grep -q "\.edit " && grep -A400 '"repl":' src/template.ts | grep -q "blank line"
 - label: .create creates a new node with inline multi-line source — blank line terminates
@@ -189,7 +189,7 @@
 - label: .session shows the current session ID
   command: grep -A400 '"repl":' src/template.ts | grep -q "=== '.session'" && grep -A400 '"repl":' src/template.ts | grep -q "sessionId"
 - label: .sessions lists all sessions stored in the graph
-  command: grep -A400 '"repl":' src/template.ts | grep -q "=== '.sessions'" && grep -A400 '"repl":' src/template.ts | grep -q "p: 'message'"
+  command: grep -A400 '"repl":' src/template.ts | grep -q "=== '.sessions'" && grep -A400 '"repl":' src/template.ts | grep -q "predicate: 'message'"
 - label: .resume loads a previous session's conversation history from the graph
   command: grep -A400 '"repl":' src/template.ts | grep -q "\.resume "
 - label: .export exports the graph as a JSON snapshot, optionally to a file path
@@ -220,9 +220,9 @@
 - label: the loop, tool dispatch, and LLM calls are all graph-resident nodes invocable and modifiable through ctx
   command: grep -q '"agent:loop":' src/template.ts && grep -q '"agent:tools":' src/template.ts && grep -q '"llm":' src/template.ts && grep -q 'ctx.call' src/template.ts
 - label: the agent can rewrite any part of itself — its loop, its tools, its LLM parameters — by mutating quads
-  command: grep -q 'ctx.retract.*source' src/template.ts && grep -q 'ctx.assert.*source' src/template.ts
+  command: grep -q 'ctx.remove.*source' src/template.ts && grep -q 'ctx.insert.*source' src/template.ts
 - label: the agent's context window is written to the same graph as everything else
-  command: grep -A200 '"agent:loop":' src/template.ts | grep -q "ctx.assert(sessionId, 'message'"
+  command: grep -A200 '"agent:loop":' src/template.ts | grep -q "ctx.insert(sessionId, 'message'"
 - label: because everything is in the graph, arbitrary external harnesses can drive execution too
   command: grep -q 'export function createCtx' src/ctx.ts && grep -q '/v1/chat/completions' src/template.ts
 - label: agent:tools registers 18 tools for the LLM agent, each stored as a Tool-typed quad with an input_schema
@@ -266,11 +266,11 @@
   command: grep -A200 '"agent:loop":' src/template.ts | grep -q "import('@mariozechner/pi-ai')" && grep -A200 '"agent:loop":' src/template.ts | grep -q 'stream(model, piContext' && grep -A200 '"agent:loop":' src/template.ts | grep -q 'complete(model, piContext'
 
 # versioning
-- label: sys:compiler auto-saves the old source as a version via version:save whenever a source quad is retracted
-  command: grep -A60 '"sys:compiler":' src/template.ts | grep -q "change.type === 'retract'" && grep -A60 '"sys:compiler":' src/template.ts | grep -q "ctx.call('version:save'"
+- label: sys:compiler auto-saves the old source as a version via version:save whenever a source quad is removed
+  command: grep -A60 '"sys:compiler":' src/template.ts | grep -q "change.type === 'remove'" && grep -A60 '"sys:compiler":' src/template.ts | grep -q "ctx.call('version:save'"
 - label: version:list returns all saved versions for a node with seq numbers and timestamps
   command: grep -q '"version:list":' src/template.ts
-- label: version:restore restores a node to a specific version by seq number — retracts current source and asserts the old one, triggering reactive recompilation
+- label: version:restore restores a node to a specific version by seq number — removes current source and inserts the old one, triggering reactive recompilation
   command: grep -q '"version:restore":' src/template.ts
 
 # observability
@@ -290,16 +290,16 @@
   command: grep -A20 '"snapshot:backup":' src/template.ts | grep -q "holoiconic.db" && grep -A20 '"snapshot:backup":' src/template.ts | grep -q 'toISOString'
 - label: snapshot:backup throws if the source file doesn't exist — only works with local SQLite, not remote Turso
   command: grep -A20 '"snapshot:backup":' src/template.ts | grep -q 'throw new Error.*source database not found'
-- label: snapshot:export serializes all quads as JSON with s, p, o, g, and attrs fields — embedding vectors are stripped
-  command: grep -A15 '"snapshot:export":' src/template.ts | grep -q 's: q.s' && grep -A15 '"snapshot:export":' src/template.ts | grep -q 'attrs' && ! grep -A15 '"snapshot:export":' src/template.ts | grep -q 'embedding.*q\.\|q\..*embedding'
+- label: snapshot:export serializes all quads as JSON with subject, predicate, object, graph, and attrs fields — embedding vectors are stripped
+  command: grep -A15 '"snapshot:export":' src/template.ts | grep -q 'subject: q.subject' && grep -A15 '"snapshot:export":' src/template.ts | grep -q 'attrs' && ! grep -A15 '"snapshot:export":' src/template.ts | grep -q 'embedding.*q\.\|q\..*embedding'
 - label: snapshot:export returns a JSON string by default, or writes to a file when args.path is provided
   command: grep -A20 '"snapshot:export":' src/template.ts | grep -q 'return json' && grep -A20 '"snapshot:export":' src/template.ts | grep -q 'Bun.write(path, json)'
 - label: snapshot:import accepts quads from a file path (args.path) or inline JSON string (args.data)
   command: grep -A15 '"snapshot:import":' src/template.ts | grep -q 'args.path' && grep -A15 '"snapshot:import":' src/template.ts | grep -q 'args.data'
-- label: snapshot:import asserts each quad via ctx.assert — duplicates are no-ops, reactive events fire normally
-  command: grep -A30 '"snapshot:import":' src/template.ts | grep -q 'ctx.assert(q.s, q.p'
-- label: snapshot:import skips quads missing s, p, or o fields and reports the skip count
-  command: grep -A30 '"snapshot:import":' src/template.ts | grep -q 'skipped++' && grep -A30 '"snapshot:import":' src/template.ts | grep -q 'missing s/p/o'
+- label: snapshot:import inserts each quad via ctx.insert — duplicates are no-ops, reactive events fire normally
+  command: grep -A30 '"snapshot:import":' src/template.ts | grep -q 'ctx.insert(q.subject, q.predicate'
+- label: snapshot:import skips quads missing subject, predicate, or object fields and reports the skip count
+  command: grep -A30 '"snapshot:import":' src/template.ts | grep -q 'skipped++' && grep -A30 '"snapshot:import":' src/template.ts | grep -q 'missing subject/predicate/object'
 - label: Turso Cloud branching and point-in-time restore are platform-level — holoiconic does not implement or wrap them
   command: ! grep -q 'turso.*branch\|createBranch\|point-in-time' src/template.ts
 

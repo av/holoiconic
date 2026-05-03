@@ -23,11 +23,11 @@ if (ctx._compilerUnsub) {
 ctx.call = async function cachedCall(name, callArgs) {
   let fn = cache.get(name);
   if (!fn) {
-    const rs = await ctx.query({ s: name, p: 'source' });
+    const rs = await ctx.query({ subject: name, predicate: 'source' });
     if (rs.length === 0) {
       throw new Error('[ctx.call] no source found for node: ' + name);
     }
-    fn = new AsyncFunction('ctx', 'args', rs[0].o);
+    fn = new AsyncFunction('ctx', 'args', rs[0].object);
     cache.set(name, fn);
   }
   // Metrics tracking — skip for metrics node itself to avoid infinite recursion
@@ -53,14 +53,14 @@ ctx.call = async function cachedCall(name, callArgs) {
 };
 
 // Watch for source changes — snapshot old source before invalidating cache
-const unsub = ctx.on({ p: 'source' }, async (change) => {
-  const name = change.quad.s;
+const unsub = ctx.on({ predicate: 'source' }, async (change) => {
+  const name = change.quad.subject;
   cache.delete(name);
 
   // When a source is retracted, save it as a version
-  if (change.type === 'retract') {
+  if (change.type === 'remove') {
     try {
-      await ctx.call('version:save', { name, source: change.quad.o });
+      await ctx.call('version:save', { name, source: change.quad.object });
     } catch (e) {
       // version:save may not exist yet during boot — silently skip
     }
@@ -103,14 +103,14 @@ function startNode(name, ac) {
 }
 
 // Watch for new spawned nodes
-ctx.on({ p: 'type', o: 'Spawned' }, async (change) => {
-  if (change.type === 'assert') {
-    const name = change.quad.s;
+ctx.on({ predicate: 'type', object: 'Spawned' }, async (change) => {
+  if (change.type === 'insert') {
+    const name = change.quad.subject;
     console.log('[sys:supervisor] registered spawned node:', name);
   }
   // If Spawned quad is retracted, abort the running node to prevent orphans
-  if (change.type === 'retract') {
-    const name = change.quad.s;
+  if (change.type === 'remove') {
+    const name = change.quad.subject;
     const ac = controllers.get(name);
     if (ac && !ac.signal.aborted) {
       console.log('[sys:supervisor] Spawned quad retracted for ' + name + ', aborting node');
@@ -122,18 +122,18 @@ ctx.on({ p: 'type', o: 'Spawned' }, async (change) => {
 });
 
 // Watch for source changes on spawned nodes — restart them
-ctx.on({ p: 'source' }, async (change) => {
-  const name = change.quad.s;
-  if (change.type !== 'assert') return;
-  const spawned = await ctx.query({ s: name, p: 'type', o: 'Spawned' });
+ctx.on({ predicate: 'source' }, async (change) => {
+  const name = change.quad.subject;
+  if (change.type !== 'insert') return;
+  const spawned = await ctx.query({ subject: name, predicate: 'type', object: 'Spawned' });
   if (spawned.length === 0) return;
 
   const ac = controllers.get(name);
   if (ac) {
     console.log('[sys:supervisor] restarting:', name);
-    await ctx.assert(name, 'lifecycle', 'cleanup');
+    await ctx.insert(name, 'lifecycle', 'cleanup');
     ac.abort();
-    await ctx.retract(name, 'lifecycle', 'cleanup');
+    await ctx.remove(name, 'lifecycle', 'cleanup');
 
     // Reset retry count on manual source change
     retryCounts.set(name, 0);
@@ -154,7 +154,7 @@ if (signal) {
   });
   // Abort all managed nodes on shutdown
   for (const [name, ac] of controllers) {
-    await ctx.assert(name, 'lifecycle', 'cleanup');
+    await ctx.insert(name, 'lifecycle', 'cleanup');
     ac.abort();
   }
   console.log('[sys:supervisor] shut down');
@@ -179,7 +179,7 @@ if (ctx._supervisorControllers) {
 const ac = new AbortController();
 
 // Register with supervisor
-await ctx.assert(node, 'type', 'Spawned');
+await ctx.insert(node, 'type', 'Spawned');
 
 // Use supervisor's startNode if available (enables retry/backoff)
 if (ctx._supervisorStartNode) {
@@ -268,8 +268,8 @@ return result;
   // Registers core tools as Tool-typed quads for the agentic loop.
   "agent:tools": `
 // Shell tool
-await ctx.assert('shell', 'type', 'Tool');
-await ctx.assert('shell', 'tool_schema', JSON.stringify({
+await ctx.insert('shell', 'type', 'Tool');
+await ctx.insert('shell', 'tool_schema', JSON.stringify({
   name: 'shell',
   description: 'Execute a shell command and return stdout. Use for running programs, file operations, etc.',
   input_schema: {
@@ -282,8 +282,8 @@ await ctx.assert('shell', 'tool_schema', JSON.stringify({
 }));
 
 // Query tool — lets the agent query the graph
-await ctx.assert('graph_query', 'type', 'Tool');
-await ctx.assert('graph_query', 'tool_schema', JSON.stringify({
+await ctx.insert('graph_query', 'type', 'Tool');
+await ctx.insert('graph_query', 'tool_schema', JSON.stringify({
   name: 'graph_query',
   description: 'Query the RDF quad graph. Returns quads matching the given pattern. Omit fields to use them as wildcards.',
   input_schema: {
@@ -298,8 +298,8 @@ await ctx.assert('graph_query', 'tool_schema', JSON.stringify({
 }));
 
 // Assert tool — lets the agent assert quads
-await ctx.assert('graph_assert', 'type', 'Tool');
-await ctx.assert('graph_assert', 'tool_schema', JSON.stringify({
+await ctx.insert('graph_assert', 'type', 'Tool');
+await ctx.insert('graph_assert', 'tool_schema', JSON.stringify({
   name: 'graph_assert',
   description: 'Assert (insert) a quad into the RDF graph. If the quad already exists, this is a no-op.',
   input_schema: {
@@ -315,8 +315,8 @@ await ctx.assert('graph_assert', 'tool_schema', JSON.stringify({
 }));
 
 // Retract tool — lets the agent retract quads
-await ctx.assert('graph_retract', 'type', 'Tool');
-await ctx.assert('graph_retract', 'tool_schema', JSON.stringify({
+await ctx.insert('graph_retract', 'type', 'Tool');
+await ctx.insert('graph_retract', 'tool_schema', JSON.stringify({
   name: 'graph_retract',
   description: 'Retract (delete) a quad from the RDF graph. If the quad does not exist, this is a no-op.',
   input_schema: {
@@ -332,8 +332,8 @@ await ctx.assert('graph_retract', 'tool_schema', JSON.stringify({
 }));
 
 // Nodes tool — list all function nodes
-await ctx.assert('list_nodes', 'type', 'Tool');
-await ctx.assert('list_nodes', 'tool_schema', JSON.stringify({
+await ctx.insert('list_nodes', 'type', 'Tool');
+await ctx.insert('list_nodes', 'tool_schema', JSON.stringify({
   name: 'list_nodes',
   description: 'List all function nodes registered in the graph. Returns their names.',
   input_schema: {
@@ -343,8 +343,8 @@ await ctx.assert('list_nodes', 'tool_schema', JSON.stringify({
 }));
 
 // Snapshot export tool
-await ctx.assert('snapshot:export', 'type', 'Tool');
-await ctx.assert('snapshot:export', 'tool_schema', JSON.stringify({
+await ctx.insert('snapshot:export', 'type', 'Tool');
+await ctx.insert('snapshot:export', 'tool_schema', JSON.stringify({
   name: 'snapshot_export',
   description: 'Export all quads from the graph as JSON. Optionally write to a file path.',
   input_schema: {
@@ -356,8 +356,8 @@ await ctx.assert('snapshot:export', 'tool_schema', JSON.stringify({
 }));
 
 // Snapshot import tool
-await ctx.assert('snapshot:import', 'type', 'Tool');
-await ctx.assert('snapshot:import', 'tool_schema', JSON.stringify({
+await ctx.insert('snapshot:import', 'type', 'Tool');
+await ctx.insert('snapshot:import', 'tool_schema', JSON.stringify({
   name: 'snapshot_import',
   description: 'Import quads from a JSON string or file path into the graph.',
   input_schema: {
@@ -370,8 +370,8 @@ await ctx.assert('snapshot:import', 'tool_schema', JSON.stringify({
 }));
 
 // Snapshot backup tool
-await ctx.assert('snapshot:backup', 'type', 'Tool');
-await ctx.assert('snapshot:backup', 'tool_schema', JSON.stringify({
+await ctx.insert('snapshot:backup', 'type', 'Tool');
+await ctx.insert('snapshot:backup', 'tool_schema', JSON.stringify({
   name: 'snapshot_backup',
   description: 'Create a file-level backup of the SQLite database.',
   input_schema: {
@@ -383,8 +383,8 @@ await ctx.assert('snapshot:backup', 'tool_schema', JSON.stringify({
 }));
 
 // Vector search tool
-await ctx.assert('vector:search', 'type', 'Tool');
-await ctx.assert('vector:search', 'tool_schema', JSON.stringify({
+await ctx.insert('vector:search', 'type', 'Tool');
+await ctx.insert('vector:search', 'tool_schema', JSON.stringify({
   name: 'vector_search',
   description: 'Semantic search over quads using vector embeddings. Provide text or a pre-computed embedding.',
   input_schema: {
@@ -398,35 +398,35 @@ await ctx.assert('vector:search', 'tool_schema', JSON.stringify({
 }));
 
 // Describe tool — inspect all quads about a subject
-await ctx.assert('graph_describe', 'type', 'Tool');
-await ctx.assert('graph_describe', 'tool_schema', JSON.stringify({
+await ctx.insert('graph_describe', 'type', 'Tool');
+await ctx.insert('graph_describe', 'tool_schema', JSON.stringify({
   name: 'graph_describe',
   description: 'Describe a subject: return ALL quads about it (all predicates and values). Useful for inspecting what a node IS.',
   input_schema: {
     type: 'object',
     properties: {
-      subject: { type: 'string', description: 'The subject to describe (e.g. a node name)' }
+      subject: { type: 'string', description: 'The subject to describe (e.graph. a node name)' }
     },
     required: ['subject']
   }
 }));
 
 // Subjects tool — list all unique subjects
-await ctx.assert('graph_subjects', 'type', 'Tool');
-await ctx.assert('graph_subjects', 'tool_schema', JSON.stringify({
+await ctx.insert('graph_subjects', 'type', 'Tool');
+await ctx.insert('graph_subjects', 'tool_schema', JSON.stringify({
   name: 'graph_subjects',
   description: 'List all unique subjects in the graph. Optionally filter by type (Function, Tool, Spawned, etc.).',
   input_schema: {
     type: 'object',
     properties: {
-      type: { type: 'string', description: 'Filter by type (e.g. Function, Tool, Spawned). Optional.' }
+      type: { type: 'string', description: 'Filter by type (e.graph. Function, Tool, Spawned). Optional.' }
     }
   }
 }));
 
 // Deps tool — analyze node dependencies
-await ctx.assert('graph_deps', 'type', 'Tool');
-await ctx.assert('graph_deps', 'tool_schema', JSON.stringify({
+await ctx.insert('graph_deps', 'type', 'Tool');
+await ctx.insert('graph_deps', 'tool_schema', JSON.stringify({
   name: 'graph_deps',
   description: 'Analyze a node\\'s dependency graph: what it calls and what calls it. Uses regex to scan ctx.call references in source code.',
   input_schema: {
@@ -439,8 +439,8 @@ await ctx.assert('graph_deps', 'tool_schema', JSON.stringify({
 }));
 
 // Inspect tool — comprehensive node inspection
-await ctx.assert('inspect', 'type', 'Tool');
-await ctx.assert('inspect', 'tool_schema', JSON.stringify({
+await ctx.insert('inspect', 'type', 'Tool');
+await ctx.insert('inspect', 'tool_schema', JSON.stringify({
   name: 'inspect',
   description: 'Comprehensive inspection of a node: source, type, dependencies, spawn status, tool schema, etc. Combines graph:describe and graph:deps.',
   input_schema: {
@@ -453,8 +453,8 @@ await ctx.assert('inspect', 'tool_schema', JSON.stringify({
 }));
 
 // Version list tool
-await ctx.assert('version_list', 'type', 'Tool');
-await ctx.assert('version_list', 'tool_schema', JSON.stringify({
+await ctx.insert('version_list', 'type', 'Tool');
+await ctx.insert('version_list', 'tool_schema', JSON.stringify({
   name: 'version_list',
   description: 'List all saved source versions for a node. Returns version history with sequence numbers and timestamps.',
   input_schema: {
@@ -467,8 +467,8 @@ await ctx.assert('version_list', 'tool_schema', JSON.stringify({
 }));
 
 // Version restore tool
-await ctx.assert('version_restore', 'type', 'Tool');
-await ctx.assert('version_restore', 'tool_schema', JSON.stringify({
+await ctx.insert('version_restore', 'type', 'Tool');
+await ctx.insert('version_restore', 'tool_schema', JSON.stringify({
   name: 'version_restore',
   description: 'Restore a node\\'s source to a specific version by sequence number.',
   input_schema: {
@@ -482,8 +482,8 @@ await ctx.assert('version_restore', 'tool_schema', JSON.stringify({
 }));
 
 // Cron tool
-await ctx.assert('cron_create', 'type', 'Tool');
-await ctx.assert('cron_create', 'tool_schema', JSON.stringify({
+await ctx.insert('cron_create', 'type', 'Tool');
+await ctx.insert('cron_create', 'tool_schema', JSON.stringify({
   name: 'cron_create',
   description: 'Create a cron job that runs a node on a setInterval. The node is called repeatedly at the specified interval.',
   input_schema: {
@@ -498,8 +498,8 @@ await ctx.assert('cron_create', 'tool_schema', JSON.stringify({
 }));
 
 // Cron list tool
-await ctx.assert('cron_list', 'type', 'Tool');
-await ctx.assert('cron_list', 'tool_schema', JSON.stringify({
+await ctx.insert('cron_list', 'type', 'Tool');
+await ctx.insert('cron_list', 'tool_schema', JSON.stringify({
   name: 'cron_list',
   description: 'List all cron jobs (active and stopped).',
   input_schema: {
@@ -509,8 +509,8 @@ await ctx.assert('cron_list', 'tool_schema', JSON.stringify({
 }));
 
 // Metrics report tool
-await ctx.assert('metrics_report', 'type', 'Tool');
-await ctx.assert('metrics_report', 'tool_schema', JSON.stringify({
+await ctx.insert('metrics_report', 'type', 'Tool');
+await ctx.insert('metrics_report', 'tool_schema', JSON.stringify({
   name: 'metrics_report',
   description: 'Show metrics for all nodes: call counts, total duration, average latency, and error counts. Sorted by call count descending.',
   input_schema: {
@@ -545,27 +545,27 @@ Code, state, tools, and even this agentic loop are all quads in the same graph.
 You have access to tools that let you:
 - Execute shell commands
 - Query the graph for quads
-- Assert (insert) new quads
-- Retract (delete) quads
+- Insert new quads
+- Remove quads
 - List all function nodes
 
 The graph is reactive: when quads change, watchers fire automatically.
 Function nodes have (name, 'source', code) and (name, 'type', 'Function') quads.
-You can create new nodes by asserting source and type quads.
+You can create new nodes by inserting source and type quads.
 
 Be concise and helpful. When using tools, explain what you are doing.\`;
 
 // Load conversation history from graph
 // Messages are stored as {seq, msg} to ensure uniqueness even with identical content
-const historyQuads = await ctx.query({ p: 'message', g: sessionId });
+const historyQuads = await ctx.query({ predicate: 'message', graph: sessionId });
 const history = [];
 for (const q of historyQuads.sort((a, b) => a.id - b.id)) {
   try {
-    const w = JSON.parse(q.o);
+    const w = JSON.parse(q.object);
     history.push(w.msg || w);
   } catch (e) {
     // Skip malformed message quads — do not crash the loop
-    console.warn('[agent:loop] skipping malformed message quad:', q.s, q.o.slice(0, 80));
+    console.warn('[agent:loop] skipping malformed message quad:', q.subject, q.object.slice(0, 80));
   }
 }
 
@@ -574,17 +574,17 @@ let seq = historyQuads.length;
 
 // Add the new user message — pi-ai UserMessage format
 const userMsg = { role: 'user', content: prompt, timestamp: Date.now() };
-await ctx.assert(sessionId, 'message', JSON.stringify({ seq: seq++, msg: userMsg }), sessionId);
+await ctx.insert(sessionId, 'message', JSON.stringify({ seq: seq++, msg: userMsg }), sessionId);
 history.push(userMsg);
 
 // Collect available tools and convert to pi-ai Tool format
-const toolQuads = await ctx.query({ p: 'type', o: 'Tool' });
+const toolQuads = await ctx.query({ predicate: 'type', object: 'Tool' });
 const tools = [];
 for (const tq of toolQuads) {
-  const schemaQuads = await ctx.query({ s: tq.s, p: 'tool_schema' });
+  const schemaQuads = await ctx.query({ subject: tq.subject, predicate: 'tool_schema' });
   if (schemaQuads.length > 0) {
     try {
-      const schema = JSON.parse(schemaQuads[0].o);
+      const schema = JSON.parse(schemaQuads[0].object);
       // Convert from Anthropic tool format to pi-ai Tool format
       tools.push({
         name: schema.name,
@@ -646,7 +646,7 @@ for (let i = 0; i < maxIterations; i++) {
 
   // Store the assistant message in the graph
   const assistantMsg = { role: 'assistant', content: response.content, model: response.model, provider: response.provider, api: response.api, usage: response.usage, stopReason: response.stopReason, timestamp: response.timestamp };
-  await ctx.assert(sessionId, 'message', JSON.stringify({ seq: seq++, msg: assistantMsg }), sessionId);
+  await ctx.insert(sessionId, 'message', JSON.stringify({ seq: seq++, msg: assistantMsg }), sessionId);
   messages.push(assistantMsg);
 
   // Check if response contains tool calls (pi-ai uses type: 'toolCall')
@@ -670,21 +670,21 @@ for (let i = 0; i < maxIterations; i++) {
         result = await ctx.call('shell', { cmd: toolInput.cmd });
       } else if (toolName === 'graph_query') {
         const pattern = {};
-        if (toolInput.s) pattern.s = toolInput.s;
-        if (toolInput.p) pattern.p = toolInput.p;
-        if (toolInput.o) pattern.o = toolInput.o;
-        if (toolInput.g) pattern.g = toolInput.g;
+        if (toolInput.subject) pattern.subject = toolInput.subject;
+        if (toolInput.predicate) pattern.predicate = toolInput.predicate;
+        if (toolInput.object) pattern.object = toolInput.object;
+        if (toolInput.graph) pattern.graph = toolInput.graph;
         const quads = await ctx.query(pattern);
         result = JSON.stringify(quads, null, 2);
       } else if (toolName === 'graph_assert') {
-        const quad = await ctx.assert(toolInput.s, toolInput.p, toolInput.o, toolInput.g || '_');
+        const quad = await ctx.insert(toolInput.subject, toolInput.predicate, toolInput.object, toolInput.graph || '_');
         result = 'Asserted: ' + JSON.stringify(quad);
       } else if (toolName === 'graph_retract') {
-        await ctx.retract(toolInput.s, toolInput.p, toolInput.o, toolInput.g || '_');
+        await ctx.remove(toolInput.subject, toolInput.predicate, toolInput.object, toolInput.graph || '_');
         result = 'Retracted successfully';
       } else if (toolName === 'list_nodes') {
-        const nodes = await ctx.query({ p: 'type', o: 'Function' });
-        result = nodes.map(n => n.s).join('\\n');
+        const nodes = await ctx.query({ predicate: 'type', object: 'Function' });
+        result = nodes.map(n => n.subject).join('\\n');
       } else if (toolName === 'snapshot_export') {
         result = await ctx.call('snapshot:export', toolInput);
       } else if (toolName === 'snapshot_import') {
@@ -741,7 +741,7 @@ for (let i = 0; i < maxIterations; i++) {
       isError: resultStr.startsWith('Error: '),
       timestamp: Date.now(),
     };
-    await ctx.assert(sessionId, 'message', JSON.stringify({ seq: seq++, msg: toolResultMsg }), sessionId);
+    await ctx.insert(sessionId, 'message', JSON.stringify({ seq: seq++, msg: toolResultMsg }), sessionId);
     messages.push(toolResultMsg);
   }
 }
@@ -1038,7 +1038,7 @@ const html = \`<!DOCTYPE html>
 <div id="graph-panel">
   <div class="panel-header"><span>graph nodes</span><button id="create-node-btn">+ New Node</button></div>
   <div id="create-node-form">
-    <input id="new-node-name" type="text" placeholder="Node name (e.g. my:function)" />
+    <input id="new-node-name" type="text" placeholder="Node name (e.graph. my:function)" />
     <textarea id="new-node-source" placeholder="Node source code (async function body receiving ctx, args)"></textarea>
     <div class="form-buttons">
       <button class="create-cancel-btn" id="create-cancel">Cancel</button>
@@ -1442,12 +1442,12 @@ const server = Bun.serve({
             return Response.json({ error: 'source (string) is required' }, { status: 400, headers: corsHeaders });
           }
           // Check if node already exists
-          const existing = await ctx.query({ s: name, p: 'type', o: 'Function' });
+          const existing = await ctx.query({ subject: name, predicate: 'type', object: 'Function' });
           if (existing.length > 0) {
             return Response.json({ error: 'Node already exists: ' + name }, { status: 409, headers: corsHeaders });
           }
-          await ctx.assert(name, 'type', 'Function');
-          await ctx.assert(name, 'source', source);
+          await ctx.insert(name, 'type', 'Function');
+          await ctx.insert(name, 'source', source);
           return Response.json({ ok: true, name }, { status: 201, headers: corsHeaders });
         } catch (err) {
           const isSyntaxError = err instanceof SyntaxError || (err.message && err.message.includes('JSON'));
@@ -1455,12 +1455,12 @@ const server = Bun.serve({
         }
       }
       // GET: list nodes — returns names and their types
-      const fnNodes = await ctx.query({ p: 'type', o: 'Function' });
-      const names = fnNodes.map(n => n.s);
+      const fnNodes = await ctx.query({ predicate: 'type', object: 'Function' });
+      const names = fnNodes.map(n => n.subject);
       const result = [];
       for (const name of names) {
-        const typeQuads = await ctx.query({ s: name, p: 'type' });
-        const types = typeQuads.map(q => q.o);
+        const typeQuads = await ctx.query({ subject: name, predicate: 'type' });
+        const types = typeQuads.map(q => q.object);
         result.push({ name, types });
       }
       result.sort((a, b) => a.name.localeCompare(b.name));
@@ -1479,8 +1479,8 @@ const server = Bun.serve({
           return Response.json({ error: 'source (string) is required' }, { status: 400, headers: corsHeaders });
         }
 
-        await ctx.retract(name, 'source');
-        await ctx.assert(name, 'source', newSource);
+        await ctx.remove(name, 'source');
+        await ctx.insert(name, 'source', newSource);
 
         return Response.json({ ok: true, name }, { headers: corsHeaders });
       } catch (err) {
@@ -1494,9 +1494,9 @@ const server = Bun.serve({
       try {
         const name = decodeURIComponent(url.pathname.slice('/api/node/'.length));
         // Retract ALL quads where this subject appears
-        const quads = await ctx.query({ s: name });
+        const quads = await ctx.query({ subject: name });
         for (const q of quads) {
-          await ctx.retract(q.s, q.p, q.o, q.g);
+          await ctx.remove(q.subject, q.predicate, q.object, q.graph);
         }
         return Response.json({ ok: true, name, retracted: quads.length }, { headers: corsHeaders });
       } catch (err) {
@@ -1519,8 +1519,8 @@ const server = Bun.serve({
     // API: get node source (GET /api/node/:name)
     if (url.pathname.startsWith('/api/node/') && !url.pathname.includes('/deps') && req.method === 'GET') {
       const name = decodeURIComponent(url.pathname.slice('/api/node/'.length));
-      const sourceQuads = await ctx.query({ s: name, p: 'source' });
-      const source = sourceQuads.length > 0 ? sourceQuads[0].o : null;
+      const sourceQuads = await ctx.query({ subject: name, predicate: 'source' });
+      const source = sourceQuads.length > 0 ? sourceQuads[0].object : null;
       return Response.json({ name, source }, { headers: corsHeaders });
     }
 
@@ -1544,10 +1544,10 @@ if (signal) {
   "snapshot:export": `
 const allQuads = await ctx.query({});
 const data = allQuads.map(q => ({
-  s: q.s,
-  p: q.p,
-  o: q.o,
-  g: q.g,
+  subject: q.subject,
+  predicate: q.predicate,
+  object: q.object,
+  graph: q.graph,
   attrs: q.attrs || undefined,
 }));
 const json = JSON.stringify(data, null, 2);
@@ -1580,16 +1580,16 @@ if (!Array.isArray(quads)) throw new Error('[snapshot:import] expected JSON arra
 let count = 0;
 let skipped = 0;
 for (const q of quads) {
-  if (!q.s || !q.p || (q.o === undefined || q.o === null)) {
+  if (!q.subject || !q.predicate || (q.object === undefined || q.object === null)) {
     skipped++;
     continue;
   }
-  await ctx.assert(q.s, q.p, String(q.o), q.g || '_');
+  await ctx.insert(q.subject, q.predicate, String(q.object), q.graph || '_');
   count++;
 }
 
 if (skipped > 0) {
-  console.warn('[snapshot:import] skipped ' + skipped + ' quads with missing s/p/o fields');
+  console.warn('[snapshot:import] skipped ' + skipped + ' quads with missing subject/predicate/object fields');
 }
 console.log('[snapshot:import] imported ' + count + ' quads');
 return { count, skipped };
@@ -1629,9 +1629,9 @@ let baseURL = undefined;
 let effectiveKey = apiKey;
 if (!apiKey) {
   // Route through mock:llm's HTTP embeddings endpoint
-  const urlQuads = await ctx.query({ s: 'mock:llm', p: 'url' });
+  const urlQuads = await ctx.query({ subject: 'mock:llm', predicate: 'url' });
   if (urlQuads.length === 0) throw new Error('[embed] no API key and mock:llm is not running');
-  baseURL = urlQuads[0].o + '/v1';
+  baseURL = urlQuads[0].object + '/v1';
   effectiveKey = 'mock-key'; // OpenAI SDK requires a key, mock server ignores it
 }
 
@@ -1655,7 +1655,7 @@ try {
     hash = ((hash << 5) - hash + text.charCodeAt(i)) | 0;
   }
   const textId = 'emb:' + Math.abs(hash).toString(36);
-  await ctx.assert(textId, 'embedding', text, 'embeddings', embedding);
+  await ctx.insert(textId, 'embedding', text, 'embeddings', embedding);
 } catch (e) {
   // Silently skip if vector column is unavailable
 }
@@ -1689,7 +1689,7 @@ try {
   // the embed node's DB access pattern. Let's try via a direct call approach.
 
   // Build results from quads that have embeddings stored in the 'embeddings' graph
-  const embQuads = await ctx.query({ p: 'embedding', g: 'embeddings' });
+  const embQuads = await ctx.query({ predicate: 'embedding', graph: 'embeddings' });
 
   if (embQuads.length === 0) {
     throw new Error('[vector:search] no stored embeddings found, falling back to brute-force');
@@ -1699,7 +1699,7 @@ try {
   const results = [];
   for (const eq of embQuads) {
     // Re-embed the stored text to get its vector
-    const eResult = await ctx.call('embed', { text: eq.o });
+    const eResult = await ctx.call('embed', { text: eq.object });
     const eVec = eResult.embedding;
 
     // Cosine similarity
@@ -1711,7 +1711,7 @@ try {
     }
     const denom = Math.sqrt(normA) * Math.sqrt(normB);
     const similarity = denom > 0 ? dot / denom : 0;
-    results.push({ quad: { s: eq.s, p: eq.p, o: eq.o, g: eq.g }, similarity });
+    results.push({ quad: { subject: eq.subject, predicate: eq.predicate, object: eq.object, graph: eq.graph }, similarity });
   }
 
   results.sort((a, b) => b.similarity - a.similarity);
@@ -1723,7 +1723,7 @@ try {
   const results = [];
   for (const q of allQuads) {
     // Get embedding for this quad's content
-    const qText = q.s + ' ' + q.p + ' ' + q.o;
+    const qText = q.subject + ' ' + q.predicate + ' ' + q.object;
     const qResult = await ctx.call('embed', { text: qText });
     const qEmb = qResult.embedding;
 
@@ -1736,7 +1736,7 @@ try {
     }
     const denom = Math.sqrt(normA) * Math.sqrt(normB);
     const similarity = denom > 0 ? dot / denom : 0;
-    results.push({ quad: { s: q.s, p: q.p, o: q.o, g: q.g }, similarity });
+    results.push({ quad: { subject: q.subject, predicate: q.predicate, object: q.object, graph: q.graph }, similarity });
   }
 
   results.sort((a, b) => b.similarity - a.similarity);
@@ -1751,16 +1751,16 @@ try {
 const subject = args && args.subject;
 if (!subject) throw new Error('[graph:describe] args.subject is required');
 
-const quads = await ctx.query({ s: subject });
+const quads = await ctx.query({ subject: subject });
 const description = {};
 for (const q of quads) {
-  if (!description[q.p]) {
-    description[q.p] = [];
+  if (!description[q.predicate]) {
+    description[q.predicate] = [];
   }
-  description[q.p].push({ value: q.o, graph: q.g });
+  description[q.predicate].push({ value: q.object, graph: q.graph });
 }
 
-return { subject, quads: quads.map(q => ({ s: q.s, p: q.p, o: q.o, g: q.g })), predicates: description };
+return { subject, quads: quads.map(q => ({ subject: q.subject, predicate: q.predicate, object: q.object, graph: q.graph })), predicates: description };
 `,
 
   // ── graph:subjects ─────────────────────────────────────────────
@@ -1770,14 +1770,14 @@ const typeFilter = args && args.type;
 
 let quads;
 if (typeFilter) {
-  quads = await ctx.query({ p: 'type', o: typeFilter });
+  quads = await ctx.query({ predicate: 'type', object: typeFilter });
 } else {
   quads = await ctx.query({});
 }
 
 const subjects = new Set();
 for (const q of quads) {
-  subjects.add(q.s);
+  subjects.add(q.subject);
 }
 
 const result = [...subjects].sort();
@@ -1786,8 +1786,8 @@ const result = [...subjects].sort();
 if (!typeFilter) {
   const enriched = [];
   for (const s of result) {
-    const typeQuads = await ctx.query({ s, p: 'type' });
-    const types = typeQuads.map(q => q.o);
+    const typeQuads = await ctx.query({ s, predicate: 'type' });
+    const types = typeQuads.map(q => q.object);
     enriched.push({ subject: s, types });
   }
   return enriched;
@@ -1804,8 +1804,8 @@ const node = args && args.node;
 if (!node) throw new Error('[graph:deps] args.node is required');
 
 // Get the source of the requested node
-const sourceQuads = await ctx.query({ s: node, p: 'source' });
-const source = sourceQuads.length > 0 ? sourceQuads[0].o : '';
+const sourceQuads = await ctx.query({ subject: node, predicate: 'source' });
+const source = sourceQuads.length > 0 ? sourceQuads[0].object : '';
 
 // Extract all ctx.call('name') and ctx.call("name") patterns from the source
 const calls = [];
@@ -1818,18 +1818,18 @@ while ((match = callRegex.exec(source)) !== null) {
 }
 
 // For calledBy: scan all function nodes' sources for references to this node
-const allFnQuads = await ctx.query({ p: 'type', o: 'Function' });
+const allFnQuads = await ctx.query({ predicate: 'type', object: 'Function' });
 const calledBy = [];
 for (const fnQuad of allFnQuads) {
-  if (fnQuad.s === node) continue; // skip self
-  const fnSourceQuads = await ctx.query({ s: fnQuad.s, p: 'source' });
+  if (fnQuad.subject === node) continue; // skip self
+  const fnSourceQuads = await ctx.query({ subject: fnQuad.subject, predicate: 'source' });
   if (fnSourceQuads.length === 0) continue;
-  const fnSource = fnSourceQuads[0].o;
+  const fnSource = fnSourceQuads[0].object;
   // Check if this node's name appears in a ctx.call reference
   const escapedName = node.replace(/[.*+?^\${}()|[\\]\\\\]/g, '\\\\$&');
   const refRegex = new RegExp("ctx\\\\.call\\\\(\\\\s*['\\\"]" + escapedName + "['\\\"]", "g");
   if (refRegex.test(fnSource)) {
-    calledBy.push(fnQuad.s);
+    calledBy.push(fnQuad.subject);
   }
 }
 
@@ -1904,13 +1904,13 @@ const source = args && args.source;
 if (!name || !source) throw new Error('[version:save] args.name and args.source are required');
 
 // Determine next sequence number by counting existing versions
-const existing = await ctx.query({ s: name, p: 'version', g: 'versions' });
+const existing = await ctx.query({ subject: name, predicate: 'version', graph: 'versions' });
 const seq = existing.length;
 const timestamp = new Date().toISOString();
 
 // Store as a unique quad: use seq in the object to ensure uniqueness
 const versionData = JSON.stringify({ seq, timestamp, source });
-await ctx.assert(name, 'version', versionData, 'versions');
+await ctx.insert(name, 'version', versionData, 'versions');
 
 return { name, seq, timestamp };
 `,
@@ -1921,9 +1921,9 @@ return { name, seq, timestamp };
 const name = args && args.name;
 if (!name) throw new Error('[version:list] args.name is required');
 
-const versionQuads = await ctx.query({ s: name, p: 'version', g: 'versions' });
+const versionQuads = await ctx.query({ subject: name, predicate: 'version', graph: 'versions' });
 const versions = versionQuads.map(q => {
-  const data = JSON.parse(q.o);
+  const data = JSON.parse(q.object);
   return { seq: data.seq, timestamp: data.timestamp, sourceLength: data.source.length };
 }).sort((a, b) => a.seq - b.seq);
 
@@ -1938,19 +1938,19 @@ const seq = args && args.seq;
 if (!name) throw new Error('[version:restore] args.name is required');
 if (seq === undefined || seq === null) throw new Error('[version:restore] args.seq is required');
 
-const versionQuads = await ctx.query({ s: name, p: 'version', g: 'versions' });
+const versionQuads = await ctx.query({ subject: name, predicate: 'version', graph: 'versions' });
 const match = versionQuads.find(q => {
-  const data = JSON.parse(q.o);
+  const data = JSON.parse(q.object);
   return data.seq === seq;
 });
 
 if (!match) throw new Error('[version:restore] no version found with seq=' + seq + ' for node ' + name);
 
-const versionData = JSON.parse(match.o);
+const versionData = JSON.parse(match.object);
 const restoredSource = versionData.source;
 
-await ctx.retract(name, 'source');
-await ctx.assert(name, 'source', restoredSource);
+await ctx.remove(name, 'source');
+await ctx.insert(name, 'source', restoredSource);
 
 return { name, seq, timestamp: versionData.timestamp, restored: true };
 `,
@@ -1973,11 +1973,11 @@ if (!interval || typeof interval !== 'number' || interval < 100) {
 const cronId = 'cron:' + node + ':' + Date.now();
 
 // Register the cron job in the graph
-await ctx.assert(cronId, 'type', 'CronJob');
-await ctx.assert(cronId, 'cron:node', node);
-await ctx.assert(cronId, 'cron:interval', String(interval));
-await ctx.assert(cronId, 'cron:status', 'running');
-await ctx.assert(cronId, 'cron:started', new Date().toISOString());
+await ctx.insert(cronId, 'type', 'CronJob');
+await ctx.insert(cronId, 'cron:node', node);
+await ctx.insert(cronId, 'cron:interval', String(interval));
+await ctx.insert(cronId, 'cron:status', 'running');
+await ctx.insert(cronId, 'cron:started', new Date().toISOString());
 
 let tickCount = 0;
 const timer = setInterval(async () => {
@@ -2027,24 +2027,24 @@ return { cronId, node, interval };
   // ── cron:list ─────────────────────────────────────────────────
   // Lists all active cron jobs by querying the graph.
   "cron:list": `
-const cronQuads = await ctx.query({ p: 'type', o: 'CronJob' });
+const cronQuads = await ctx.query({ predicate: 'type', object: 'CronJob' });
 const jobs = [];
 
 for (const cq of cronQuads) {
-  const cronId = cq.s;
-  const nodeQuads = await ctx.query({ s: cronId, p: 'cron:node' });
-  const intervalQuads = await ctx.query({ s: cronId, p: 'cron:interval' });
-  const statusQuads = await ctx.query({ s: cronId, p: 'cron:status' });
-  const startedQuads = await ctx.query({ s: cronId, p: 'cron:started' });
+  const cronId = cq.subject;
+  const nodeQuads = await ctx.query({ subject: cronId, predicate: 'cron:node' });
+  const intervalQuads = await ctx.query({ subject: cronId, predicate: 'cron:interval' });
+  const statusQuads = await ctx.query({ subject: cronId, predicate: 'cron:status' });
+  const startedQuads = await ctx.query({ subject: cronId, predicate: 'cron:started' });
 
-  const status = statusQuads.length > 0 ? statusQuads[statusQuads.length - 1].o : 'unknown';
+  const status = statusQuads.length > 0 ? statusQuads[statusQuads.length - 1].object : 'unknown';
 
   jobs.push({
     cronId,
-    node: nodeQuads.length > 0 ? nodeQuads[0].o : 'unknown',
-    interval: intervalQuads.length > 0 ? parseInt(intervalQuads[0].o) : 0,
+    node: nodeQuads.length > 0 ? nodeQuads[0].object : 'unknown',
+    interval: intervalQuads.length > 0 ? parseInt(intervalQuads[0].object) : 0,
     status,
-    started: startedQuads.length > 0 ? startedQuads[0].o : null,
+    started: startedQuads.length > 0 ? startedQuads[0].object : null,
   });
 }
 
@@ -2065,11 +2065,11 @@ if (!name) throw new Error('[metrics] record.name is required');
 if (typeof durationMs !== 'number') throw new Error('[metrics] record.durationMs (number) is required');
 
 // Read current values
-const callsQuads = await ctx.query({ s: name, p: 'metric:calls', g: 'metrics' });
-const durationQuads = await ctx.query({ s: name, p: 'metric:duration_ms', g: 'metrics' });
+const callsQuads = await ctx.query({ subject: name, predicate: 'metric:calls', graph: 'metrics' });
+const durationQuads = await ctx.query({ subject: name, predicate: 'metric:duration_ms', graph: 'metrics' });
 
-const prevCalls = callsQuads.length > 0 ? parseInt(callsQuads[0].o) : 0;
-const prevDuration = durationQuads.length > 0 ? parseFloat(durationQuads[0].o) : 0;
+const prevCalls = callsQuads.length > 0 ? parseInt(callsQuads[0].object) : 0;
+const prevDuration = durationQuads.length > 0 ? parseFloat(durationQuads[0].object) : 0;
 
 const newCalls = prevCalls + 1;
 const newDuration = prevDuration + durationMs;
@@ -2079,12 +2079,12 @@ await ctx.set(name, 'metric:duration_ms', String(newDuration), 'metrics');
 
 let newErrors = 0;
 if (error) {
-  const errorsQuads = await ctx.query({ s: name, p: 'metric:errors', g: 'metrics' });
-  newErrors = (errorsQuads.length > 0 ? parseInt(errorsQuads[0].o) : 0) + 1;
+  const errorsQuads = await ctx.query({ subject: name, predicate: 'metric:errors', graph: 'metrics' });
+  newErrors = (errorsQuads.length > 0 ? parseInt(errorsQuads[0].object) : 0) + 1;
   await ctx.set(name, 'metric:errors', String(newErrors), 'metrics');
 } else {
-  const errorsQuads = await ctx.query({ s: name, p: 'metric:errors', g: 'metrics' });
-  newErrors = errorsQuads.length > 0 ? parseInt(errorsQuads[0].o) : 0;
+  const errorsQuads = await ctx.query({ subject: name, predicate: 'metric:errors', graph: 'metrics' });
+  newErrors = errorsQuads.length > 0 ? parseInt(errorsQuads[0].object) : 0;
 }
 
 return { name, calls: newCalls, duration_ms: newDuration, errors: newErrors };
@@ -2093,23 +2093,23 @@ return { name, calls: newCalls, duration_ms: newDuration, errors: newErrors };
   // ── metrics:report ─────────────────────────────────────────────
   // Returns a formatted report of all nodes' metrics sorted by call count.
   "metrics:report": `
-const callsQuads = await ctx.query({ p: 'metric:calls', g: 'metrics' });
+const callsQuads = await ctx.query({ predicate: 'metric:calls', graph: 'metrics' });
 const nodes = {};
 
 for (const q of callsQuads) {
-  nodes[q.s] = { name: q.s, calls: parseInt(q.o), duration_ms: 0, errors: 0 };
+  nodes[q.subject] = { name: q.subject, calls: parseInt(q.object), duration_ms: 0, errors: 0 };
 }
 
 // Enrich with duration
-const durationQuads = await ctx.query({ p: 'metric:duration_ms', g: 'metrics' });
+const durationQuads = await ctx.query({ predicate: 'metric:duration_ms', graph: 'metrics' });
 for (const q of durationQuads) {
-  if (nodes[q.s]) nodes[q.s].duration_ms = parseFloat(q.o);
+  if (nodes[q.subject]) nodes[q.subject].duration_ms = parseFloat(q.object);
 }
 
 // Enrich with errors
-const errorsQuads = await ctx.query({ p: 'metric:errors', g: 'metrics' });
+const errorsQuads = await ctx.query({ predicate: 'metric:errors', graph: 'metrics' });
 for (const q of errorsQuads) {
-  if (nodes[q.s]) nodes[q.s].errors = parseInt(q.o);
+  if (nodes[q.subject]) nodes[q.subject].errors = parseInt(q.object);
 }
 
 const sorted = Object.values(nodes).sort((a, b) => b.calls - a.calls);
@@ -2332,12 +2332,12 @@ if (signal) {
 `,
 
   "set": `
-const s = args && args.s;
-const p = args && args.p;
-const o = args && args.o;
-const g = (args && args.g) || '_';
+const s = args && args.subject;
+const p = args && args.predicate;
+const o = args && args.object;
+const g = (args && args.graph) || '_';
 if (!s || !p || o === undefined || o === null) {
-  throw new Error('[set] args.s, args.p, and args.o are required');
+  throw new Error('[set] args.subject, args.predicate, and args.object are required');
 }
 return ctx.set(s, p, o, g);
 `,
@@ -2415,12 +2415,10 @@ for await (const line of rl) {
       const results = await ctx.query(pattern);
       console.log(JSON.stringify(results, null, 2));
 
-    } else if (trimmed.startsWith('.assert ')) {
+    } else if (trimmed.startsWith('.insert ')) {
       const parts = trimmed.slice(8).split(' ');
-      if (parts.length < 3) { console.log('usage: .assert s p o [--g graph]'); }
+      if (parts.length < 3) { console.log('usage: .insert subject predicate object [--g graph]'); }
       else {
-        // If the last token starts with a known graph prefix or is '_', treat it as graph
-        // Use --g flag for explicit graph: .assert s p o --g graphname
         const ggIdx = parts.indexOf('--g');
         let s = parts[0], p = parts[1], o, g;
         if (ggIdx !== -1 && ggIdx + 1 < parts.length) {
@@ -2429,13 +2427,13 @@ for await (const line of rl) {
         } else {
           o = parts.slice(2).join(' ');
         }
-        const q = await ctx.assert(s, p, o, g || '_');
-        console.log('asserted:', JSON.stringify(q));
+        const q = await ctx.insert(s, p, o, g || '_');
+        console.log('inserted:', JSON.stringify(q));
       }
 
-    } else if (trimmed.startsWith('.retract ')) {
-      const parts = trimmed.slice(9).split(' ');
-      if (parts.length < 3) { console.log('usage: .retract s p o [--g graph]'); }
+    } else if (trimmed.startsWith('.remove ')) {
+      const parts = trimmed.slice(8).split(' ');
+      if (parts.length < 3) { console.log('usage: .remove subject predicate object [--g graph]'); }
       else {
         const ggIdx = parts.indexOf('--g');
         let s = parts[0], p = parts[1], o, g;
@@ -2445,8 +2443,8 @@ for await (const line of rl) {
         } else {
           o = parts.slice(2).join(' ');
         }
-        await ctx.retract(s, p, o, g || '_');
-        console.log('retracted');
+        await ctx.remove(s, p, o, g || '_');
+        console.log('removed');
       }
 
     } else if (trimmed.startsWith('.call ')) {
@@ -2464,25 +2462,25 @@ for await (const line of rl) {
       console.log('result:', JSON.stringify(result, null, 2));
 
     } else if (trimmed === '.nodes') {
-      const results = await ctx.query({ p: 'type', o: 'Function' });
-      for (const q of results) console.log(' ', q.s);
+      const results = await ctx.query({ predicate: 'type', object: 'Function' });
+      for (const q of results) console.log(' ', q.subject);
 
     } else if (trimmed === '.session') {
       console.log('session: ' + sessionId);
 
     } else if (trimmed.startsWith('.source ')) {
       const name = trimmed.slice(8).trim();
-      const rs = await ctx.query({ s: name, p: 'source' });
+      const rs = await ctx.query({ subject: name, predicate: 'source' });
       if (rs.length === 0) { console.log('no source found for: ' + name); }
-      else { console.log(renderMarkdown('\`\`\`js\\n' + rs[0].o + '\\n\`\`\`')); }
+      else { console.log(renderMarkdown('\`\`\`js\\n' + rs[0].object + '\\n\`\`\`')); }
 
     } else if (trimmed.startsWith('.edit ')) {
       const name = trimmed.slice(5).trim();
-      const rs = await ctx.query({ s: name, p: 'source' });
+      const rs = await ctx.query({ subject: name, predicate: 'source' });
       if (rs.length === 0) {
         console.log('no source found for: ' + name);
       } else {
-        const oldSource = rs[0].o;
+        const oldSource = rs[0].object;
         console.log('--- current source for ' + name + ' ---');
         console.log(oldSource);
         console.log('--- enter new source (end with a blank line) ---');
@@ -2495,15 +2493,15 @@ for await (const line of rl) {
           console.log('(empty input, no changes)');
         } else {
           const newSource = lines.join('\\n');
-          await ctx.retract(name, 'source');
-          await ctx.assert(name, 'source', newSource);
+          await ctx.remove(name, 'source');
+          await ctx.insert(name, 'source', newSource);
           console.log('source updated for: ' + name);
         }
       }
 
     } else if (trimmed.startsWith('.create ')) {
       const name = trimmed.slice(8).trim();
-      const existing = await ctx.query({ s: name, p: 'type', o: 'Function' });
+      const existing = await ctx.query({ subject: name, predicate: 'type', object: 'Function' });
       if (existing.length > 0) {
         console.log('node already exists: ' + name);
       } else {
@@ -2517,8 +2515,8 @@ for await (const line of rl) {
           console.log('(empty input, node not created)');
         } else {
           const source = lines.join('\\n');
-          await ctx.assert(name, 'type', 'Function');
-          await ctx.assert(name, 'source', source);
+          await ctx.insert(name, 'type', 'Function');
+          await ctx.insert(name, 'source', source);
           console.log('created node: ' + name);
         }
       }
@@ -2529,9 +2527,9 @@ for await (const line of rl) {
       console.log('spawned: ' + name);
 
     } else if (trimmed === '.sessions') {
-      const msgQuads = await ctx.query({ p: 'message' });
+      const msgQuads = await ctx.query({ predicate: 'message' });
       const sessions = new Set();
-      for (const q of msgQuads) sessions.add(q.g);
+      for (const q of msgQuads) sessions.add(q.graph);
       if (sessions.size === 0) { console.log('(no sessions)'); }
       else {
         for (const s of sessions) console.log(' ', s);
@@ -2541,7 +2539,7 @@ for await (const line of rl) {
       const target = trimmed.slice(8).trim();
       if (!target) { console.log('usage: .resume <sessionId>'); }
       else {
-        const msgQuads = await ctx.query({ p: 'message', g: target });
+        const msgQuads = await ctx.query({ predicate: 'message', graph: target });
         if (msgQuads.length === 0) {
           console.log('no messages found in session: ' + target);
         } else {
@@ -2653,9 +2651,9 @@ for await (const line of rl) {
 
     } else if (trimmed === '.help') {
       console.log('commands:');
-      console.log('  .query {"s":"...","p":"..."}  — query quads by pattern');
-      console.log('  .assert s p o [--g graph]     — assert a quad');
-      console.log('  .retract s p o [--g graph]    — retract a quad');
+      console.log('  .query {"subject":"...","predicate":"..."}  — query quads by pattern');
+      console.log('  .insert subject predicate object [--g graph]     — insert a quad');
+      console.log('  .remove subject predicate object [--g graph]    — remove a quad');
       console.log('  .call name [argsJSON]          — call a node');
       console.log('  .nodes                        — list all Function nodes');
       console.log('  .source <name>                — view a node source');
@@ -2762,8 +2760,8 @@ export async function seedTemplate(ctx: Ctx): Promise<void> {
   console.log("[template] seeding graph with primitive nodes...");
 
   for (const [name, source] of Object.entries(nodes)) {
-    await ctx.assert(name, "source", source);
-    await ctx.assert(name, "type", "Function");
+    await ctx.insert(name, "source", source);
+    await ctx.insert(name, "type", "Function");
   }
 
   console.log(`[template] seeded ${Object.keys(nodes).length} nodes`);

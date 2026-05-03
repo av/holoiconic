@@ -5,33 +5,33 @@ import type { Client } from "@libsql/client";
 
 export type Quad = {
   id: number;
-  s: string;
-  p: string;
-  o: string;
-  g: string;
+  subject: string;
+  predicate: string;
+  object: string;
+  graph: string;
   attrs?: Record<string, any>;
 };
 
 export type Change = {
-  type: "assert" | "retract";
+  type: "insert" | "remove";
   quad: Quad;
 };
 
 export type Pattern = {
-  s?: string;
-  p?: string;
-  o?: string;
-  g?: string;
+  subject?: string;
+  predicate?: string;
+  object?: string;
+  graph?: string;
 };
 
 export type Subscriber = (change: Change) => void;
 
 export type Ctx = {
-  assert(s: string, p: string, o: string, g?: string, embedding?: number[]): Promise<Quad>;
-  retract(s: string, p: string, o?: string, g?: string): Promise<Quad[]>;
+  insert(subject: string, predicate: string, object: string, graph?: string, embedding?: number[]): Promise<Quad>;
+  remove(subject: string, predicate: string, object?: string, graph?: string): Promise<Quad[]>;
   query(pattern: Pattern): Promise<Quad[]>;
   call(name: string, args?: any): Promise<any>;
-  set(s: string, p: string, o: string, g?: string, embedding?: number[]): Promise<Quad>;
+  set(subject: string, predicate: string, object: string, graph?: string, embedding?: number[]): Promise<Quad>;
   on(pattern: Pattern, callback: Subscriber): () => void;
   readonly self: string;
   /** @internal — exposed for sys:compiler to use the same AsyncLocalStorage */
@@ -49,20 +49,20 @@ const nodeStorage = new AsyncLocalStorage<string>();
 type Sub = { pattern: Pattern; callback: Subscriber };
 
 function matchesPattern(pattern: Pattern, quad: Quad): boolean {
-  if (pattern.s !== undefined && pattern.s !== quad.s) return false;
-  if (pattern.p !== undefined && pattern.p !== quad.p) return false;
-  if (pattern.o !== undefined && pattern.o !== quad.o) return false;
-  if (pattern.g !== undefined && pattern.g !== quad.g) return false;
+  if (pattern.subject !== undefined && pattern.subject !== quad.subject) return false;
+  if (pattern.predicate !== undefined && pattern.predicate !== quad.predicate) return false;
+  if (pattern.object !== undefined && pattern.object !== quad.object) return false;
+  if (pattern.graph !== undefined && pattern.graph !== quad.graph) return false;
   return true;
 }
 
 function rowToQuad(row: any): Quad {
   return {
     id: row.id as number,
-    s: row.s as string,
-    p: row.p as string,
-    o: row.o as string,
-    g: row.g as string,
+    subject: row.subject as string,
+    predicate: row.predicate as string,
+    object: row.object as string,
+    graph: row.graph as string,
     attrs: row.attrs ? JSON.parse(row.attrs as string) : undefined,
   };
 }
@@ -86,54 +86,54 @@ export function createCtx(db: Client): Ctx {
 
   const ctx: Ctx = {
     _nodeStorage: nodeStorage,
-    // ── assert ───────────────────────────────────────────────────
-    async assert(s: string, p: string, o: string, g: string = "_", embedding?: number[]): Promise<Quad> {
+    // ── insert ───────────────────────────────────────────────────
+    async insert(subject: string, predicate: string, object: string, graph: string = "_", embedding?: number[]): Promise<Quad> {
       let rs;
       if (embedding && Array.isArray(embedding) && embedding.length > 0) {
         const vecJson = JSON.stringify(embedding);
         rs = await db.execute({
-          sql: "INSERT OR IGNORE INTO quads (s, p, o, g, embedding) VALUES (?, ?, ?, ?, vector32(?)) RETURNING id, s, p, o, g, attrs",
-          args: [s, p, o, g, vecJson],
+          sql: "INSERT OR IGNORE INTO quads (subject, predicate, object, graph, embedding) VALUES (?, ?, ?, ?, vector32(?)) RETURNING id, subject, predicate, object, graph, attrs",
+          args: [subject, predicate, object, graph, vecJson],
         });
       } else {
         rs = await db.execute({
-          sql: "INSERT OR IGNORE INTO quads (s, p, o, g) VALUES (?, ?, ?, ?) RETURNING id, s, p, o, g, attrs",
-          args: [s, p, o, g],
+          sql: "INSERT OR IGNORE INTO quads (subject, predicate, object, graph) VALUES (?, ?, ?, ?) RETURNING id, subject, predicate, object, graph, attrs",
+          args: [subject, predicate, object, graph],
         });
       }
 
       if (rs.rows.length > 0) {
         const quad = rowToQuad(rs.rows[0]);
-        fire({ type: "assert", quad });
+        fire({ type: "insert", quad });
         return quad;
       }
 
       // Duplicate — RETURNING yields 0 rows on OR IGNORE
       const existing = await db.execute({
-        sql: "SELECT id, s, p, o, g, attrs FROM quads WHERE s = ? AND p = ? AND o = ? AND g = ?",
-        args: [s, p, o, g],
+        sql: "SELECT id, subject, predicate, object, graph, attrs FROM quads WHERE subject = ? AND predicate = ? AND object = ? AND graph = ?",
+        args: [subject, predicate, object, graph],
       });
       return rowToQuad(existing.rows[0]);
     },
 
-    // ── retract ──────────────────────────────────────────────────
-    async retract(s: string, p: string, o?: string, g: string = "_"): Promise<Quad[]> {
+    // ── remove ──────────────────────────────────────────────────
+    async remove(subject: string, predicate: string, object?: string, graph: string = "_"): Promise<Quad[]> {
       let rs;
-      if (o !== undefined) {
+      if (object !== undefined) {
         rs = await db.execute({
-          sql: "DELETE FROM quads WHERE s = ? AND p = ? AND o = ? AND g = ? RETURNING id, s, p, o, g, attrs",
-          args: [s, p, o, g],
+          sql: "DELETE FROM quads WHERE subject = ? AND predicate = ? AND object = ? AND graph = ? RETURNING id, subject, predicate, object, graph, attrs",
+          args: [subject, predicate, object, graph],
         });
       } else {
         rs = await db.execute({
-          sql: "DELETE FROM quads WHERE s = ? AND p = ? AND g = ? RETURNING id, s, p, o, g, attrs",
-          args: [s, p, g],
+          sql: "DELETE FROM quads WHERE subject = ? AND predicate = ? AND graph = ? RETURNING id, subject, predicate, object, graph, attrs",
+          args: [subject, predicate, graph],
         });
       }
 
       const quads = rs.rows.map(rowToQuad);
       for (const quad of quads) {
-        fire({ type: "retract", quad });
+        fire({ type: "remove", quad });
       }
       return quads;
     },
@@ -143,26 +143,26 @@ export function createCtx(db: Client): Ctx {
       const clauses: string[] = [];
       const args: any[] = [];
 
-      if (pattern.s !== undefined) {
-        clauses.push("s = ?");
-        args.push(pattern.s);
+      if (pattern.subject !== undefined) {
+        clauses.push("subject = ?");
+        args.push(pattern.subject);
       }
-      if (pattern.p !== undefined) {
-        clauses.push("p = ?");
-        args.push(pattern.p);
+      if (pattern.predicate !== undefined) {
+        clauses.push("predicate = ?");
+        args.push(pattern.predicate);
       }
-      if (pattern.o !== undefined) {
-        clauses.push("o = ?");
-        args.push(pattern.o);
+      if (pattern.object !== undefined) {
+        clauses.push("object = ?");
+        args.push(pattern.object);
       }
-      if (pattern.g !== undefined) {
-        clauses.push("g = ?");
-        args.push(pattern.g);
+      if (pattern.graph !== undefined) {
+        clauses.push("graph = ?");
+        args.push(pattern.graph);
       }
 
       const where = clauses.length > 0 ? `WHERE ${clauses.join(" AND ")}` : "";
       const rs = await db.execute({
-        sql: `SELECT id, s, p, o, g, attrs FROM quads ${where}`,
+        sql: `SELECT id, subject, predicate, object, graph, attrs FROM quads ${where}`,
         args,
       });
 
@@ -170,28 +170,28 @@ export function createCtx(db: Client): Ctx {
     },
 
     // ── set (atomic single-valued predicate) ─────────────────────
-    async set(s: string, p: string, o: string, g: string = "_", embedding?: number[]): Promise<Quad> {
+    async set(subject: string, predicate: string, object: string, graph: string = "_", embedding?: number[]): Promise<Quad> {
       const insertStmt = embedding && Array.isArray(embedding) && embedding.length > 0
-        ? { sql: "INSERT INTO quads (s, p, o, g, embedding) VALUES (?, ?, ?, ?, vector32(?)) RETURNING id, s, p, o, g, attrs", args: [s, p, o, g, JSON.stringify(embedding)] }
-        : { sql: "INSERT INTO quads (s, p, o, g) VALUES (?, ?, ?, ?) RETURNING id, s, p, o, g, attrs", args: [s, p, o, g] };
+        ? { sql: "INSERT INTO quads (subject, predicate, object, graph, embedding) VALUES (?, ?, ?, ?, vector32(?)) RETURNING id, subject, predicate, object, graph, attrs", args: [subject, predicate, object, graph, JSON.stringify(embedding)] }
+        : { sql: "INSERT INTO quads (subject, predicate, object, graph) VALUES (?, ?, ?, ?) RETURNING id, subject, predicate, object, graph, attrs", args: [subject, predicate, object, graph] };
 
       const [deleted, inserted] = await db.batch([
-        { sql: "DELETE FROM quads WHERE s = ? AND p = ? AND g = ? RETURNING id, s, p, o, g, attrs", args: [s, p, g] },
+        { sql: "DELETE FROM quads WHERE subject = ? AND predicate = ? AND graph = ? RETURNING id, subject, predicate, object, graph, attrs", args: [subject, predicate, graph] },
         insertStmt,
       ], "write");
 
       for (const row of deleted.rows) {
-        fire({ type: "retract", quad: rowToQuad(row) });
+        fire({ type: "remove", quad: rowToQuad(row) });
       }
       const quad = rowToQuad(inserted.rows[0]);
-      fire({ type: "assert", quad });
+      fire({ type: "insert", quad });
       return quad;
     },
 
     // ── call (naive kernel version — no cache) ───────────────────
     async call(name: string, args?: any): Promise<any> {
       const rs = await db.execute({
-        sql: "SELECT o FROM quads WHERE s = ? AND p = 'source'",
+        sql: "SELECT object FROM quads WHERE subject = ? AND predicate = 'source'",
         args: [name],
       });
 
@@ -199,7 +199,7 @@ export function createCtx(db: Client): Ctx {
         throw new Error(`[ctx.call] no source found for node: ${name}`);
       }
 
-      const source = rs.rows[0]!.o as string;
+      const source = rs.rows[0]!.object as string;
       const fn = new AsyncFunction("ctx", "args", source);
 
       return nodeStorage.run(name, () => fn(ctx, args));
