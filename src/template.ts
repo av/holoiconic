@@ -289,10 +289,10 @@ await ctx.insert('graph_query', 'tool_schema', JSON.stringify({
   input_schema: {
     type: 'object',
     properties: {
-      s: { type: 'string', description: 'Subject filter (optional)' },
-      p: { type: 'string', description: 'Predicate filter (optional)' },
-      o: { type: 'string', description: 'Object/value filter (optional)' },
-      g: { type: 'string', description: 'Graph filter (optional)' }
+      subject: { type: 'string', description: 'Subject filter (optional)' },
+      predicate: { type: 'string', description: 'Predicate filter (optional)' },
+      object: { type: 'string', description: 'Object/value filter (optional)' },
+      graph: { type: 'string', description: 'Graph filter (optional)' }
     }
   }
 }));
@@ -305,12 +305,12 @@ await ctx.insert('graph_assert', 'tool_schema', JSON.stringify({
   input_schema: {
     type: 'object',
     properties: {
-      s: { type: 'string', description: 'Subject' },
-      p: { type: 'string', description: 'Predicate' },
-      o: { type: 'string', description: 'Object/value' },
-      g: { type: 'string', description: 'Graph (defaults to _)' }
+      subject: { type: 'string', description: 'Subject' },
+      predicate: { type: 'string', description: 'Predicate' },
+      object: { type: 'string', description: 'Object/value' },
+      graph: { type: 'string', description: 'Graph (defaults to _)' }
     },
-    required: ['s', 'p', 'o']
+    required: ['subject', 'predicate', 'object']
   }
 }));
 
@@ -322,12 +322,12 @@ await ctx.insert('graph_retract', 'tool_schema', JSON.stringify({
   input_schema: {
     type: 'object',
     properties: {
-      s: { type: 'string', description: 'Subject' },
-      p: { type: 'string', description: 'Predicate' },
-      o: { type: 'string', description: 'Object/value' },
-      g: { type: 'string', description: 'Graph (defaults to _)' }
+      subject: { type: 'string', description: 'Subject' },
+      predicate: { type: 'string', description: 'Predicate' },
+      object: { type: 'string', description: 'Object/value' },
+      graph: { type: 'string', description: 'Graph (defaults to _)' }
     },
-    required: ['s', 'p', 'o']
+    required: ['subject', 'predicate', 'object']
   }
 }));
 
@@ -405,7 +405,7 @@ await ctx.insert('graph_describe', 'tool_schema', JSON.stringify({
   input_schema: {
     type: 'object',
     properties: {
-      subject: { type: 'string', description: 'The subject to describe (e.graph. a node name)' }
+      subject: { type: 'string', description: 'The subject to describe (e.g. a node name)' }
     },
     required: ['subject']
   }
@@ -419,7 +419,7 @@ await ctx.insert('graph_subjects', 'tool_schema', JSON.stringify({
   input_schema: {
     type: 'object',
     properties: {
-      type: { type: 'string', description: 'Filter by type (e.graph. Function, Tool, Spawned). Optional.' }
+      type: { type: 'string', description: 'Filter by type (e.g. Function, Tool, Spawned). Optional.' }
     }
   }
 }));
@@ -1038,7 +1038,7 @@ const html = \`<!DOCTYPE html>
 <div id="graph-panel">
   <div class="panel-header"><span>graph nodes</span><button id="create-node-btn">+ New Node</button></div>
   <div id="create-node-form">
-    <input id="new-node-name" type="text" placeholder="Node name (e.graph. my:function)" />
+    <input id="new-node-name" type="text" placeholder="Node name (e.g. my:function)" />
     <textarea id="new-node-source" placeholder="Node source code (async function body receiving ctx, args)"></textarea>
     <div class="form-buttons">
       <button class="create-cancel-btn" id="create-cancel">Cancel</button>
