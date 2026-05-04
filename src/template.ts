@@ -203,10 +203,18 @@ return ac;
 const cmd = args && args.cmd;
 if (!cmd) throw new Error('[shell] args.cmd is required');
 
-const proc = Bun.spawn(['sh', '-c', cmd], {
-  stdout: 'pipe',
-  stderr: 'pipe',
-});
+let proc;
+try {
+  proc = Bun.spawn(['sh', '-c', cmd], {
+    stdout: 'pipe',
+    stderr: 'pipe',
+  });
+} catch (e) {
+  if (e.code === 'E2BIG') {
+    throw new Error('[shell] command too long (' + cmd.length + ' chars) — exceeds OS argument limit');
+  }
+  throw e;
+}
 
 const stdout = await new Response(proc.stdout).text();
 const stderr = await new Response(proc.stderr).text();
@@ -297,11 +305,11 @@ await ctx.insert('graph_query', 'tool_schema', JSON.stringify({
   }
 }));
 
-// Assert tool — lets the agent assert quads
-await ctx.insert('graph_assert', 'type', 'Tool');
-await ctx.insert('graph_assert', 'tool_schema', JSON.stringify({
-  name: 'graph_assert',
-  description: 'Assert (insert) a quad into the RDF graph. If the quad already exists, this is a no-op.',
+// Insert tool — lets the agent insert quads
+await ctx.insert('graph_insert', 'type', 'Tool');
+await ctx.insert('graph_insert', 'tool_schema', JSON.stringify({
+  name: 'graph_insert',
+  description: 'Insert a quad into the RDF graph. If the quad already exists, this is a no-op.',
   input_schema: {
     type: 'object',
     properties: {
@@ -314,11 +322,11 @@ await ctx.insert('graph_assert', 'tool_schema', JSON.stringify({
   }
 }));
 
-// Retract tool — lets the agent retract quads
-await ctx.insert('graph_retract', 'type', 'Tool');
-await ctx.insert('graph_retract', 'tool_schema', JSON.stringify({
-  name: 'graph_retract',
-  description: 'Retract (delete) a quad from the RDF graph. If the quad does not exist, this is a no-op.',
+// Remove tool — lets the agent remove quads
+await ctx.insert('graph_remove', 'type', 'Tool');
+await ctx.insert('graph_remove', 'tool_schema', JSON.stringify({
+  name: 'graph_remove',
+  description: 'Remove a quad from the RDF graph. If the quad does not exist, this is a no-op.',
   input_schema: {
     type: 'object',
     properties: {
@@ -497,6 +505,20 @@ await ctx.insert('cron_create', 'tool_schema', JSON.stringify({
   }
 }));
 
+// Cron stop tool
+await ctx.insert('cron_stop', 'type', 'Tool');
+await ctx.insert('cron_stop', 'tool_schema', JSON.stringify({
+  name: 'cron_stop',
+  description: 'Stop a running cron job by its cronId.',
+  input_schema: {
+    type: 'object',
+    properties: {
+      cronId: { type: 'string', description: 'The cron job ID (from cron_create or cron_list)' }
+    },
+    required: ['cronId']
+  }
+}));
+
 // Cron list tool
 await ctx.insert('cron_list', 'type', 'Tool');
 await ctx.insert('cron_list', 'tool_schema', JSON.stringify({
@@ -521,7 +543,7 @@ await ctx.insert('metrics_report', 'tool_schema', JSON.stringify({
   }
 }));
 
-console.log('[agent:tools] registered 18 tools');
+console.log('[agent:tools] registered 19 tools');
 `,
 
   // ── agent:loop ─────────────────────────────────────────────────
@@ -676,12 +698,12 @@ for (let i = 0; i < maxIterations; i++) {
         if (toolInput.graph) pattern.graph = toolInput.graph;
         const quads = await ctx.query(pattern);
         result = JSON.stringify(quads, null, 2);
-      } else if (toolName === 'graph_assert') {
+      } else if (toolName === 'graph_insert') {
         const quad = await ctx.insert(toolInput.subject, toolInput.predicate, toolInput.object, toolInput.graph || '_');
-        result = 'Asserted: ' + JSON.stringify(quad);
-      } else if (toolName === 'graph_retract') {
+        result = 'Inserted: ' + JSON.stringify(quad);
+      } else if (toolName === 'graph_remove') {
         await ctx.remove(toolInput.subject, toolInput.predicate, toolInput.object, toolInput.graph || '_');
-        result = 'Retracted successfully';
+        result = 'Removed successfully';
       } else if (toolName === 'list_nodes') {
         const nodes = await ctx.query({ predicate: 'type', object: 'Function' });
         result = nodes.map(n => n.subject).join('\\n');
@@ -708,6 +730,8 @@ for (let i = 0; i < maxIterations; i++) {
       } else if (toolName === 'cron_create') {
         const cronResult = await ctx.call('cron', toolInput);
         result = JSON.stringify(cronResult);
+      } else if (toolName === 'cron_stop') {
+        result = JSON.stringify(await ctx.call('cron:stop', toolInput));
       } else if (toolName === 'cron_list') {
         result = JSON.stringify(await ctx.call('cron:list', toolInput));
       } else if (toolName === 'metrics_report') {
@@ -1499,8 +1523,10 @@ const server = Bun.serve({
     if (url.pathname.startsWith('/api/node/') && req.method === 'DELETE') {
       try {
         const name = decodeURIComponent(url.pathname.slice('/api/node/'.length));
-        // Retract ALL quads where this subject appears
         const quads = await ctx.query({ subject: name });
+        if (quads.length === 0) {
+          return Response.json({ error: 'Node not found: ' + name }, { status: 404, headers: corsHeaders });
+        }
         for (const q of quads) {
           await ctx.remove(q.subject, q.predicate, q.object, q.graph);
         }
@@ -1549,6 +1575,7 @@ if (signal) {
   // Exports all quads from the graph as JSON.
   "snapshot:export": `
 const allQuads = await ctx.query({});
+const embeddingCount = allQuads.filter(q => q.graph === 'embeddings' && q.predicate === 'embedding').length;
 const data = allQuads.map(q => ({
   subject: q.subject,
   predicate: q.predicate,
@@ -1558,11 +1585,15 @@ const data = allQuads.map(q => ({
 }));
 const json = JSON.stringify(data, null, 2);
 
+if (embeddingCount > 0) {
+  console.warn('[snapshot:export] ' + embeddingCount + ' embedding quad(s) exported without vectors — use reembed:true on import to regenerate');
+}
+
 const path = args && args.path;
 if (path) {
   await Bun.write(path, json);
   console.log('[snapshot:export] wrote ' + data.length + ' quads to ' + path);
-  return { count: data.length, path };
+  return { count: data.length, path, embeddingsWithoutVectors: embeddingCount };
 }
 return json;
 `,
@@ -1580,14 +1611,27 @@ if (args && args.path) {
   throw new Error('[snapshot:import] args.data or args.path is required');
 }
 
+const reembed = args && args.reembed;
 const quads = JSON.parse(jsonStr);
 if (!Array.isArray(quads)) throw new Error('[snapshot:import] expected JSON array');
 
 let count = 0;
 let skipped = 0;
+let reembedded = 0;
 for (const q of quads) {
   if (!q.subject || !q.predicate || (q.object === undefined || q.object === null)) {
     skipped++;
+    continue;
+  }
+  if (reembed && q.graph === 'embeddings' && q.predicate === 'embedding' && q.object) {
+    try {
+      await ctx.call('embed', { text: String(q.object) });
+      reembedded++;
+    } catch (e) {
+      console.warn('[snapshot:import] re-embed failed for ' + q.subject + ': ' + (e.message || e));
+      await ctx.insert(q.subject, q.predicate, String(q.object), q.graph);
+    }
+    count++;
     continue;
   }
   await ctx.insert(q.subject, q.predicate, String(q.object), q.graph || '_');
@@ -1597,8 +1641,11 @@ for (const q of quads) {
 if (skipped > 0) {
   console.warn('[snapshot:import] skipped ' + skipped + ' quads with missing subject/predicate/object fields');
 }
+if (reembedded > 0) {
+  console.log('[snapshot:import] re-embedded ' + reembedded + ' vectors');
+}
 console.log('[snapshot:import] imported ' + count + ' quads');
-return { count, skipped };
+return { count, skipped, reembedded };
 `,
 
   // ── snapshot:backup ────────────────────────────────────────────
@@ -1995,34 +2042,25 @@ const timer = setInterval(async () => {
 
 console.log('[cron] started ' + cronId + ' — runs ' + node + ' every ' + interval + 'ms');
 
-// Clean up on abort signal
-if (signal) {
-  signal.addEventListener('abort', async () => {
-    clearInterval(timer);
-    try {
-      await ctx.set(cronId, 'cron:status', 'stopped');
-      await ctx.set(cronId, 'cron:stopped', new Date().toISOString());
-      await ctx.set(cronId, 'cron:ticks', String(tickCount));
-    } catch {}
-    console.log('[cron] stopped ' + cronId + ' after ' + tickCount + ' ticks');
-  }, { once: true });
+// Always register in the timer map so cron:stop can find it
+if (!ctx._cronTimers) ctx._cronTimers = new Map();
+const stopCron = async () => {
+  clearInterval(timer);
+  ctx._cronTimers.delete(cronId);
+  try {
+    await ctx.set(cronId, 'cron:status', 'stopped');
+    await ctx.set(cronId, 'cron:stopped', new Date().toISOString());
+    await ctx.set(cronId, 'cron:ticks', String(tickCount));
+  } catch {}
+  console.log('[cron] stopped ' + cronId + ' after ' + tickCount + ' ticks');
+};
+ctx._cronTimers.set(cronId, { timer, stopCron });
 
-  // Keep alive until aborted
+if (signal) {
+  signal.addEventListener('abort', stopCron, { once: true });
   await new Promise((resolve) => {
     signal.addEventListener('abort', resolve, { once: true });
   });
-} else {
-  // No signal — store timer in a registry so it can be stopped via cron:stop or cleanup
-  if (!ctx._cronTimers) ctx._cronTimers = new Map();
-  ctx._cronTimers.set(cronId, { timer, stopCron: async () => {
-    clearInterval(timer);
-    try {
-      await ctx.set(cronId, 'cron:status', 'stopped');
-      await ctx.set(cronId, 'cron:stopped', new Date().toISOString());
-      await ctx.set(cronId, 'cron:ticks', String(tickCount));
-    } catch {}
-    console.log('[cron] stopped ' + cronId + ' after ' + tickCount + ' ticks');
-  }});
 }
 
 return { cronId, node, interval };
@@ -2055,6 +2093,20 @@ for (const cq of cronQuads) {
 return { jobs, count: jobs.length };
 `,
 
+  // ── cron:stop ──────────────────────────────────────────────────
+  // Stops a running cron job by cronId. Looks up the timer in ctx._cronTimers.
+  "cron:stop": `
+const cronId = args && args.cronId;
+if (!cronId) throw new Error('[cron:stop] args.cronId is required');
+
+if (!ctx._cronTimers) throw new Error('[cron:stop] no cron jobs registered');
+const entry = ctx._cronTimers.get(cronId);
+if (!entry) throw new Error('[cron:stop] cron job not found or already stopped: ' + cronId);
+
+await entry.stopCron();
+return { cronId, stopped: true };
+`,
+
   // ── metrics ──────────────────────────────────────────────────────
   // Tracks call counts, total duration, and errors per node.
   // Stores metrics as quads in the 'metrics' graph.
@@ -2066,7 +2118,7 @@ const name = record.name;
 const durationMs = record.durationMs;
 const error = record.error;
 if (!name) throw new Error('[metrics] record.name is required');
-if (typeof durationMs !== 'number') throw new Error('[metrics] record.durationMs (number) is required');
+if (typeof durationMs !== 'number' || !isFinite(durationMs) || durationMs < 0) throw new Error('[metrics] record.durationMs must be a non-negative finite number');
 
 // Serialize per-node to prevent read-modify-write races from concurrent calls
 if (!ctx._metricsLocks) ctx._metricsLocks = new Map();
@@ -2636,13 +2688,17 @@ for await (const line of rl) {
         const interval = parseInt(parts[1]);
         if (isNaN(interval) || interval < 100) { console.log('interval must be a number >= 100'); }
         else {
-          // Spawn cron as a supervised node
-          const ac = new AbortController();
-          ctx.call('cron', { node, interval, signal: ac.signal }).catch(err => {
-            if (err.name !== 'AbortError') console.error('[cron] error:', err.message || err);
-          });
-          console.log('cron started for ' + node + ' every ' + interval + 'ms');
+          const result = await ctx.call('cron', { node, interval });
+          console.log('cron started: ' + result.cronId);
         }
+      }
+
+    } else if (trimmed.startsWith('.cron-stop ')) {
+      const cronId = trimmed.slice(11).trim();
+      if (!cronId) { console.log('usage: .cron-stop <cronId>'); }
+      else {
+        const result = await ctx.call('cron:stop', { cronId });
+        console.log('stopped: ' + result.cronId);
       }
 
     } else if (trimmed === '.crons') {
@@ -2686,6 +2742,7 @@ for await (const line of rl) {
       console.log('  .versions <name>              — list saved versions of a node');
       console.log('  .restore <name> <seq>         — restore a node to a specific version');
       console.log('  .cron <name> <interval_ms>    — run a node on a timer');
+      console.log('  .cron-stop <cronId>           — stop a cron job');
       console.log('  .crons                        — list cron jobs');
       console.log('  .metrics                      — show metrics report');
       console.log('  .eval <code>                  — eval code with ctx');

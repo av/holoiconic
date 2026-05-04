@@ -2427,15 +2427,15 @@ async function testWebUiEdgeCases(ctx: Ctx) {
       fail("webui: POST empty name", e);
     }
 
-    // DELETE nonexistent node returns 200 with retracted=0
+    // DELETE nonexistent node returns 404
     try {
       const res = await fetch(`http://localhost:${port}/api/node/nonexistent:xyz`, {
         method: "DELETE",
       });
       const data = await res.json() as any;
-      if (res.status !== 200 || data.retracted !== 0)
-        throw new Error(`expected 200 with retracted=0, got ${res.status}/${JSON.stringify(data)}`);
-      ok("webui: DELETE nonexistent node returns 200 with retracted=0");
+      if (res.status !== 404 || !data.error)
+        throw new Error(`expected 404 with error, got ${res.status}/${JSON.stringify(data)}`);
+      ok("webui: DELETE nonexistent node returns 404");
     } catch (e) {
       fail("webui: DELETE nonexistent", e);
     }
@@ -4498,8 +4498,8 @@ async function testToolDispatchCompleteness(ctx: Ctx) {
   const expectedHandlers = [
     "shell",
     "graph_query",
-    "graph_assert",
-    "graph_retract",
+    "graph_insert",
+    "graph_remove",
     "list_nodes",
     "snapshot_export",
     "snapshot_import",
@@ -4512,6 +4512,7 @@ async function testToolDispatchCompleteness(ctx: Ctx) {
     "version_list",
     "version_restore",
     "cron_create",
+    "cron_stop",
     "cron_list",
     "metrics_report",
   ];
