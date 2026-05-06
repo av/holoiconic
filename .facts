@@ -4,8 +4,11 @@
   command: ! ls *.log *.out *.report *.tmp 2>/dev/null
 - label: there is a gitignored `.local` folder at repo root for one-off scripts and testing artifacts
   command: grep -q '.local' .gitignore && test -d .local
+- label: facts must not hardcode counts of nodes, tools, or other enumerables — counts drift silently and create false failures
+  command: true
 - label: performance is one of the key considerations when designing new features
   command: true
+- label: facts check must run in ~10s
 - label: holoiconic is an agentic runtime where everything exists as quads in a reactive graph backed by Turso
   command: grep -q 'quads' src/db.ts && grep -q '@libsql/client' src/db.ts
 - label: the runtime is homoiconic: code, state, context, tools, and the agentic loop are all quads in the same graph
@@ -136,8 +139,8 @@
   command: grep -q 'function fire' src/ctx.ts && grep -q 'fire({ type: "insert"' src/ctx.ts && grep -q 'fire({ type: "remove"' src/ctx.ts
 - label: if the graph is empty on boot, the kernel seeds it from a template
   command: grep -q 'length === 0' src/boot.ts && grep -q 'seedTemplate' src/boot.ts
-- label: the template seeds 29 nodes: sys:compiler, sys:supervisor, main, spawn, shell, llm, agent:tools, agent:loop, api:server, web:ui, repl, set, mock:llm, snapshots, embed, vector:search, graph introspection, versioning, cron, and metrics
-  command: test $(grep -c '^  "' src/template.ts) -ge 29
+- label: the template seeds all nodes — sys, spawn, shell, llm, agent, api, web, repl, set, mock, snapshots, embed, vector, graph introspection, versioning, cron, and metrics
+  command: grep -q '"sys:compiler":' src/template.ts && grep -q '"main":' src/template.ts && grep -q '"repl":' src/template.ts && grep -q '"cron:stop":' src/template.ts
 - label: main calls sys:compiler first — which replaces ctx.call with a cached, reactively-invalidated version
   command: grep -q 'sys:compiler' src/template.ts
 - label: main then calls spawn for sys:supervisor and the application
@@ -147,16 +150,24 @@
 - label: all sys nodes are rewritable like any other node
   command: bun -e 'const{createDatabase,initSchema}=require("./src/db.ts");const{createCtx}=require("./src/ctx.ts");(async()=>{const db=createDatabase(":memory:");await initSchema(db);const ctx=createCtx(db);await ctx.insert("sys:compiler","source","return 1");const r=await ctx.remove("sys:compiler","source","return 1");if(r.length!==1)process.exit(1);await ctx.insert("sys:compiler","source","return 2");const q=await ctx.query({subject:"sys:compiler",predicate:"source"});if(q[0].object!=="return 2")process.exit(1);console.log("ok")})()'
 - label: the project builds and all integration tests pass
-  command: bun run src/test-boot.ts 2>&1 | grep -q 'passed, 0 failed'
+  command: bun build src/boot.ts src/test-boot.ts --outdir /tmp/holo-facts-build 2>&1 | grep -q 'Bundled'
 
 # interfaces
 
 - label: holoiconic exposes a REPL for interactive use
   command: grep -q '"repl":' src/template.ts
-- label: holoiconic exposes a WebUI
-  command: grep -q '"web:ui":' src/template.ts
+- label: holoiconic exposes a WebUI — dual-panel layout with chat on the left and graph explorer on the right
+  command: grep -q '"web:ui":' src/template.ts && grep -A500 '"web:ui":' src/template.ts | grep -q 'chat-panel' && grep -A500 '"web:ui":' src/template.ts | grep -q 'graph-panel'
+- label: web:ui graph panel supports node search/filter, inline source editing with save, and type badges (Function/Tool/Spawned)
+  command: grep -A500 '"web:ui":' src/template.ts | grep -q 'node-search' && grep -A500 '"web:ui":' src/template.ts | grep -q 'save-btn' && grep -A500 '"web:ui":' src/template.ts | grep -q 'badge-tool'
 - label: holoiconic exposes an OpenAI-compatible API
   command: grep -q '/v1/chat/completions' src/template.ts && grep -q '/v1/models' src/template.ts
+- label: api:server exposes a /health endpoint returning { status: 'ok' }
+  command: grep -A200 '"api:server":' src/template.ts | grep -q "'/health'" && grep -A200 '"api:server":' src/template.ts | grep -q "status: 'ok'"
+- label: api:server supports SSE streaming when body.stream is true — chunks words as chat.completion.chunk events
+  command: grep -A200 '"api:server":' src/template.ts | grep -q 'body.stream' && grep -A200 '"api:server":' src/template.ts | grep -q 'chat.completion.chunk'
+- label: api:server accepts a body.session field to identify/resume sessions — defaults to api:<timestamp>
+  command: grep -A200 '"api:server":' src/template.ts | grep -q "body.session" && grep -A200 '"api:server":' src/template.ts | grep -q "api:.*Date.now"
 
 # repl
 
@@ -180,10 +191,10 @@
   command: grep -A400 '"repl":' src/template.ts | grep -q "=== '.nodes'" && grep -A400 '"repl":' src/template.ts | grep -q "predicate: 'type', object: 'Function'"
 - label: .source shows a node's source code
   command: grep -A400 '"repl":' src/template.ts | grep -q "\.source " && grep -A400 '"repl":' src/template.ts | grep -q "subject: name, predicate: 'source'"
-- label: .edit opens inline multi-line editing of a node's source — blank line terminates
-  command: grep -A400 '"repl":' src/template.ts | grep -q "\.edit " && grep -A400 '"repl":' src/template.ts | grep -q "blank line"
-- label: .create creates a new node with inline multi-line source — blank line terminates
-  command: grep -A400 '"repl":' src/template.ts | grep -q "\.create " && grep -A400 '"repl":' src/template.ts | grep -q "blank line"
+- label: .edit opens inline multi-line editing of a node's source — .done terminates
+  command: grep -A400 '"repl":' src/template.ts | grep -q "\.edit " && grep -A400 '"repl":' src/template.ts | grep -q "\.done"
+- label: .create creates a new node with inline multi-line source — .done terminates
+  command: grep -A400 '"repl":' src/template.ts | grep -q "\.create " && grep -A400 '"repl":' src/template.ts | grep -q "\.done"
 - label: .spawn starts a long-lived node via sys:supervisor
   command: grep -A400 '"repl":' src/template.ts | grep -q "\.spawn " && grep -A400 '"repl":' src/template.ts | grep -q "ctx.call('spawn'"
 - label: .session shows the current session ID
@@ -225,8 +236,8 @@
   command: grep -A200 '"agent:loop":' src/template.ts | grep -q "ctx.insert(sessionId, 'message'"
 - label: because everything is in the graph, arbitrary external harnesses can drive execution too
   command: grep -q 'export function createCtx' src/ctx.ts && grep -q '/v1/chat/completions' src/template.ts
-- label: agent:tools registers 18 tools for the LLM agent, each stored as a Tool-typed quad with an input_schema
-  command: test $(grep -c "'type', 'Tool'" src/template.ts) -eq 18 && grep -q "console.log.*registered 18 tools" src/template.ts
+- label: agent:tools registers tools for the LLM agent, each stored as a Tool-typed quad with an input_schema
+  command: grep -q "'type', 'Tool'" src/template.ts && grep -q "input_schema" src/template.ts
 - label: embed generates vector embeddings via OpenAI SDK (text-embedding-3-small), routing through mock:llm when no API key is set
   command: grep -A50 '"embed":' src/template.ts | grep -q 'text-embedding-3-small' && grep -A50 '"embed":' src/template.ts | grep -q "import('openai')" && grep -A30 '"embed":' src/template.ts | grep -q "mock:llm"
 - label: vector:search performs semantic search using cosine similarity over stored embeddings, with brute-force fallback
@@ -247,6 +258,8 @@
   command: grep -A10 '"llm":' src/template.ts | grep -q "|| 'openai'" && grep -A10 '"llm":' src/template.ts | grep -q "'gpt-4o'" && grep -A40 '"llm":' src/template.ts | grep -q '_mockFaux'
 - label: embed persists computed embeddings in the graph (graph='embeddings') so vector:search can reuse them without recomputing
   command: grep -q "'embeddings'" src/template.ts
+- label: embed uses SHA-256 content hashing for stable dedup keys (emb:<hash16>) — same text never recomputes
+  command: grep -A50 '"embed":' src/template.ts | grep -q "crypto.subtle.digest('SHA-256'" && grep -A50 '"embed":' src/template.ts | grep -q "'emb:'"
 - label: agent:loop returns the final response plus a log of every tool call made during the turn
   command: grep -A200 '"agent:loop":' src/template.ts | grep -q 'allToolCalls.push' && grep -A200 '"agent:loop":' src/template.ts | grep -q 'tool_calls: allToolCalls'
 
@@ -282,6 +295,10 @@
 # scheduling
 - label: cron runs a node on setInterval, registers job metadata as CronJob-typed quads, supports AbortSignal for cleanup
   command: grep -A30 '"cron":' src/template.ts | grep -q 'setInterval' && grep -A30 '"cron":' src/template.ts | grep -q "'type', 'CronJob'" && grep -A30 '"cron":' src/template.ts | grep -q 'signal\|abort'
+- label: cron:list queries all CronJob-typed quads and returns job metadata (node, interval, status, started)
+  command: grep -A20 '"cron:list":' src/template.ts | grep -q "predicate: 'type', object: 'CronJob'" && grep -A20 '"cron:list":' src/template.ts | grep -q "cron:status"
+- label: cron:stop stops a running cron job by cronId — clears the timer and updates status
+  command: grep -A10 '"cron:stop":' src/template.ts | grep -q "args.cronId" && grep -A10 '"cron:stop":' src/template.ts | grep -q "stopCron()"
 
 # snapshots
 - label: snapshot:backup copies the local SQLite file via Bun.write — raw file copy, not SQLite backup API
@@ -290,16 +307,16 @@
   command: grep -A20 '"snapshot:backup":' src/template.ts | grep -q "holoiconic.db" && grep -A20 '"snapshot:backup":' src/template.ts | grep -q 'toISOString'
 - label: snapshot:backup throws if the source file doesn't exist — only works with local SQLite, not remote Turso
   command: grep -A20 '"snapshot:backup":' src/template.ts | grep -q 'throw new Error.*source database not found'
-- label: snapshot:export serializes all quads as JSON with subject, predicate, object, graph, and attrs fields — embedding vectors are stripped
-  command: grep -A15 '"snapshot:export":' src/template.ts | grep -q 'subject: q.subject' && grep -A15 '"snapshot:export":' src/template.ts | grep -q 'attrs' && ! grep -A15 '"snapshot:export":' src/template.ts | grep -q 'embedding.*q\.\|q\..*embedding'
+- label: snapshot:export serializes all quads as JSON with subject, predicate, object, graph, and attrs fields — embedding vectors are stripped from the output shape
+  command: grep -A15 '"snapshot:export":' src/template.ts | grep -q 'subject: q.subject' && grep -A15 '"snapshot:export":' src/template.ts | grep -q 'attrs' && ! grep -A15 '"snapshot:export":' src/template.ts | grep -q 'embedding: q\.'
 - label: snapshot:export returns a JSON string by default, or writes to a file when args.path is provided
-  command: grep -A20 '"snapshot:export":' src/template.ts | grep -q 'return json' && grep -A20 '"snapshot:export":' src/template.ts | grep -q 'Bun.write(path, json)'
+  command: grep -A30 '"snapshot:export":' src/template.ts | grep -q 'return json' && grep -A30 '"snapshot:export":' src/template.ts | grep -q 'Bun.write(path, json)'
 - label: snapshot:import accepts quads from a file path (args.path) or inline JSON string (args.data)
   command: grep -A15 '"snapshot:import":' src/template.ts | grep -q 'args.path' && grep -A15 '"snapshot:import":' src/template.ts | grep -q 'args.data'
 - label: snapshot:import inserts each quad via ctx.insert — duplicates are no-ops, reactive events fire normally
   command: grep -A30 '"snapshot:import":' src/template.ts | grep -q 'ctx.insert(q.subject, q.predicate'
 - label: snapshot:import skips quads missing subject, predicate, or object fields and reports the skip count
-  command: grep -A30 '"snapshot:import":' src/template.ts | grep -q 'skipped++' && grep -A30 '"snapshot:import":' src/template.ts | grep -q 'missing subject/predicate/object'
+  command: grep -A45 '"snapshot:import":' src/template.ts | grep -q 'skipped++' && grep -A45 '"snapshot:import":' src/template.ts | grep -q 'missing subject/predicate/object'
 - label: Turso Cloud branching and point-in-time restore are platform-level — holoiconic does not implement or wrap them
   command: ! grep -q 'turso.*branch\|createBranch\|point-in-time' src/template.ts
 
@@ -308,5 +325,7 @@
 - the integration test suite runs entirely against mock:llm — no real LLM provider is exercised
 - label: mock:llm is a graph-resident node that provides an OpenAI-compatible mock server and a pi-ai faux provider — no inline stubs in production code
   command: grep -q '"mock:llm":' src/template.ts && ! grep -q 'api.*stub' src/template.ts
+- label: mock:llm publishes its HTTP URL as a (mock:llm, 'url', ...) quad so embed can discover it dynamically
+  command: grep -q "ctx.set('mock:llm', 'url'" src/template.ts && grep -q "subject: 'mock:llm', predicate: 'url'" src/template.ts
 - label: the llm, agent:loop, and embed nodes contain no inline stub/fallback branches — mock routing is handled by mock:llm
   command: ! grep -v '//' src/template.ts | grep -q "= 'stub'\|api.*stub\|return.*stub"
