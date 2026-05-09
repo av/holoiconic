@@ -86,6 +86,57 @@ async function testBootChain(ctx: Ctx) {
   }
 }
 
+async function testMockLlmAbortStopsServer() {
+  console.log("\n── mock:llm abort cleanup ──");
+
+  try {
+    const db = createDatabase(":memory:");
+    await initSchema(db);
+    const ctx = createCtx(db);
+    await seedTemplate(ctx);
+    await ctx.call("sys:compiler");
+
+    const ac = new AbortController();
+    const runPromise = ctx.call("mock:llm", { signal: ac.signal });
+    await new Promise((r) => setTimeout(r, 100));
+
+    const urlQuads = await ctx.query({ subject: "mock:llm", predicate: "url" });
+    if (urlQuads.length === 0) throw new Error("mock:llm did not publish url");
+    const url = urlQuads[0].object;
+
+    const health = await fetch(url + "/health");
+    if (health.status !== 200) throw new Error(`expected health 200 before abort, got ${health.status}`);
+
+    ac.abort();
+    await Promise.race([
+      runPromise,
+      new Promise((_, reject) => setTimeout(() => reject(new Error("mock:llm did not resolve after abort")), 1000)),
+    ]);
+    await new Promise((r) => setTimeout(r, 50));
+
+    let stopped = false;
+    try {
+      const timeout = new AbortController();
+      const timer = setTimeout(() => timeout.abort(), 500);
+      const res = await fetch(url + "/health", { signal: timeout.signal });
+      clearTimeout(timer);
+      stopped = !res.ok;
+    } catch {
+      stopped = true;
+    }
+    if (!stopped) throw new Error("mock:llm HTTP server still accepts requests after abort");
+
+    const status = await ctx.query({ subject: "mock:llm", predicate: "status" });
+    if (status.length === 0 || status[status.length - 1].object !== "stopped") {
+      throw new Error(`expected status=stopped, got ${status[status.length - 1]?.object}`);
+    }
+
+    ok("mock:llm abort stops HTTP server and records stopped status");
+  } catch (e) {
+    fail("mock:llm abort cleanup", e);
+  }
+}
+
 async function testShellNode(ctx: Ctx) {
   console.log("\n── Shell node ──");
 
@@ -8867,6 +8918,40 @@ async function testApiServerErrorHandling(ctx: Ctx) {
       fail("empty messages", e);
     }
 
+    // Test: non-object JSON body returns 400 instead of leaking a TypeError as 500
+    try {
+      const res = await fetch(`http://localhost:${port}/v1/chat/completions`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: "null",
+      });
+      const data = await res.json() as any;
+      if (res.status !== 400)
+        throw new Error(`expected 400 for null body, got ${res.status}`);
+      if (data.error.type !== "invalid_request_error")
+        throw new Error(`expected type='invalid_request_error', got '${data.error.type}'`);
+      ok("non-object JSON body returns 400 with invalid_request_error type");
+    } catch (e) {
+      fail("non-object JSON body", e);
+    }
+
+    // Test: messages must be an array
+    try {
+      const res = await fetch(`http://localhost:${port}/v1/chat/completions`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ model: "holoiconic", messages: "hello" }),
+      });
+      const data = await res.json() as any;
+      if (res.status !== 400)
+        throw new Error(`expected 400 for non-array messages, got ${res.status}`);
+      if (!data.error || !data.error.message.includes("messages must be an array"))
+        throw new Error(`expected messages array error, got '${data.error && data.error.message}'`);
+      ok("non-array messages returns 400 with validation error");
+    } catch (e) {
+      fail("non-array messages", e);
+    }
+
     // Test: messages with only system role (no user message)
     try {
       const res = await fetch(`http://localhost:${port}/v1/chat/completions`, {
@@ -10144,6 +10229,7 @@ async function main() {
   const ctx = await boot();
 
   await testBootChain(ctx);
+  await testMockLlmAbortStopsServer();
   await testShellNode(ctx);
   await testLlmNode(ctx);
   await testAgentTools(ctx);

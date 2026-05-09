@@ -329,3 +329,20 @@
   command: grep -q "ctx.set('mock:llm', 'url'" src/template.ts && grep -q "subject: 'mock:llm', predicate: 'url'" src/template.ts
 - label: the llm, agent:loop, and embed nodes contain no inline stub/fallback branches — mock routing is handled by mock:llm
   command: ! grep -v '//' src/template.ts | grep -q "= 'stub'\|api.*stub\|return.*stub"
+
+# bugbash
+
+## api
+- label: api:server returns a 400 invalid_request_error instead of 500 when /v1/chat/completions receives a non-object JSON body or non-array messages
+  command: bun run src/test-boot.ts >/tmp/holo-facts-test-boot.log 2>&1
+  tags: [spec, implemented]
+
+## mock
+- label: mock:llm stops its Bun HTTP server when its AbortSignal is aborted so the process can exit cleanly
+  command: timeout 10s bun run /tmp/holo-mock-abort-check.ts
+  tags: [spec, implemented]
+
+## docs
+- label: README documents the current insert/remove/set ctx primitives and the custom test command instead of stale assert/retract or bun test instructions
+  command: grep -q 'bun run src/test-boot.ts' README.md && grep -q 'ctx.insert' README.md && grep -q 'ctx.remove' README.md && grep -q 'ctx.set' README.md && ! grep -q 'bun test' README.md && ! grep -q 'ctx.assert' README.md && ! grep -q 'ctx.retract' README.md
+  tags: [spec, implemented]

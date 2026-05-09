@@ -12,7 +12,7 @@ async function boot() {
   // 2. Init schema (idempotent)
   await initSchema(db);
 
-  // 3. Create the context with 5 naive primitives
+  // 3. Create the context with 6 naive primitives
   const ctx = createCtx(db);
 
   // 4. Seed graph if empty

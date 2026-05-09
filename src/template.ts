@@ -785,6 +785,23 @@ function genId() {
   return 'chatcmpl-' + Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
 }
 
+function invalidRequest(message, headers) {
+  return Response.json({ error: { message, type: 'invalid_request_error' } }, { status: 400, headers });
+}
+
+function textFromContent(content) {
+  if (typeof content === 'string') return content;
+  if (Array.isArray(content)) {
+    return content.map(part => {
+      if (typeof part === 'string') return part;
+      if (part && part.type === 'text' && typeof part.text === 'string') return part.text;
+      return '';
+    }).join('');
+  }
+  if (content === undefined || content === null) return '';
+  return String(content);
+}
+
 const server = Bun.serve({
   port,
   async fetch(req) {
@@ -815,12 +832,18 @@ const server = Bun.serve({
     if (url.pathname === '/v1/chat/completions' && req.method === 'POST') {
       try {
         const body = await req.json();
+        if (body === null || typeof body !== 'object' || Array.isArray(body)) {
+          return invalidRequest('Request body must be a JSON object', corsHeaders);
+        }
+        if (body.messages !== undefined && !Array.isArray(body.messages)) {
+          return invalidRequest('messages must be an array', corsHeaders);
+        }
         const messages = body.messages || [];
-        const lastUserMsg = messages.filter(m => m.role === 'user').pop();
-        const prompt = lastUserMsg ? lastUserMsg.content : '';
+        const lastUserMsg = messages.filter(m => m && m.role === 'user').pop();
+        const prompt = lastUserMsg ? textFromContent(lastUserMsg.content) : '';
 
         if (!prompt) {
-          return Response.json({ error: { message: 'No user message found', type: 'invalid_request_error' } }, { status: 400, headers: corsHeaders });
+          return invalidRequest('No user message found', corsHeaders);
         }
 
         // Use session from request body (non-standard extension) or generate one
@@ -2386,10 +2409,12 @@ if (signal) {
   await new Promise(resolve => {
     signal.addEventListener('abort', () => {
       faux.unregister();
+      server.stop(true);
       resolve(undefined);
     }, { once: true });
     if (signal.aborted) {
       faux.unregister();
+      server.stop(true);
       resolve(undefined);
     }
   });
