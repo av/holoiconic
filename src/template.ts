@@ -228,17 +228,14 @@ return stdout;
 `,
 
   // ── llm ─────────────────────────────────────────────────────────
-  // Real Anthropic API integration via fetch.
+  // Provider-agnostic LLM integration via pi-ai.
   "llm": `
 const piAi = await import('@mariozechner/pi-ai');
-const { getModel, complete, getEnvApiKey } = piAi;
+const { getModel, complete, stream, getEnvApiKey } = piAi;
 
 // Resolve provider and model from args, defaulting to OpenAI-compatible
 const providerName = (args && args.provider) || 'openai';
 const modelId = (args && args.model) || (providerName === 'anthropic' ? 'claude-sonnet-4-20250514' : 'gpt-4o');
-
-// Check for API key — if none, route through mock:llm faux provider
-const apiKey = (args && args.apiKey) || getEnvApiKey(providerName);
 
 const messages = args && args.messages;
 if (!messages || !Array.isArray(messages)) {
@@ -249,6 +246,30 @@ if (!messages || !Array.isArray(messages)) {
 const piContext = { messages };
 if (args && args.system) piContext.systemPrompt = args.system;
 if (args && args.tools && args.tools.length > 0) piContext.tools = args.tools;
+
+let apiKey = args && args.apiKey;
+let refreshedOAuthCredentials = null;
+
+// Optional pi-ai OAuth credential support. Callers can pass args.oauthCredentials
+// as a credentials map, or args.authPath pointing at an auth.json file.
+if (!apiKey && args && (args.oauthCredentials || args.authPath)) {
+  const oauth = await import('@mariozechner/pi-ai/oauth');
+  let credentials = args.oauthCredentials;
+  if (!credentials && args.authPath) {
+    credentials = JSON.parse(await Bun.file(args.authPath).text());
+  }
+  const oauthResult = await oauth.getOAuthApiKey(providerName, credentials);
+  if (oauthResult && oauthResult.apiKey) {
+    apiKey = oauthResult.apiKey;
+    refreshedOAuthCredentials = { ...credentials, [providerName]: { type: 'oauth', ...oauthResult.newCredentials } };
+    if (args.authPath) {
+      await Bun.write(args.authPath, JSON.stringify(refreshedOAuthCredentials, null, 2));
+    }
+  }
+}
+
+// Check for API key — if none, route through mock:llm faux provider
+apiKey = apiKey || getEnvApiKey(providerName);
 
 let model;
 let opts = {};
@@ -267,14 +288,33 @@ if (apiKey) {
 
 if (args && args.max_tokens) opts.maxTokens = args.max_tokens;
 if (args && args.temperature !== undefined) opts.temperature = args.temperature;
+if (args && args.signal) opts.signal = args.signal;
+if (args && args.sessionId) opts.sessionId = args.sessionId;
+
+if (args && args.stream) {
+  let finalMessage = null;
+  for await (const event of stream(model, piContext, opts)) {
+    if (event.type === 'text_delta' && typeof args.onDelta === 'function') {
+      await args.onDelta(event.delta, event);
+    }
+    if (event.type === 'done') finalMessage = event.message;
+    if (event.type === 'error') throw new Error(event.error.errorMessage || '[llm] streaming error');
+  }
+  if (!finalMessage) throw new Error('[llm] stream ended without a final message');
+  if (refreshedOAuthCredentials) finalMessage.oauthCredentials = refreshedOAuthCredentials;
+  return finalMessage;
+}
 
 const result = await complete(model, piContext, opts);
+if (refreshedOAuthCredentials) result.oauthCredentials = refreshedOAuthCredentials;
 return result;
 `,
 
   // ── agent:tools ─────────────────────────────────────────────────
   // Registers core tools as Tool-typed quads for the agentic loop.
   "agent:tools": `
+const { Type } = await import('@mariozechner/pi-ai');
+
 // Shell tool
 await ctx.insert('shell', 'type', 'Tool');
 await ctx.insert('shell', 'tool_schema', JSON.stringify({
@@ -542,6 +582,37 @@ await ctx.insert('metrics_report', 'tool_schema', JSON.stringify({
     }
   }
 }));
+
+function toTypeBox(schema) {
+  if (!schema || typeof schema !== 'object') return Type.Object({});
+  const opts = schema.description ? { description: schema.description } : {};
+  if (schema.type === 'string') return Type.String(opts);
+  if (schema.type === 'number') return Type.Number(opts);
+  if (schema.type === 'boolean') return Type.Boolean(opts);
+  if (schema.type === 'array') return Type.Array(toTypeBox(schema.items || { type: 'string' }), opts);
+  if (schema.type === 'object' || schema.properties) {
+    const props = {};
+    const required = new Set(schema.required || []);
+    for (const [key, value] of Object.entries(schema.properties || {})) {
+      const propSchema = toTypeBox(value);
+      props[key] = required.has(key) ? propSchema : Type.Optional(propSchema);
+    }
+    return Type.Object(props, { additionalProperties: true, ...opts });
+  }
+  return Type.Any(opts);
+}
+
+// Normalize every tool schema through TypeBox. The stored graph format remains
+// plain JSON schema, but it is generated from pi-ai's TypeBox re-export.
+for (const tool of await ctx.query({ predicate: 'type', object: 'Tool' })) {
+  const schemas = await ctx.query({ subject: tool.subject, predicate: 'tool_schema' });
+  for (const q of schemas) {
+    const schema = JSON.parse(q.object);
+    schema.input_schema = toTypeBox(schema.input_schema || { type: 'object', properties: {} });
+    await ctx.remove(q.subject, q.predicate, q.object, q.graph);
+    await ctx.insert(q.subject, q.predicate, JSON.stringify(schema), q.graph);
+  }
+}
 
 console.log('[agent:tools] registered 19 tools');
 `,

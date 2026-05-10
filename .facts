@@ -17,7 +17,7 @@
   command: ! grep -q 'protected\|readonly.*quad\|ACL\|permission' src/ctx.ts
 - label: breaking sys nodes breaks the runtime — that is by design, the system is fully self-modifiable
   command: grep -q 'ctx\.call =' src/template.ts && ! grep -q 'immutable\|frozen\|Object.freeze' src/ctx.ts
-- label: the runtime dependencies are @libsql/client, @mariozechner/pi-ai, and @mariozechner/pi-tui
+- label: runtime dependencies include libsql/client, mariozechner/pi-ai, and mariozechner/pi-tui
   command: jq -r '.dependencies | keys[]' package.json | grep -q '@libsql/client' && jq -r '.dependencies | keys[]' package.json | grep -q '@mariozechner/pi-ai' && jq -r '.dependencies | keys[]' package.json | grep -q '@mariozechner/pi-tui'
 
 # quad
@@ -252,10 +252,10 @@
   command: grep -A200 '"agent:loop":' src/template.ts | grep -q "toolName.replace(/_/g, ':')"
 - label: agent:loop gives the LLM a system prompt explaining the runtime — quads, reactivity, available tools
   command: grep -A40 '"agent:loop":' src/template.ts | grep -q 'systemPrompt' && grep -A40 '"agent:loop":' src/template.ts | grep -q 'reactive graph'
-- label: the llm node uses pi-ai complete/stream — provider-agnostic, defaults to OpenAI-compatible
-  command: grep -A45 '"llm":' src/template.ts | grep -q "import('@mariozechner/pi-ai')" && grep -A45 '"llm":' src/template.ts | grep -q "complete(model, piContext"
+- label: the llm node uses pi-ai complete for non-streaming calls and pi-ai stream when args.stream is true
+  command: grep -A90 '"llm":' src/template.ts | grep -q 'complete(model, piContext' && grep -A90 '"llm":' src/template.ts | grep -q 'stream(model, piContext'
 - label: the llm node defaults to openai provider with gpt-4o, and routes through mock:llm faux provider when no API key is set
-  command: grep -A10 '"llm":' src/template.ts | grep -q "|| 'openai'" && grep -A10 '"llm":' src/template.ts | grep -q "'gpt-4o'" && grep -A40 '"llm":' src/template.ts | grep -q '_mockFaux'
+  command: grep -A20 '"llm":' src/template.ts | grep -q "|| 'openai'" && grep -A20 '"llm":' src/template.ts | grep -q "'gpt-4o'" && grep -A80 '"llm":' src/template.ts | grep -q '_mockFaux'
 - label: embed persists computed embeddings in the graph (graph='embeddings') so vector:search can reuse them without recomputing
   command: grep -q "'embeddings'" src/template.ts
 - label: embed uses SHA-256 content hashing for stable dedup keys (emb:<hash16>) — same text never recomputes
@@ -267,14 +267,14 @@
 
 - label: first-class provider is OpenAI-compatible — Anthropic is one of many, not primary
   command: grep -A10 '"llm":' src/template.ts | grep -q "|| 'openai'" && grep -A10 '"llm":' src/template.ts | grep -q "providerName === 'anthropic'"
-- label: llm and embed nodes use @mariozechner/pi-ai — no raw fetch to any provider
-  command: grep -q "@mariozechner/pi-ai" src/template.ts && ! grep -q "await fetch('https://api.anthropic.com" src/template.ts && ! grep -q "await fetch('https://api.openai.com" src/template.ts
+- label: llm uses pi-ai for completions, embed uses the OpenAI SDK with pi-ai env key lookup, and neither node raw-fetches provider APIs
+  command: grep -A90 '"llm":' src/template.ts | grep -q "import('@mariozechner/pi-ai')" && grep -A60 '"embed":' src/template.ts | grep -q "import('@mariozechner/pi-ai')" && grep -A60 '"embed":' src/template.ts | grep -q "import('openai')" && ! grep -q "await fetch('https://api.anthropic.com\|await fetch('https://api.openai.com" src/template.ts
 - label: pi-ai covers OpenAI, Anthropic, Google, Mistral, Groq, Bedrock, Ollama, and custom endpoints
   command: bun -e "const{getProviders}=require('@mariozechner/pi-ai');const p=getProviders();['openai','anthropic','google','mistral','groq','amazon-bedrock'].forEach(x=>{if(!p.includes(x)){console.error('missing:',x);process.exit(1)}});console.log('ok')"
 - label: auth via pi-ai OAuth — Claude Pro/Max, GitHub Copilot, Gemini CLI all supported
-  command: test -f node_modules/@mariozechner/pi-ai/dist/utils/oauth/types.d.ts && grep -q 'OAuthProvider' node_modules/@mariozechner/pi-ai/dist/utils/oauth/types.d.ts
+  command: grep -A80 '"llm":' src/template.ts | grep -q '@mariozechner/pi-ai/oauth' && grep -A90 '"llm":' src/template.ts | grep -q 'getOAuthApiKey'
 - label: tool schemas use TypeBox (re-exported from pi-ai)
-  command: bun -e "const{Type}=require('@mariozechner/pi-ai');if(typeof Type.String!=='function')process.exit(1);if(typeof Type.Object!=='function')process.exit(1);console.log('ok')"
+  command: grep -A280 '"agent:tools":' src/template.ts | grep -q 'Type\.Object' && grep -A280 '"agent:tools":' src/template.ts | grep -q 'Type\.String'
 - label: agent:loop uses pi-ai stream/complete, stays graph-resident
   command: grep -A200 '"agent:loop":' src/template.ts | grep -q "import('@mariozechner/pi-ai')" && grep -A200 '"agent:loop":' src/template.ts | grep -q 'stream(model, piContext' && grep -A200 '"agent:loop":' src/template.ts | grep -q 'complete(model, piContext'
 
@@ -331,18 +331,21 @@
   command: ! grep -v '//' src/template.ts | grep -q "= 'stub'\|api.*stub\|return.*stub"
 
 # bugbash
+- label: bugbash validation facts do not depend on helper files under /tmp
+  command: ! grep -n '^  command:.*bun run /tmp/hol[o]' .facts
+  tags: [implemented]
 
 ## api
 - label: api:server returns a 400 invalid_request_error instead of 500 when /v1/chat/completions receives a non-object JSON body or non-array messages
-  command: bun run src/test-boot.ts >/tmp/holo-facts-test-boot.log 2>&1
-  tags: [spec, implemented]
+  command: bun -e 'const {createDatabase,initSchema}=await import("./src/db.ts");const{createCtx}=await import("./src/ctx.ts");const{seedTemplate}=await import("./src/template.ts");const db=createDatabase(":memory:");await initSchema(db);const ctx=createCtx(db);await seedTemplate(ctx);await ctx.call("sys:compiler");const mockAc=new AbortController();ctx.call("mock:llm",{signal:mockAc.signal}).catch(()=>{});await new Promise(r=>setTimeout(r,50));const ac=new AbortController();const port=19000+Math.floor(Math.random()*1000);ctx.call("api:server",{port,signal:ac.signal}).catch(()=>{});await new Promise(r=>setTimeout(r,50));async function post(body){return fetch(`http://localhost:${port}/v1/chat/completions`,{method:"POST",headers:{"content-type":"application/json"},body})}const a=await post("null");const aj=await a.json();if(a.status!==400||aj.error.type!=="invalid_request_error")process.exit(1);const b=await post(JSON.stringify({messages:"bad"}));const bj=await b.json();if(b.status!==400||bj.error.type!=="invalid_request_error")process.exit(1);ac.abort();mockAc.abort();await new Promise(r=>setTimeout(r,50));'
+  tags: [implemented]
 
 ## mock
 - label: mock:llm stops its Bun HTTP server when its AbortSignal is aborted so the process can exit cleanly
-  command: timeout 10s bun run /tmp/holo-mock-abort-check.ts
-  tags: [spec, implemented]
+  command: bun -e 'const {createDatabase,initSchema}=await import("./src/db.ts");const{createCtx}=await import("./src/ctx.ts");const{seedTemplate}=await import("./src/template.ts");const db=createDatabase(":memory:");await initSchema(db);const ctx=createCtx(db);await seedTemplate(ctx);await ctx.call("sys:compiler");const ac=new AbortController();const run=ctx.call("mock:llm",{signal:ac.signal});await new Promise(r=>setTimeout(r,50));const url=(await ctx.query({subject:"mock:llm",predicate:"url"}))[0]?.object;if(!url)process.exit(1);const before=await fetch(url+"/health");if(before.status!==200)process.exit(1);ac.abort();await Promise.race([run,new Promise((_,rej)=>setTimeout(()=>rej(new Error("timeout")),1000))]);let stopped=false;try{const timeout=new AbortController();const timer=setTimeout(()=>timeout.abort(),300);const after=await fetch(url+"/health",{signal:timeout.signal});clearTimeout(timer);stopped=!after.ok}catch{stopped=true}if(!stopped)process.exit(1);'
+  tags: [implemented]
 
 ## docs
 - label: README documents the current insert/remove/set ctx primitives and the custom test command instead of stale assert/retract or bun test instructions
   command: grep -q 'bun run src/test-boot.ts' README.md && grep -q 'ctx.insert' README.md && grep -q 'ctx.remove' README.md && grep -q 'ctx.set' README.md && ! grep -q 'bun test' README.md && ! grep -q 'ctx.assert' README.md && ! grep -q 'ctx.retract' README.md
-  tags: [spec, implemented]
+  tags: [implemented]

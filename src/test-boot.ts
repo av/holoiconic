@@ -179,6 +179,29 @@ async function testLlmNode(ctx: Ctx) {
   }
 }
 
+async function testLlmStreaming(ctx: Ctx) {
+  console.log("\n── LLM streaming ──");
+
+  try {
+    const chunks: string[] = [];
+    const result = await ctx.call("llm", {
+      messages: [{ role: "user", content: "stream hi" }],
+      stream: true,
+      onDelta: (delta: string) => chunks.push(delta),
+    });
+    if (!result || result.role !== "assistant")
+      throw new Error(`unexpected result: ${JSON.stringify(result)}`);
+    const text = result.content.filter((b: any) => b.type === "text").map((b: any) => b.text).join("");
+    if (!text.includes("stream hi"))
+      throw new Error(`final streamed text missing prompt: ${text}`);
+    if (chunks.join("") !== text)
+      throw new Error(`stream deltas did not reconstruct final text: ${chunks.join("")} !== ${text}`);
+    ok("llm streams via pi-ai and returns final assistant message");
+  } catch (e) {
+    fail("llm streaming", e);
+  }
+}
+
 async function testAgentTools(ctx: Ctx) {
   console.log("\n── Agent tools ──");
 
@@ -199,7 +222,9 @@ async function testAgentTools(ctx: Ctx) {
     const schema = JSON.parse(shellSchema[0].object);
     if (schema.name !== "shell")
       throw new Error(`expected shell schema name, got: ${schema.name}`);
-    ok("shell tool has valid schema");
+    if (schema.input_schema.type !== "object" || !schema.input_schema.properties || !schema.input_schema.properties.cmd)
+      throw new Error("shell schema input_schema was not normalized as an object schema");
+    ok("shell tool has valid TypeBox-derived schema");
   } catch (e) {
     fail("agent:tools", e);
   }
@@ -10232,6 +10257,7 @@ async function main() {
   await testMockLlmAbortStopsServer();
   await testShellNode(ctx);
   await testLlmNode(ctx);
+  await testLlmStreaming(ctx);
   await testAgentTools(ctx);
   await testAgentLoop(ctx);
   await testSessionContinuity(ctx);
