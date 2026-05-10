@@ -633,6 +633,8 @@ async function testWebUi(ctx: Ctx) {
         throw new Error("HTML body does not contain 'holoiconic'");
       if (!body.includes("<script>"))
         throw new Error("HTML body does not contain <script>");
+      const script = body.slice(body.indexOf("<script>") + "<script>".length, body.lastIndexOf("</script>"));
+      new Function(script);
       ok("GET / serves HTML chat interface");
     } catch (e) {
       fail("GET / HTML", e);
@@ -8536,6 +8538,37 @@ return 'done';
   }
 }
 
+async function testSpawnForwardsArgs(ctx: Ctx) {
+  console.log("\n── Spawn forwards args ──");
+
+  try {
+    const nodeName = "test:spawnargs" + Date.now();
+    await ctx.insert(nodeName, "type", "Function");
+    await ctx.insert(nodeName, "source", `
+await ctx.set('${nodeName}', 'seen-port', String(args && args.port));
+await ctx.set('${nodeName}', 'seen-custom', String(args && args.custom));
+await ctx.set('${nodeName}', 'seen-signal', String(!!(args && args.signal)));
+if (args && args.signal) {
+  await new Promise(r => args.signal.addEventListener('abort', r, { once: true }));
+}
+`);
+
+    const ac = await ctx.call("spawn", { node: nodeName, args: { port: 12345, custom: "ok" } });
+    await new Promise((r) => setTimeout(r, 150));
+
+    const port = await ctx.query({ subject: nodeName, predicate: "seen-port", object: "12345" });
+    const custom = await ctx.query({ subject: nodeName, predicate: "seen-custom", object: "ok" });
+    const signal = await ctx.query({ subject: nodeName, predicate: "seen-signal", object: "true" });
+    if (port.length !== 1 || custom.length !== 1 || signal.length !== 1)
+      throw new Error("spawn did not forward custom args and signal to spawned node");
+
+    ac.abort();
+    ok("spawn: forwards args.args while injecting AbortSignal");
+  } catch (e) {
+    fail("spawn forwards args", e);
+  }
+}
+
 async function testSpawnSignalDelivery(ctx: Ctx) {
   console.log("\n── Spawn signal delivery ──");
 
@@ -10366,6 +10399,7 @@ async function main() {
   await testSupervisorLifecycleCleanup(ctx);
   await testSupervisorRetryCountReset(ctx);
   await testSpawnReturnsBehavior(ctx);
+  await testSpawnForwardsArgs(ctx);
   await testSpawnSignalDelivery(ctx);
   await testSpawnRetractCleanup(ctx);
   await testSpawnConcurrency(ctx);
@@ -10400,12 +10434,15 @@ async function main() {
     }
   }
 
+  // Give spawned nodes a moment to observe abort and finish cleanup writes
+  await new Promise((r) => setTimeout(r, 500));
+
   // Clean up test db
   try {
     unlinkSync("test-holoiconic.db");
   } catch {}
 
-  if (failed > 0) process.exit(1);
+  process.exit(failed > 0 ? 1 : 0);
 }
 
 main().catch((err) => {

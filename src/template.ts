@@ -80,9 +80,11 @@ const retryCounts = new Map();
 const signal = args && args.signal;
 const MAX_RETRIES = 3;
 
-function startNode(name, ac) {
+function startNode(name, ac, nodeArgs) {
+  const baseArgs = nodeArgs || (ctx._supervisorNodeArgs && ctx._supervisorNodeArgs.get(name)) || {};
+  if (ctx._supervisorNodeArgs) ctx._supervisorNodeArgs.set(name, baseArgs);
   controllers.set(name, ac);
-  ctx.call(name, { signal: ac.signal }).catch(async (err) => {
+  ctx.call(name, { ...baseArgs, signal: ac.signal }).catch(async (err) => {
     if (err.name === 'AbortError') return;
     const retries = (retryCounts.get(name) || 0);
     console.error('[sys:supervisor] node crashed:', name, '-', err.message || err);
@@ -94,7 +96,7 @@ function startNode(name, ac) {
       // Only retry if not aborted
       if (!ac.signal.aborted) {
         const newAc = new AbortController();
-        startNode(name, newAc);
+        startNode(name, newAc, baseArgs);
       }
     } else {
       console.error('[sys:supervisor] node ' + name + ' exceeded max retries (' + MAX_RETRIES + '), giving up');
@@ -117,6 +119,7 @@ ctx.on({ predicate: 'type', object: 'Spawned' }, async (change) => {
       ac.abort();
       controllers.delete(name);
       retryCounts.delete(name);
+      if (ctx._supervisorNodeArgs) ctx._supervisorNodeArgs.delete(name);
     }
   }
 });
@@ -144,6 +147,7 @@ ctx.on({ predicate: 'source' }, async (change) => {
 
 // Expose controller registration for spawn node
 ctx._supervisorControllers = controllers;
+ctx._supervisorNodeArgs = new Map();
 // Expose startNode for spawn node to use
 ctx._supervisorStartNode = startNode;
 
@@ -165,6 +169,7 @@ if (signal) {
   // Starts a supervised long-lived node.
   "spawn": `
 const node = args && args.node;
+const nodeArgs = (args && args.args) || {};
 if (!node) throw new Error('[spawn] args.node is required');
 
 // If already spawned, abort the old instance first to prevent leaks
@@ -183,13 +188,13 @@ await ctx.insert(node, 'type', 'Spawned');
 
 // Use supervisor's startNode if available (enables retry/backoff)
 if (ctx._supervisorStartNode) {
-  ctx._supervisorStartNode(node, ac);
+  ctx._supervisorStartNode(node, ac, nodeArgs);
 } else {
   // Fallback: store controller and start manually
   if (ctx._supervisorControllers) {
     ctx._supervisorControllers.set(node, ac);
   }
-  ctx.call(node, { signal: ac.signal }).catch(err => {
+  ctx.call(node, { ...nodeArgs, signal: ac.signal }).catch(err => {
     if (err.name !== 'AbortError') console.error('[spawn] node error:', node, err);
   });
 }
@@ -1067,7 +1072,7 @@ if (signal) {
   // Chat + graph explorer WebUI with node editing, creation, and tool call visibility.
   "web:ui": `
 const signal = args && args.signal;
-const port = (args && args.port) || 3002;
+let port = (args && args.port) || 3002;
 const apiPort = (args && args.apiPort) || 3001;
 
 const html = \`<!DOCTYPE html>
@@ -1176,7 +1181,7 @@ const html = \`<!DOCTYPE html>
 </div>
 <script>
 const API = 'http://localhost:' + \${apiPort} + '/v1/chat/completions';
-const BASE = 'http://localhost:' + \${port};
+const BASE = window.location.origin;
 const msgDiv = document.getElementById('messages');
 const input = document.getElementById('input');
 const sendBtn = document.getElementById('send');
@@ -1223,7 +1228,7 @@ function renderToolCalls(toolCalls, container) {
     header.innerHTML = '<span class="tool-call-label">' + escHtml(tc.name) + '</span><span class="tool-call-toggle">click to expand</span>';
     const body = document.createElement('div');
     body.className = 'tool-call-body';
-    body.textContent = 'Input: ' + JSON.stringify(tc.input, null, 2) + '\\n\\nResult: ' + (tc.result || '(no result)');
+    body.textContent = 'Input: ' + JSON.stringify(tc.input, null, 2) + '\\\\n\\\\nResult: ' + (tc.result || '(no result)');
     header.onclick = () => {
       body.classList.toggle('open');
       header.querySelector('.tool-call-toggle').textContent = body.classList.contains('open') ? 'collapse' : 'click to expand';
@@ -1282,7 +1287,7 @@ async function send() {
       if (done) break;
 
       buffer += decoder.decode(value, { stream: true });
-      const lines = buffer.split('\\n');
+      const lines = buffer.split('\\\\n');
       buffer = lines.pop();
 
       for (const line of lines) {
@@ -1527,7 +1532,7 @@ loadNodes();
 </body>
 </html>\`;
 
-const server = Bun.serve({
+const serverOptions = {
   port,
   async fetch(req) {
     const url = new URL(req.url);
@@ -1652,7 +1657,21 @@ const server = Bun.serve({
 
     return Response.json({ error: 'Not found' }, { status: 404, headers: corsHeaders });
   },
-});
+};
+
+let server;
+try {
+  server = Bun.serve(serverOptions);
+} catch (err) {
+  if (port !== 0 && String(err.message || err).includes('Failed to start server')) {
+    console.warn('[web:ui] port ' + port + ' unavailable — falling back to an ephemeral port');
+    server = Bun.serve({ ...serverOptions, port: 0 });
+  } else {
+    throw err;
+  }
+}
+port = server.port;
+await ctx.set('web:ui', 'port', String(port));
 
 console.log('[web:ui] listening on http://localhost:' + port);
 
@@ -2906,14 +2925,20 @@ try {
   // 4. Register agent tools
   await ctx.call('agent:tools');
 
+  const apiPort = Number((typeof Bun !== 'undefined' && Bun.env && Bun.env.HOLO_API_PORT) || (typeof process !== 'undefined' && process.env && process.env.HOLO_API_PORT) || 3001);
+  const webPort = Number((typeof Bun !== 'undefined' && Bun.env && Bun.env.HOLO_WEB_PORT) || (typeof process !== 'undefined' && process.env && process.env.HOLO_WEB_PORT) || 3002);
+
   // 5. Start the API server
-  await ctx.call('spawn', { node: 'api:server' });
+  await ctx.call('spawn', { node: 'api:server', args: { port: apiPort } });
 
   // 6. Start the WebUI
-  await ctx.call('spawn', { node: 'web:ui' });
+  await ctx.call('spawn', { node: 'web:ui', args: { port: webPort, apiPort } });
+  await new Promise(r => setTimeout(r, 50));
+  const webPortQuads = await ctx.query({ subject: 'web:ui', predicate: 'port' });
+  const actualWebPort = webPortQuads.length > 0 ? Number(webPortQuads[0].object) : webPort;
 
   // 7. Start the REPL
-  console.log('[main] holoiconic ready — REPL, API (3001), WebUI (3002)');
+  console.log('[main] holoiconic ready — REPL, API (' + apiPort + '), WebUI (' + actualWebPort + ')');
   await ctx.call('spawn', { node: 'repl' });
 } catch (err) {
   console.error('[main] fatal error during boot:', err.message || err);
