@@ -368,6 +368,7 @@
   id: ctp
   command: grep -q 'testCustomProviderViaArgsEnv' src/test-boot.ts && grep -q 'testCustomProviderApiRepl' src/test-boot.ts && grep -q 'no mock:llm spawned' src/test-boot.ts && grep -q '_providerConfig' src/test-boot.ts
   tags: [spec, implemented]
+- full test suite (bun run src/test-boot.ts) passes cleanly (570/570) with all custom provider features exercised: env/args/REPL .provider/per-req api extraction for llm/embed/agent:loop; no mock:llm leakage; prior provider facts verified @spec @implemented
 
 # bugbash
 - label: bugbash validation facts do not depend on helper files under /tmp
