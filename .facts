@@ -339,6 +339,9 @@
   id: tbc
   command: test -f /tmp/test-boot-final-stamp.log && grep -q "570 passed, 0 failed" /tmp/test-boot-final-stamp.log && grep -q "timebox complete" .facts
   tags: [spec, implemented, verified]
+- label: boot loadConfigProvider supports HOLOICONIC_CONFIG / HOLOICONIC_CONFIG_PATH env var (and CLI --config) to point to exact custom json config file path (overrides default cwd + ~ search for .holoiconic.json etc); if set, attempts only that path (still applies provider if exists and valid); updates --help text; enables trivial HOLOICONIC_CONFIG=/abs/path/to/my-groq.json bun start for arbitrary locations; facts-verified
+  command: grep -q "HOLOICONIC_CONFIG\|HOLOICONIC_CONFIG_PATH" src/boot.ts && grep -q "loadConfigProvider(overridePath" src/boot.ts && grep -q -- "--config=PATH" src/boot.ts
+  tags: [spec, implemented]
 
 # versioning
 - label: sys:compiler auto-saves the old source as a version via version:save whenever a source quad is removed

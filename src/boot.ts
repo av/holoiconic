@@ -35,17 +35,27 @@ function parseCliArgs(argv: string[]): Record<string, string> {
 }
 
 // loadConfigProvider: tiny JSON config support (no new deps) for persistent default custom provider.
-// Checks cwd then home for .holoiconic.json or holoiconic.config.json; supports {provider: {...}} or flat.
-// Returns normalized {baseUrl?, apiKey?, model?, provider?} or {}.
-async function loadConfigProvider(): Promise<any> {
-  const candidates: string[] = [
-    "./.holoiconic.json",
-    "./holoiconic.config.json",
-  ];
-  const home = (process.env.HOME || process.env.USERPROFILE || "").trim();
-  if (home) {
-    candidates.push(`${home}/.holoiconic.json`);
-    candidates.push(`${home}/holoiconic.config.json`);
+// Respects HOLOICONIC_CONFIG or HOLOICONIC_CONFIG_PATH env (or CLI --config) for exact path (overrides cwd/~ search); if set loads only that file if exists. Falls back to .holoiconic.json/holoiconic.config.json (cwd, then ~). Supports {provider:{...}} or flat. Returns norm or {}.
+async function loadConfigProvider(overridePath?: string): Promise<any> {
+  const explicit = (overridePath && overridePath !== '1' ? overridePath.trim() : '') || (process.env.HOLOICONIC_CONFIG || process.env.HOLOICONIC_CONFIG_PATH || '').trim();
+  let candidates: string[];
+  if (explicit) {
+    let p = explicit;
+    if (p[0] === '~') {
+      const home = (process.env.HOME || process.env.USERPROFILE || '').trim();
+      p = home ? p.replace(/^~/, home) : p;
+    }
+    candidates = [p];
+  } else {
+    candidates = [
+      "./.holoiconic.json",
+      "./holoiconic.config.json",
+    ];
+    const home = (process.env.HOME || process.env.USERPROFILE || "").trim();
+    if (home) {
+      candidates.push(`${home}/.holoiconic.json`);
+      candidates.push(`${home}/holoiconic.config.json`);
+    }
   }
   for (const p of candidates) {
     try {
@@ -77,11 +87,11 @@ async function loadConfigProvider(): Promise<any> {
 async function boot() {
   const cli = parseCliArgs(process.argv);
   if (cli.help) {
-    console.log('holoiconic — CLI flags for trivial custom OpenAI launch: bun src/boot.ts --openai-base-url=URL|-b --openai-api-key=KEY|-k --model=MODEL|-m --provider=p --api-port=N|--port=N --web-port=N --help ; also supports persistent .holoiconic.json (or holoiconic.config.json in cwd or ~/) with {provider:{baseUrl,apiKey,model,provider}}; precedence CLI > config > env ; via bun start -- --flags');
+    console.log('holoiconic — CLI flags for trivial custom OpenAI launch: bun src/boot.ts --openai-base-url=URL|-b --openai-api-key=KEY|-k --model=MODEL|-m --provider=p --config=PATH --api-port=N|--port=N --web-port=N --help ; also supports persistent .holoiconic.json (or holoiconic.config.json in cwd or ~/) or exact via HOLOICONIC_CONFIG/HOLOICONIC_CONFIG_PATH env or --config ; precedence CLI > config > env ; via bun start -- --flags');
     process.exit(0);
   }
 
-  const configProv = await loadConfigProvider();
+  const configProv = await loadConfigProvider(cli.config || cli['config']);
 
   // Apply config (>env) then CLI (>config) so precedence CLI > config file > env (covers main+nodes+REPL env reads)
   if (!cli['openai-base-url'] && configProv.baseUrl) {
