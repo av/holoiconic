@@ -115,6 +115,7 @@ cp .holoiconic.json.example .holoiconic.json
 # (or: cp ... ~/holoiconic.config.json)
 # edit the copy (valid JSON; {provider:{baseUrl,apiKey,model}} or flat top-level keys; snake_case ok;
 # Groq/Ollama/OpenRouter examples + precedence + security notes inside the .example)
+# Override exact path: HOLOICONIC_CONFIG=/abs/my.json (or HOLOICONIC_CONFIG_PATH) env or --config CLI e.g. HOLOICONIC_CONFIG=./groq.json bun start
 bun start
 ```
 
