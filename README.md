@@ -29,6 +29,12 @@ Precedence (highest wins): CLI flags > config file > environment variables > def
 
 **1. Persistent config file** (`.holoiconic.json` or `holoiconic.config.json` in cwd or home dir):
 
+Copy the ready-to-use documented template (contains Groq, Ollama local, OpenRouter examples + comments + security notes + precedence):
+```bash
+cp .holoiconic.json.example .holoiconic.json
+```
+Then edit the copy (valid JSON only; supports the shape below or flat keys). `bun start` loads it automatically from cwd or `~/`.
+
 ```json
 {
   "provider": {
@@ -38,7 +44,7 @@ Precedence (highest wins): CLI flags > config file > environment variables > def
   }
 }
 ```
-(Flat top-level keys like `"baseUrl"` are also accepted.) `bun start` (or `bun src/boot.ts`) will load it automatically.
+(Flat top-level keys like `"baseUrl"` are also accepted, as are snake_case variants.) See `.holoiconic.json.example` for 3 full commented examples.
 
 **2. CLI flags** (pass after `--` for `bun start`; direct boot also supports):
 

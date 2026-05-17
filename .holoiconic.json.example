@@ -1,0 +1,100 @@
+# .holoiconic.json.example
+#
+# Persistent custom OpenAI-compatible provider configuration template.
+# This file is committed to git as a documented example / template.
+#
+# USAGE (one-liner):
+#   cp .holoiconic.json.example .holoiconic.json
+#   # (or: cp .holoiconic.json.example ~/holoiconic.config.json)
+#   # Then edit the copied file with your real values. It will be auto-loaded
+#   # by `bun start` (or `bun src/boot.ts`) from cwd or $HOME.
+#
+# The actual config file MUST be valid JSON (no comments allowed inside it).
+# Delete or ignore all # lines when copying a block below into your .holoiconic.json.
+# Flat keys or nested under "provider" both work. Snake_case variants also accepted.
+#
+# Exact supported shape (either style):
+#   {
+#     "provider": {
+#       "baseUrl": "https://...",
+#       "apiKey": "sk-...",
+#       "model": "model-name",
+#       "provider": "openai-completions"   # optional
+#     }
+#   }
+#
+# or flat:
+#   {
+#     "baseUrl": "...",
+#     "apiKey": "...",
+#     "model": "..."
+#   }
+#
+# Precedence (highest wins): CLI flags > config file > env vars > defaults.
+# (mock:llm is only used when neither apiKey nor baseUrl is configured.)
+#
+# SECURITY: Do NOT commit your real .holoiconic.json (or holoiconic.config.json)
+# or any API keys/secrets to version control. The real config is listed in
+# .gitignore. Never put production keys in the example or any committed file.
+# For local servers (Ollama, llama.cpp, vLLM) you can omit "apiKey" entirely
+# (the runtime supplies "sk-local" automatically when baseUrl is present).
+#
+# Cross-refs: README.md (config file section), .env.example, CLAUDE.md,
+# `facts list --section providers --tags spec`, `bun src/boot.ts --help`
+#
+# ----------------------------------------------------------------------------
+# EXAMPLE 1: Groq (https://groq.com — fast, cheap, OpenAI-compatible)
+# ----------------------------------------------------------------------------
+# {
+#   "provider": {
+#     "baseUrl": "https://api.groq.com/openai",
+#     "apiKey": "gsk_your_groq_api_key_here",
+#     "model": "llama-3.1-70b-versatile"
+#   }
+# }
+#
+# Flat form also works:
+# {
+#   "baseUrl": "https://api.groq.com/openai",
+#   "apiKey": "gsk_your_groq_api_key_here",
+#   "model": "llama-3.1-8b-instant"
+# }
+#
+# ----------------------------------------------------------------------------
+# EXAMPLE 2: Ollama (local, http://localhost:11434 — zero cost, private)
+# ----------------------------------------------------------------------------
+# {
+#   "baseUrl": "http://localhost:11434/v1",
+#   "model": "llama3.2"
+#   # no apiKey needed — runtime auto-uses "sk-local" for auth-less endpoints
+# }
+#
+# With explicit dummy key (also fine):
+# {
+#   "baseUrl": "http://localhost:11434/v1",
+#   "apiKey": "sk-local",
+#   "model": "qwen2.5:7b"
+# }
+#
+# ----------------------------------------------------------------------------
+# EXAMPLE 3: OpenRouter (https://openrouter.ai — many models, one endpoint)
+# ----------------------------------------------------------------------------
+# {
+#   "provider": {
+#     "baseUrl": "https://openrouter.ai/api/v1",
+#     "apiKey": "sk-or-v1-XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX",
+#     "model": "openai/gpt-4o-mini"   # or anthropic/claude-3.5-sonnet etc.
+#   }
+# }
+#
+# ----------------------------------------------------------------------------
+# Other providers (vLLM, Together.ai, Fireworks, llama.cpp, DeepInfra, etc.)
+# all use the same pattern — just change baseUrl + model + key as needed.
+# ----------------------------------------------------------------------------
+#
+# After saving your .holoiconic.json, simply run:
+#   bun start
+# The provider is loaded early in boot and applies to REPL, API, WebUI, etc.
+# Use CLI flags or REPL `.provider` to temporarily override the file config.
+#
+# To stop using the file config: rename/delete it or clear its contents to {}.

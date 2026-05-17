@@ -22,6 +22,12 @@ report.[0-9]_.[0-9]_.[0-9]_.[0-9]_.json
 .env.production.local
 .env.local
 
+# holoiconic persistent user/provider config (use the committed
+# .holoiconic.json.example as the documented template; never commit real keys)
+.holoiconic.json
+holoiconic.config.json
+# (also ignored if present in $HOME, but git only cares about repo root)
+
 # caches
 .eslintcache
 .cache

@@ -329,6 +329,9 @@
   command: grep -q 'holoiconic\.json\|loadConfigProvider\|configProv' src/boot.ts && grep -q 'CLI > config' src/boot.ts && grep -q '_providerConfig' src/boot.ts
   tags: [spec, implemented]
 - README.md has high-quality 'Using custom OpenAI-compatible providers (Groq, Ollama, vLLM, OpenRouter, ...)' section for trivial launch UX + polish: 1-line cross-ref+example added in Quick start pointing to it, Environment variables note updated 'For custom providers see ... section' with methods link; intro on 6 methods, precedence table CLI>config>env>defaults, 6 short examples, notes on sk-local etc, cross-refs to .env.example/CLAUDE.md/facts; style matches; completes user-facing docs (see l8u/c3t/final) @spec @implemented @polished
+- label: .holoiconic.json.example provides documented copy-paste template for persistent custom OpenAI provider config: committed in root; 2-3 example blocks (Groq, Ollama local, OpenRouter) with comments explaining JSON shape {provider:{baseUrl,apiKey,model,provider}} or flat aliases (incl snake_case); notes precedence CLI>file>env, 'cp .holoiconic.json.example .holoiconic.json' (or holoiconic.config.json), security warning never commit real .holoiconic.json or keys (add to .gitignore); .env.example updated with one-liner + cross-ref; makes persistent config UX trivial and safe
+  command: test -f .holoiconic.json.example && grep -q "cp .holoiconic.json.example .holoiconic.json" .env.example && grep -q "cp .holoiconic.json.example" README.md && grep -q "\.holoiconic.json" .gitignore && grep -q "Groq" .holoiconic.json.example && grep -q "Ollama" .holoiconic.json.example && grep -q "OpenRouter" .holoiconic.json.example && grep -q "Precedence" .holoiconic.json.example
+  tags: [spec, implemented]
 
 # versioning
 - label: sys:compiler auto-saves the old source as a version via version:save whenever a source quad is removed
