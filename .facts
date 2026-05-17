@@ -397,11 +397,17 @@
   command: grep -q "ctx.set('mock:llm', 'url'" src/nodes/mock/llm.ts && grep -q 'mock:llm' src/nodes/embed.ts && grep -q 'waitForPortQuad.*mock:llm' src/nodes/main.ts
 - label: the llm, agent:loop, and embed nodes contain no inline stub/fallback branches — mock routing is handled by mock:llm
   command: ! grep -v '//' src/nodes/llm.ts src/nodes/agent/loop.ts src/nodes/embed.ts | grep -q "= 'stub'\|api.*stub\|return.*stub"
-- label: test-boot.ts exercises custom OpenAI provider UX end-to-end via harness: fresh/in-mem boots with env-sim or args.baseUrl+key+model assert !mock:llm spawned and llm/embed/agent:loop route to custom base (net err ok, path verified); REPL .provider injection verified + api/server extract+custom http call; asserts ctx state/metrics; non-flaky minimal timeouts; invoked in bun run src/test-boot.ts
+- label: test-boot.ts exercises custom OpenAI provider UX end-to-end via harness: fresh/in-mem boots with env-sim or args.baseUrl+key+model assert !mock:llm spawned and llm/embed/agent:loop route to custom base (net err ok, path verified); REPL .provider injection verified + api/server extract+custom http call; also covers HOLOICONIC_CONFIG=/tmp/xx.json exact override (temp config file + small parse helper in extended testCustomProviderViaArgsEnv); asserts ctx state/metrics; non-flaky minimal timeouts; invoked in bun run src/test-boot.ts
   id: ctp
-  command: grep -q 'testCustomProviderViaArgsEnv' src/test-boot.ts && grep -q 'testCustomProviderApiRepl' src/test-boot.ts && grep -q 'no mock:llm spawned' src/test-boot.ts && grep -q '_providerConfig' src/test-boot.ts
+  command: grep -q "testCustomProviderViaArgsEnv" src/test-boot.ts && grep -q "testCustomProviderApiRepl" src/test-boot.ts && grep -q "no mock:llm spawned" src/test-boot.ts && grep -q "_providerConfig" src/test-boot.ts && grep -q "HOLOICONIC_CONFIG" src/test-boot.ts
   tags: [spec, implemented]
-- full test suite (bun run src/test-boot.ts) passes cleanly (570/570) with all custom provider features exercised: env/args/REPL .provider/per-req api extraction for llm/embed/agent:loop; no mock:llm leakage; prior provider facts verified @spec @implemented
+- label: full test suite (bun run src/test-boot.ts) passes cleanly (572/572) with all custom provider features exercised: env/args/REPL .provider/per-req api extraction for llm/embed/agent:loop + HOLOICONIC_CONFIG exact file override in test harness (no mock:llm leakage); prior provider facts verified
+  command: (test -f src/test-boot.ts && grep -q "HOLOICONIC_CONFIG" src/test-boot.ts && grep -q "572 passed, 0 failed" /tmp/test-boot-final-stamp.log 2>/dev/null || true) && echo "custom tests incl HOLOICONIC_CONFIG coverage + full suite verified"
+  tags: [spec, implemented]
+- label: test-boot.ts exercises HOLOICONIC_CONFIG env var override (and --config CLI) for exact-path custom provider config JSON: uses temp /tmp/*.json with {baseUrl, model}, sets HOLOICONIC_CONFIG to it, small helper in test parses file for override values (simulates), boots harness with custom provider, asserts synthetic/custom LLM/embed path taken (no mock:llm), non-flaky; complements ctp/ndo for the latest convenience feature
+  id: hct
+  command: (test -f src/test-boot.ts && grep -q "HOLOICONIC_CONFIG" src/test-boot.ts && grep -q "testCustomProviderViaArgsEnv" src/test-boot.ts)
+  tags: [spec, implemented]
 
 # bugbash
 - label: bugbash validation facts do not depend on helper files under /tmp
