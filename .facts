@@ -332,6 +332,9 @@
 - label: .holoiconic.json.example provides documented copy-paste template for persistent custom OpenAI provider config: committed in root; 2-3 example blocks (Groq, Ollama local, OpenRouter) with comments explaining JSON shape {provider:{baseUrl,apiKey,model,provider}} or flat aliases (incl snake_case); notes precedence CLI>file>env, 'cp .holoiconic.json.example .holoiconic.json' (or holoiconic.config.json), security warning never commit real .holoiconic.json or keys (add to .gitignore); .env.example updated with one-liner + cross-ref; makes persistent config UX trivial and safe
   command: test -f .holoiconic.json.example && grep -q "cp .holoiconic.json.example .holoiconic.json" .env.example && grep -q "cp .holoiconic.json.example" README.md && grep -q "\.holoiconic.json" .gitignore && grep -q "Groq" .holoiconic.json.example && grep -q "Ollama" .holoiconic.json.example && grep -q "OpenRouter" .holoiconic.json.example && grep -q "Precedence" .holoiconic.json.example
   tags: [spec, implemented]
+- label: CLAUDE.md "Environment variables" section (and launch notes) updated as first-class dev doc for config file support: explicitly lists .holoiconic.json / holoiconic.config.json + .holoiconic.json.example, documents precedence (CLI > config file > env), includes concrete example snippet from .example, cross-refs to README.md and the .example file; keeps section accurate/complete for onboarding after addition of persistent config (c3t/ioy); verified by reading section + files
+  command: grep -q "\.holoiconic\.json" CLAUDE.md && grep -q "config file" CLAUDE.md && grep -q "CLI > config file > env" CLAUDE.md && grep -q "\.holoiconic\.json\.example" CLAUDE.md && grep -q "README.md" CLAUDE.md
+  tags: [spec, implemented]
 
 # versioning
 - label: sys:compiler auto-saves the old source as a version via version:save whenever a source quad is removed

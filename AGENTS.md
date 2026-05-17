@@ -108,14 +108,32 @@ Without `ANTHROPIC_API_KEY` or `OPENAI_API_KEY`, `main` spawns the `mock:llm` no
 - Ports: `HOLO_API_PORT` (3001), `HOLO_WEB_PORT` (3002)
 - Also `ANTHROPIC_API_KEY`, `TURSO_URL`/`TURSO_AUTH_TOKEN`
 
+**Persistent config file** (`.holoiconic.json` or `holoiconic.config.json` in cwd or ~/) is a first-class method for persistent custom provider defaults (loaded early in boot, survives restarts, applies to REPL + API + WebUI):
+
+```bash
+cp .holoiconic.json.example .holoiconic.json
+# (or: cp ... ~/holoiconic.config.json)
+# edit the copy (valid JSON; {provider:{baseUrl,apiKey,model}} or flat top-level keys; snake_case ok;
+# Groq/Ollama/OpenRouter examples + precedence + security notes inside the .example)
+bun start
+```
+
+Precedence (highest wins): CLI flags > config file > env vars > defaults. (See `.holoiconic.json.example`, c3t/ioy in facts, and boot.ts:loadConfigProvider.)
+
 **Concrete launch examples for custom provider:**
 
-Env (simplest):
+Config file (persistent default):
+```bash
+# after cp .holoiconic.json.example + edit as above
+bun start
+```
+
+Env (simplest for ad-hoc):
 ```bash
 OPENAI_BASE_URL=https://api.groq.com/openai OPENAI_API_KEY=gsk_... HOLOICONIC_MODEL=llama-3.1-70b-versatile bun start
 ```
 
-CLI flags (precedence highest; `bun start` requires `--` separator to pass args):
+CLI flags (highest precedence; `bun start` requires `--` separator to pass args):
 ```bash
 bun start -- --openai-base-url=https://api.groq.com/openai --openai-api-key=gsk_... --model=llama-3.1-8b-instant --api-port=3001
 bun src/boot.ts --openai-base-url=URL -b KEY -m MODEL --provider=openai-completions --help
@@ -133,11 +151,11 @@ Per-request (dynamic, for any call to the OpenAI-compat API `:3001` or originati
 - Headers: `x-openai-base-url`, `x-openai-api-key` (or `x-api-key`, `openai-base-url`), `Authorization: Bearer <key>`
 - Dummy key handling and forwarding to downstream nodes is automatic.
 
-Full list + precedence (CLI > env > default) + comments in the committed `.env.example` at repo root.
+Full list + precedence (CLI > config file > env > default) + comments in the committed `.env.example` and `.holoiconic.json.example` at repo root. (WebUI inline form also supported, persisted in localStorage.)
 
 Use `--help` (via CLI) to see all boot flags for trivial non-interactive custom launches.
 
-See also: README.md "Environment variables", `.facts` (providers section, facts 5l0/clp/l8u etc), and REPL `.help`.
+See also: README.md "Environment variables" and "Using custom OpenAI-compatible providers" section (6 methods + table), `.facts` (providers section, facts 5l0/clp/l8u/c3t/ioy/bs6 etc), `.holoiconic.json.example`, and REPL `.help`.
 
 <!-- facts:start -->
 ## Fact-driven development
