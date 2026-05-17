@@ -312,6 +312,9 @@
 - label: user docs complete trivial custom OpenAI launch UX: committed .env.example lists OPENAI_BASE_URL, OPENAI_API_KEY, HOLOICONIC_MODEL, OPENAI_MODEL, HOLO_API_PORT, HOLO_WEB_PORT, ANTHROPIC_API_KEY, TURSO_URL etc with comments on custom provider, precedence (CLI>env), examples; CLAUDE.md Environment variables updated with concrete usage (e.g. OPENAI_BASE_URL=https://api.groq.com/openai ... bun start, CLI equiv via bun start -- --flags, REPL .provider set --base, per-req x- headers or body, --help); facts entry added+verified for completeness
   command: test -f .env.example && grep -q "OPENAI_BASE_URL" .env.example && grep -q "Custom OpenAI-compatible providers are first-class" CLAUDE.md && grep -q ".provider set --base" CLAUDE.md && grep -q "bun start -- --openai" CLAUDE.md && grep -q "--help" CLAUDE.md
   tags: [spec, implemented]
+- label: llm, embed and agent:loop catch network/fetch/HTTP errors for custom baseUrl providers (unreachable, auth, bad model) and rethrow clear actionable messages naming the baseUrl, original error, verify-URL/key/model advice and launch method (env/CLI/REPL/.provider/headers); mock paths unchanged; surfaces nicely via REPL and api/server error responses
+  command: grep -q 'custom OpenAI-compatible provider' src/nodes/llm.ts src/nodes/embed.ts src/nodes/agent/loop.ts && grep -q 'Verify the base URL' src/nodes/llm.ts src/nodes/embed.ts src/nodes/agent/loop.ts
+  tags: [spec, implemented]
 
 # versioning
 - label: sys:compiler auto-saves the old source as a version via version:save whenever a source quad is removed

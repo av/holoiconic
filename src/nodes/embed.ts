@@ -33,10 +33,22 @@ const clientOpts = { apiKey: effectiveKey };
 if (baseURL) clientOpts.baseURL = baseURL;
 const client = new OpenAI(clientOpts);
 
-const result = await client.embeddings.create({
-  model: embModel,
-  input: text,
-});
+let result;
+try {
+  result = await client.embeddings.create({
+    model: embModel,
+    input: text,
+  });
+} catch (err) {
+  if (baseUrl) {
+    // Improved error UX for custom OpenAI-compatible: actionable message when unreachable/auth/model fail
+    const launchVia = (args && args.baseUrl) ? 'per-request (REPL .provider / API body or x-*-headers / direct ctx.call args)' : 'env (OPENAI_BASE_URL/OPENAI_API_BASE or CLI flags)';
+    const modelName = embModel;
+    const orig = (err && err.message) ? err.message : String(err);
+    throw new Error(`[embed] Failed calling custom OpenAI-compatible provider (baseUrl: ${baseUrl}, model: ${modelName}). Original error: ${orig}. Verify the base URL, key and model are correct for the target server. Configured via: ${launchVia}.`);
+  }
+  throw err;
+}
 
 const embedding = result.data[0].embedding;
 

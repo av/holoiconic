@@ -10326,6 +10326,9 @@ async function testCustomProviderViaArgsEnv() {
       }
       if (msg.includes("127.0.0.1") || /ECONNREFUSED|fetch failed|connect|failed/i.test(msg)) {
         ok("llm(baseUrl+apiKey+model) routes to custom base (network error to base, not mock)");
+        if (/custom OpenAI-compatible provider|Verify the base URL|Configured via/i.test(msg)) {
+          ok("llm custom error UX: message includes baseUrl, verify advice and launch method (new error handling)");
+        }
       } else {
         throw e;
       }

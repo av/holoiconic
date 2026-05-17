@@ -90,18 +90,44 @@ if (args && args.sessionId) opts.sessionId = args.sessionId;
 
 if (args && args.stream) {
   let finalMessage = null;
-  for await (const event of stream(model, piContext, opts)) {
-    if (event.type === 'text_delta' && typeof args.onDelta === 'function') {
-      await args.onDelta(event.delta, event);
+  try {
+    for await (const event of stream(model, piContext, opts)) {
+      if (event.type === 'text_delta' && typeof args.onDelta === 'function') {
+        await args.onDelta(event.delta, event);
+      }
+      if (event.type === 'done') finalMessage = event.message;
+      if (event.type === 'error') {
+        let emsg = event.error.errorMessage || '[llm] streaming error';
+        if (baseUrl && !emsg.includes(baseUrl)) {
+          const launchVia = (args && args.baseUrl) ? 'per-request (REPL .provider / API body or x-*-headers / direct ctx.call args)' : 'env (OPENAI_BASE_URL/OPENAI_API_BASE or CLI flags)';
+          emsg = `[llm] Failed calling custom OpenAI-compatible provider (baseUrl: ${baseUrl}, model: ${modelId}). Original: ${emsg}. Verify the base URL, key and model are correct for the target server. Configured via: ${launchVia}.`;
+        }
+        throw new Error(emsg);
+      }
     }
-    if (event.type === 'done') finalMessage = event.message;
-    if (event.type === 'error') throw new Error(event.error.errorMessage || '[llm] streaming error');
+  } catch (err) {
+    if (baseUrl && !(err && err.message && err.message.includes('custom OpenAI-compatible provider'))) {
+      const launchVia = (args && args.baseUrl) ? 'per-request (REPL .provider / API body or x-*-headers / direct ctx.call args)' : 'env (OPENAI_BASE_URL/OPENAI_API_BASE or CLI flags)';
+      const orig = (err && err.message) ? err.message : String(err);
+      throw new Error(`[llm] Failed calling custom OpenAI-compatible provider (baseUrl: ${baseUrl}, model: ${modelId}). Original error: ${orig}. Verify the base URL, key and model are correct for the target server. Configured via: ${launchVia}.`);
+    }
+    throw err;
   }
   if (!finalMessage) throw new Error('[llm] stream ended without a final message');
   if (refreshedOAuthCredentials) finalMessage.oauthCredentials = refreshedOAuthCredentials;
   return finalMessage;
 }
 
-const result = await complete(model, piContext, opts);
+let result;
+try {
+  result = await complete(model, piContext, opts);
+} catch (err) {
+  if (baseUrl && !(err && err.message && err.message.includes('custom OpenAI-compatible provider'))) {
+    const launchVia = (args && args.baseUrl) ? 'per-request (REPL .provider / API body or x-*-headers / direct ctx.call args)' : 'env (OPENAI_BASE_URL/OPENAI_API_BASE or CLI flags)';
+    const orig = (err && err.message) ? err.message : String(err);
+    throw new Error(`[llm] Failed calling custom OpenAI-compatible provider (baseUrl: ${baseUrl}, model: ${modelId}). Original error: ${orig}. Verify the base URL, key and model are correct for the target server. Configured via: ${launchVia}.`);
+  }
+  throw err;
+}
 if (refreshedOAuthCredentials) result.oauthCredentials = refreshedOAuthCredentials;
 return result;

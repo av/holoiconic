@@ -134,16 +134,26 @@ for (let i = 0; i < maxIterations; i++) {
   };
 
   let response;
-  if (useStream) {
-    const eventStream = stream(model, piContext, callOpts);
-    for await (const event of eventStream) {
-      if (event.type === 'text_delta' && args.onDelta) {
-        args.onDelta(event.delta);
+  try {
+    if (useStream) {
+      const eventStream = stream(model, piContext, callOpts);
+      for await (const event of eventStream) {
+        if (event.type === 'text_delta' && args.onDelta) {
+          args.onDelta(event.delta);
+        }
       }
+      response = await eventStream.result();
+    } else {
+      response = await complete(model, piContext, callOpts);
     }
-    response = await eventStream.result();
-  } else {
-    response = await complete(model, piContext, callOpts);
+  } catch (err) {
+    if (baseUrl && !(err && err.message && err.message.includes('custom OpenAI-compatible provider'))) {
+      // Improved error UX only on custom provider path (baseUrl set); mock/default paths unchanged
+      const launchVia = (args && args.baseUrl) ? 'per-request (REPL .provider / API body or x-*-headers / direct ctx.call args)' : 'env (OPENAI_BASE_URL/OPENAI_API_BASE or CLI flags)';
+      const orig = (err && err.message) ? err.message : String(err);
+      throw new Error(`[agent:loop] Failed calling custom OpenAI-compatible provider (baseUrl: ${baseUrl}, model: ${modelId}). Original error: ${orig}. Verify the base URL, key and model are correct for the target server. Configured via: ${launchVia}.`);
+    }
+    throw err;
   }
 
   // Store the assistant message in the graph
