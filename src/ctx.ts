@@ -24,7 +24,7 @@ export type Pattern = {
   graph?: string;
 };
 
-export type Subscriber = (change: Change) => void;
+export type Subscriber = (change: Change) => void | Promise<void>;
 
 export type Ctx = {
   insert(subject: string, predicate: string, object: string, graph?: string, embedding?: number[]): Promise<Quad>;
@@ -48,12 +48,30 @@ const nodeStorage = new AsyncLocalStorage<string>();
 
 type Sub = { pattern: Pattern; callback: Subscriber };
 
-function matchesPattern(pattern: Pattern, quad: Quad): boolean {
-  if (pattern.subject !== undefined && pattern.subject !== quad.subject) return false;
-  if (pattern.predicate !== undefined && pattern.predicate !== quad.predicate) return false;
-  if (pattern.object !== undefined && pattern.object !== quad.object) return false;
-  if (pattern.graph !== undefined && pattern.graph !== quad.graph) return false;
-  return true;
+/** Convert a subscriber pattern into a canonical signature key.
+ *  `null` means wildcard (field not specified); any string is a concrete value. */
+function patternToKey(pattern: Pattern): string {
+  return JSON.stringify([
+    pattern.subject === undefined ? null : pattern.subject,
+    pattern.predicate === undefined ? null : pattern.predicate,
+    pattern.object === undefined ? null : pattern.object,
+    pattern.graph === undefined ? null : pattern.graph,
+  ]);
+}
+
+/** Yield all 16 signature keys that a concrete quad can match.
+ *  For each field we either use the concrete value or wildcard (null).
+ */
+function* quadToKeys(quad: Quad): Generator<string> {
+  const vals = [quad.subject, quad.predicate, quad.object, quad.graph];
+  for (let mask = 0; mask < 16; mask++) {
+    yield JSON.stringify([
+      (mask & 1) ? vals[0] : null,
+      (mask & 2) ? vals[1] : null,
+      (mask & 4) ? vals[2] : null,
+      (mask & 8) ? vals[3] : null,
+    ]);
+  }
 }
 
 function rowToQuad(row: any): Quad {
@@ -70,13 +88,22 @@ function rowToQuad(row: any): Quad {
 // ── Factory ────────────────────────────────────────────────────────
 
 export function createCtx(db: Client): Ctx {
-  const subscribers: Sub[] = [];
+  const subscriberIndex = new Map<string, Sub[]>();
 
   function fire(change: Change) {
-    for (const sub of subscribers) {
-      if (matchesPattern(sub.pattern, change.quad)) {
+    for (const key of quadToKeys(change.quad)) {
+      const bucket = subscriberIndex.get(key);
+      if (!bucket) continue;
+      // Snapshot to protect against mutation (unsubscribe or new on() from within a callback)
+      const snapshot = bucket.slice();
+      for (const sub of snapshot) {
         try {
-          sub.callback(change);
+          const res = sub.callback(change);
+          if (res && typeof (res as any).then === "function") {
+            (res as Promise<void>).catch((err: any) => {
+              console.error("[ctx.on] subscriber async error:", err);
+            });
+          }
         } catch (err) {
           console.error("[ctx.on] subscriber error:", err);
         }
@@ -208,11 +235,22 @@ export function createCtx(db: Client): Ctx {
     // ── on ───────────────────────────────────────────────────────
     on(pattern: Pattern, callback: Subscriber): () => void {
       const sub: Sub = { pattern, callback };
-      subscribers.push(sub);
+      const key = patternToKey(pattern);
+      let bucket = subscriberIndex.get(key);
+      if (!bucket) {
+        bucket = [];
+        subscriberIndex.set(key, bucket);
+      }
+      bucket.push(sub);
 
       return () => {
-        const idx = subscribers.indexOf(sub);
-        if (idx !== -1) subscribers.splice(idx, 1);
+        const idx = bucket.indexOf(sub);
+        if (idx !== -1) {
+          bucket.splice(idx, 1);
+          if (bucket.length === 0) {
+            subscriberIndex.delete(key);
+          }
+        }
       };
     },
 
