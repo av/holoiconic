@@ -9,6 +9,10 @@
 #   # Then edit the copied file with your real values. It will be auto-loaded
 #   # by `bun start` (or `bun src/boot.ts`) from cwd or $HOME.
 #
+#   # Override exact path (bypasses default cwd + ~ discovery; also via --config):
+#   HOLOICONIC_CONFIG=/path/to/this.json bun start
+#   # (or: bun start -- --config /path/to/this.json)
+#
 # The actual config file MUST be valid JSON (no comments allowed inside it).
 # Delete or ignore all # lines when copying a block below into your .holoiconic.json.
 # Flat keys or nested under "provider" both work. Snake_case variants also accepted.
