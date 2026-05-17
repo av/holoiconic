@@ -227,6 +227,9 @@
   command: test -f src/nodes/repl.ts && grep -q "'.metrics'" src/nodes/repl.ts && grep -q 'metrics:report' src/nodes/repl.ts
 - label: .eval runs arbitrary AsyncFunction code with ctx in scope
   command: test -f src/nodes/repl.ts && grep -q '\.eval ' src/nodes/repl.ts && grep -q 'AsyncFn.*ctx' src/nodes/repl.ts
+- label: .provider manages per-REPL-session custom OpenAI-compatible provider for trivial launch/use: .provider set --base <url> [--key <k>] [--model <m>] [--provider <p>] sets in-memory override in ctx._providerConfig; .provider show displays it; .provider clear resets to null; repl patches its call sites (chat path + .call for agent:loop/llm/embed) to inject config as args (caller args win) so custom baseUrl etc are used by downstream nodes; updates .help listing; follows existing dot-command patterns and ctx._ runtime state
+  command: test -f src/nodes/repl.ts && grep -q '\.provider ' src/nodes/repl.ts && grep -q '_providerConfig' src/nodes/repl.ts && grep -q 'callInjectingProvider\|providerConfig' src/nodes/repl.ts
+  tags: [spec, implemented]
 
 # agentic
 
