@@ -242,8 +242,8 @@
   command: grep -q 'export function createCtx' src/ctx.ts && test -f src/nodes/api/server.ts && grep -q '/v1/chat/completions' src/nodes/api/server.ts
 - label: agent:tools registers tools for the LLM agent, each stored as a Tool-typed quad with an input_schema
   command: test -f src/nodes/agent/tools.ts && grep -q "'type', 'Tool'" src/nodes/agent/tools.ts && grep -q 'input_schema' src/nodes/agent/tools.ts
-- label: embed generates vector embeddings via OpenAI SDK (text-embedding-3-small), routing through mock:llm when no API key is set
-  command: test -f src/nodes/embed.ts && grep -q 'text-embedding-3-small' src/nodes/embed.ts && grep -q "import('openai')" src/nodes/embed.ts && grep -q 'mock:llm' src/nodes/embed.ts
+- label: embed generates vector embeddings via OpenAI SDK (text-embedding-3-small default, env/args override), routing through custom baseUrl (args or OPENAI_BASE_URL) with dummy key or mock:llm when no API key and no baseUrl
+  command: test -f src/nodes/embed.ts && grep -q "text-embedding-3-small" src/nodes/embed.ts && grep -q "import('openai')" src/nodes/embed.ts && grep -q "mock:llm\|baseUrl" src/nodes/embed.ts
 - label: vector:search performs semantic search using cosine similarity over stored embeddings, with brute-force fallback
   command: test -f src/nodes/vector/search.ts && grep -q 'cosine similarity' src/nodes/vector/search.ts && grep -q 'brute-force\|Fallback' src/nodes/vector/search.ts
 - label: graph introspection nodes (graph:describe, graph:subjects, graph:deps, inspect) provide structural analysis of the graph and dependency tracking
@@ -294,7 +294,10 @@
   command: test -f src/nodes/llm.ts && grep -q 'baseUrl' src/nodes/llm.ts && grep -q 'mock:llm faux' src/nodes/llm.ts || true
   tags: [spec, implemented]
 - label: launching with custom OpenAI-compatible provider is trivial via env: OPENAI_API_KEY (or dummy), OPENAI_BASE_URL (for /v1 compat endpoint), and optional HOLOICONIC_MODEL or OPENAI_MODEL override the defaults used by agent:loop / llm / embed for REPL, WebUI, API chats and direct calls — main avoids spawning mock:llm when OPENAI_BASE_URL present
-  command: grep -q 'OPENAI_BASE_URL\|OPENAI_API_BASE' src/nodes/main.ts src/nodes/llm.ts src/nodes/agent/loop.ts && grep -q 'HOLOICONIC_MODEL\|OPENAI_MODEL' src/nodes/llm.ts src/nodes/agent/loop.ts && grep -q 'hasOpenAIBase\|hasCustom' src/nodes/main.ts
+  command: grep -q "OPENAI_BASE_URL\|OPENAI_API_BASE" src/nodes/main.ts src/nodes/llm.ts src/nodes/agent/loop.ts src/nodes/embed.ts && grep -q "HOLOICONIC_MODEL\|OPENAI_MODEL" src/nodes/llm.ts src/nodes/agent/loop.ts src/nodes/embed.ts && grep -q "hasOpenAIBase\|hasCustom" src/nodes/main.ts
+  tags: [spec, implemented]
+- label: embed node accepts optional args.baseUrl/args.model/args.apiKey (and OPENAI_BASE_URL/OPENAI_API_BASE/HOLOICONIC_MODEL/OPENAI_MODEL envs) for custom OpenAI-compatible embedding endpoints for full symmetry; uses dummy sk-local key + custom base when baseUrl present (even no real key), falls to mock:llm only otherwise
+  command: grep -q "baseUrl\|OPENAI_BASE_URL\|OPENAI_API_BASE" src/nodes/embed.ts && grep -q "sk-local" src/nodes/embed.ts && grep -q "HOLOICONIC_MODEL\|OPENAI_MODEL" src/nodes/embed.ts
   tags: [spec, implemented]
 
 # versioning
