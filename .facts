@@ -318,7 +318,7 @@
 - web:ui chat panel provides trivial per-session custom OpenAI-compatible provider support via simple header affordance (clickable 'provider' label opens inline inputs for base URL / API key / model); when set, includes baseUrl/apiKey/model in the /v1/chat/completions fetch body (plus existing fields) so that api:server per-request extraction (body fields) routes the chat to the custom endpoint via agent:loop; falls back to default when unset; enables WebUI:3002 users to launch against custom providers without env/CLI/REPL @spec @implemented
 - label: user-facing custom OpenAI launch complete across env/CLI/REPL/API/WebUI + tests + errors + docs
   id: final
-  tags: [implemented]
+  tags: [implemented, spec]
 
 # versioning
 - label: sys:compiler auto-saves the old source as a version via version:save whenever a source quad is removed
