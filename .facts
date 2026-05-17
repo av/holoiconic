@@ -335,6 +335,10 @@
 - label: CLAUDE.md "Environment variables" section (and launch notes) updated as first-class dev doc for config file support: explicitly lists .holoiconic.json / holoiconic.config.json + .holoiconic.json.example, documents precedence (CLI > config file > env), includes concrete example snippet from .example, cross-refs to README.md and the .example file; keeps section accurate/complete for onboarding after addition of persistent config (c3t/ioy); verified by reading section + files
   command: grep -q "\.holoiconic\.json" CLAUDE.md && grep -q "config file" CLAUDE.md && grep -q "CLI > config file > env" CLAUDE.md && grep -q "\.holoiconic\.json\.example" CLAUDE.md && grep -q "README.md" CLAUDE.md
   tags: [spec, implemented]
+- label: timebox complete - all user-facing custom launch paths (env/CLI/REPL/API/WebUI/config file) + docs + tests + errors green and fact-verified
+  id: tbc
+  command: test -f /tmp/test-boot-final-stamp.log && grep -q "570 passed, 0 failed" /tmp/test-boot-final-stamp.log && grep -q "timebox complete" .facts
+  tags: [spec, implemented, verified]
 
 # versioning
 - label: sys:compiler auto-saves the old source as a version via version:save whenever a source quad is removed
