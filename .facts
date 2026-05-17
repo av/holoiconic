@@ -342,6 +342,9 @@
 - label: boot loadConfigProvider supports HOLOICONIC_CONFIG / HOLOICONIC_CONFIG_PATH env var (and CLI --config) to point to exact custom json config file path (overrides default cwd + ~ search for .holoiconic.json etc); if set, attempts only that path (still applies provider if exists and valid); updates --help text; enables trivial HOLOICONIC_CONFIG=/abs/path/to/my-groq.json bun start for arbitrary locations; facts-verified
   command: grep -q "HOLOICONIC_CONFIG\|HOLOICONIC_CONFIG_PATH" src/boot.ts && grep -q "loadConfigProvider(overridePath" src/boot.ts && grep -q -- "--config=PATH" src/boot.ts
   tags: [spec, implemented]
+- label: .env.example (persistent config block) and README.md "config file" section updated to document the HOLOICONIC_CONFIG / HOLOICONIC_CONFIG_PATH env vars (and --config CLI flag) for exact-path override of the persistent provider config JSON (bypasses default cwd + ~/ discovery); completes docs sync for the boot convenience extension enabling trivial custom-OpenAI launch from arbitrary config locations
+  command: grep -q "HOLOICONIC_CONFIG" .env.example && grep -q "HOLOICONIC_CONFIG" README.md && grep -q "Override the searched locations" README.md && grep -q "PERSISTENT CONFIG FILE" .env.example
+  tags: [spec, implemented]
 
 # versioning
 - label: sys:compiler auto-saves the old source as a version via version:save whenever a source quad is removed

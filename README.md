@@ -46,6 +46,8 @@ Then edit the copy (valid JSON only; supports the shape below or flat keys). `bu
 ```
 (Flat top-level keys like `"baseUrl"` are also accepted, as are snake_case variants.) See `.holoiconic.json.example` for 3 full commented examples.
 
+Override the searched locations (cwd + ~/) with an exact path using env `HOLOICONIC_CONFIG` (or `HOLOICONIC_CONFIG_PATH`) or CLI `--config PATH` (CLI > file > env precedence).
+
 **2. CLI flags** (pass after `--` for `bun start`; direct boot also supports):
 
 ```bash
