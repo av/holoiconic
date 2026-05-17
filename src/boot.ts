@@ -5,6 +5,7 @@ import { seedTemplate } from "./template.ts";
 // CLI arg parser + applicator for trivial launch with custom provider at entrypoint.
 // Supports long/short flags, = or space, --port alias; sets process.env + Bun.env (for main/ports)
 // and ctx._*Provider so prior resolution paths (env in nodes, _providerConfig in REPL) pick it up.
+// Config file (.holoiconic.json etc) is loaded after parse (precedence CLI > config > env) in loadConfigProvider.
 function parseCliArgs(argv: string[]): Record<string, string> {
   const out: Record<string, string> = {};
   for (let i = 2; i < argv.length; i++) {
@@ -33,14 +34,84 @@ function parseCliArgs(argv: string[]): Record<string, string> {
   return out;
 }
 
+// loadConfigProvider: tiny JSON config support (no new deps) for persistent default custom provider.
+// Checks cwd then home for .holoiconic.json or holoiconic.config.json; supports {provider: {...}} or flat.
+// Returns normalized {baseUrl?, apiKey?, model?, provider?} or {}.
+async function loadConfigProvider(): Promise<any> {
+  const candidates: string[] = [
+    "./.holoiconic.json",
+    "./holoiconic.config.json",
+  ];
+  const home = (process.env.HOME || process.env.USERPROFILE || "").trim();
+  if (home) {
+    candidates.push(`${home}/.holoiconic.json`);
+    candidates.push(`${home}/holoiconic.config.json`);
+  }
+  for (const p of candidates) {
+    try {
+      const file = Bun.file(p);
+      if (await file.exists()) {
+        const data = await file.json();
+        if (data && typeof data === "object") {
+          let raw = (data as any).provider && typeof (data as any).provider === "object" ? (data as any).provider : data;
+          if (raw && (raw.baseUrl || raw.apiKey || raw.model || raw.provider || raw['base-url'] || raw['api-key'])) {
+            const norm: any = {};
+            if (raw.baseUrl || raw['base-url'] || raw.base_url) norm.baseUrl = raw.baseUrl || raw['base-url'] || raw.base_url;
+            if (raw.apiKey || raw['api-key'] || raw.api_key) norm.apiKey = raw.apiKey || raw['api-key'] || raw.api_key;
+            if (raw.model) norm.model = raw.model;
+            if (raw.provider) norm.provider = raw.provider;
+            if (Object.keys(norm).length) {
+              console.log(`[boot] loaded provider config from ${p}`);
+              return norm;
+            }
+          }
+        }
+      }
+    } catch {
+      // silent: bad JSON, permission, etc. — config is optional convenience
+    }
+  }
+  return {};
+}
+
 async function boot() {
   const cli = parseCliArgs(process.argv);
   if (cli.help) {
-    console.log('holoiconic — CLI flags for trivial custom OpenAI launch: bun src/boot.ts --openai-base-url=URL|-b --openai-api-key=KEY|-k --model=MODEL|-m --provider=p --api-port=N|--port=N --web-port=N --help ; precedence CLI>env ; also via bun start -- --flags');
+    console.log('holoiconic — CLI flags for trivial custom OpenAI launch: bun src/boot.ts --openai-base-url=URL|-b --openai-api-key=KEY|-k --model=MODEL|-m --provider=p --api-port=N|--port=N --web-port=N --help ; also supports persistent .holoiconic.json (or holoiconic.config.json in cwd or ~/) with {provider:{baseUrl,apiKey,model,provider}}; precedence CLI > config > env ; via bun start -- --flags');
     process.exit(0);
   }
 
-  // Apply CLI > env (covers main.ts hasOpenAIBase/port logic + all node env reads)
+  const configProv = await loadConfigProvider();
+
+  // Apply config (>env) then CLI (>config) so precedence CLI > config file > env (covers main+nodes+REPL env reads)
+  if (!cli['openai-base-url'] && configProv.baseUrl) {
+    const v = configProv.baseUrl;
+    process.env.OPENAI_BASE_URL = v;
+    process.env.OPENAI_API_BASE = v;
+    if ((globalThis as any).Bun?.env) (globalThis as any).Bun.env.OPENAI_BASE_URL = v;
+  }
+  if (!cli['openai-api-key'] && configProv.apiKey) {
+    const v = configProv.apiKey;
+    process.env.OPENAI_API_KEY = v;
+    if ((globalThis as any).Bun?.env) (globalThis as any).Bun.env.OPENAI_API_KEY = v;
+  }
+  if (!cli.model && configProv.model) {
+    const v = configProv.model;
+    process.env.HOLOICONIC_MODEL = v;
+    process.env.OPENAI_MODEL = v;
+    if ((globalThis as any).Bun?.env) { (globalThis as any).Bun.env.HOLOICONIC_MODEL = v; (globalThis as any).Bun.env.OPENAI_MODEL = v; }
+  }
+  if (cli['api-port']) {
+    const v = cli['api-port'];
+    process.env.HOLO_API_PORT = v;
+    if ((globalThis as any).Bun?.env) (globalThis as any).Bun.env.HOLO_API_PORT = v;
+  }
+  if (cli['web-port']) {
+    const v = cli['web-port'];
+    process.env.HOLO_WEB_PORT = v;
+    if ((globalThis as any).Bun?.env) (globalThis as any).Bun.env.HOLO_WEB_PORT = v;
+  }
+  // CLI overrides for provider fields (after possible config sets)
   if (cli['openai-base-url']) {
     const v = cli['openai-base-url'];
     process.env.OPENAI_BASE_URL = v;
@@ -58,16 +129,6 @@ async function boot() {
     process.env.OPENAI_MODEL = v;
     if ((globalThis as any).Bun?.env) { (globalThis as any).Bun.env.HOLOICONIC_MODEL = v; (globalThis as any).Bun.env.OPENAI_MODEL = v; }
   }
-  if (cli['api-port']) {
-    const v = cli['api-port'];
-    process.env.HOLO_API_PORT = v;
-    if ((globalThis as any).Bun?.env) (globalThis as any).Bun.env.HOLO_API_PORT = v;
-  }
-  if (cli['web-port']) {
-    const v = cli['web-port'];
-    process.env.HOLO_WEB_PORT = v;
-    if ((globalThis as any).Bun?.env) (globalThis as any).Bun.env.HOLO_WEB_PORT = v;
-  }
 
   // 1. Connect to libSQL — Turso Cloud if TURSO_URL is set, else local file
   const db = createDatabase("holoiconic.db");
@@ -78,14 +139,13 @@ async function boot() {
   // 3. Create the context with 6 naive primitives
   const ctx = createCtx(db);
 
-  // Attach CLI-derived provider config to ctx so REPL's _providerConfig (and any
-  // existing resolution from prior per-session/per-req work) picks up the global
-  // launch-time custom provider without further changes.
+  // Attach CLI-or-config provider to ctx._providerConfig / _globalProvider (REPL + other paths pick up);
+  // configProv already applied to env; here we set ctx for same precedence (CLI > config > env-only).
   const prov: any = {};
-  if (cli['openai-base-url']) prov.baseUrl = cli['openai-base-url'];
-  if (cli['openai-api-key']) prov.apiKey = cli['openai-api-key'];
-  if (cli.model) prov.model = cli.model;
-  if (cli.provider) prov.provider = cli.provider;
+  if (cli['openai-base-url'] || configProv.baseUrl) prov.baseUrl = cli['openai-base-url'] || configProv.baseUrl;
+  if (cli['openai-api-key'] || configProv.apiKey) prov.apiKey = cli['openai-api-key'] || configProv.apiKey;
+  if (cli.model || configProv.model) prov.model = cli.model || configProv.model;
+  if (cli.provider || configProv.provider) prov.provider = cli.provider || configProv.provider;
   if (Object.keys(prov).length) {
     ctx._providerConfig = prov;
     ctx._globalProvider = prov;

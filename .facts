@@ -325,6 +325,9 @@
 - label: web:ui providerConfig affordance is a small non-blocking inline form (div w/ 3 text inputs for baseUrl/key/model + set/clear buttons) styled to fit header; loads from localStorage on init, saves on set; displays current status (masked key, short base hostname); auto-includes in send fetch body (replaces blocking prompt() UX); makes custom OpenAI launch in WebUI even more trivial across reloads
   command: grep -q 'provider-form' src/nodes/web/ui.ts && grep -q "localStorage.getItem('holo_providerConfig')" src/nodes/web/ui.ts && grep -q 'updateProviderStatus' src/nodes/web/ui.ts && grep -q 'maskKey' src/nodes/web/ui.ts
   tags: [spec, implemented, verified]
+- label: boot loads persistent config file (.holoiconic.json or holoiconic.config.json from cwd or home) early after parseCliArgs for default custom OpenAI provider; JSON {provider:{baseUrl,apiKey,model,provider}} or flat keys; sets process.env.OPENAI_* and ctx._providerConfig/_globalProvider so all paths pick up; precedence CLI > config > env; --help updated; makes custom provider default persist across bun start / restarts (complements CLI/REPL/env/per-req)
+  command: grep -q 'holoiconic\.json\|loadConfigProvider\|configProv' src/boot.ts && grep -q 'CLI > config' src/boot.ts && grep -q '_providerConfig' src/boot.ts
+  tags: [spec, implemented]
 
 # versioning
 - label: sys:compiler auto-saves the old source as a version via version:save whenever a source quad is removed
