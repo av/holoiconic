@@ -167,7 +167,7 @@
 - label: web:ui graph panel supports node search/filter, inline source editing with save, and type badges (Function/Tool/Spawned)
   command: test -f src/nodes/web/ui.ts && grep -q 'node-search' src/nodes/web/ui.ts && grep -q 'save-btn' src/nodes/web/ui.ts && grep -q 'badge-tool' src/nodes/web/ui.ts
 - label: holoiconic exposes an OpenAI-compatible API
-  command: test -f src/nodes/api/server.ts && grep -q '/v1/chat/completions' src/nodes/api/server.ts && grep -q '/v1/models' src/nodes/api/server.ts
+  command: test -f src/nodes/api/server.ts && grep -q '/v1/chat/completions' src/nodes/api/server.ts && grep -q '/v1/models' src/nodes/api/server.ts && grep -q '/v1/embeddings' src/nodes/api/server.ts
 - label: api:server exposes a /health endpoint returning { status: 'ok' }
   command: test -f src/nodes/api/server.ts && grep -q "'/health'" src/nodes/api/server.ts && grep -q "status: 'ok'" src/nodes/api/server.ts
 - label: api:server supports SSE streaming when body.stream is true — chunks words as chat.completion.chunk events
@@ -298,6 +298,9 @@
   tags: [spec, implemented]
 - label: embed node accepts optional args.baseUrl/args.model/args.apiKey (and OPENAI_BASE_URL/OPENAI_API_BASE/HOLOICONIC_MODEL/OPENAI_MODEL envs) for custom OpenAI-compatible embedding endpoints for full symmetry; uses dummy sk-local key + custom base when baseUrl present (even no real key), falls to mock:llm only otherwise
   command: grep -q "baseUrl\|OPENAI_BASE_URL\|OPENAI_API_BASE" src/nodes/embed.ts && grep -q "sk-local" src/nodes/embed.ts && grep -q "HOLOICONIC_MODEL\|OPENAI_MODEL" src/nodes/embed.ts
+  tags: [spec, implemented]
+- label: api:server supports per-request custom OpenAI-compatible provider via body (baseUrl/model/apiKey/provider) or headers (x-openai-base-url, x-openai-api-key, Authorization Bearer) for both /v1/chat/completions (forward to agent:loop) and /v1/embeddings (forward to embed); dummy sk-local key auto-used when baseUrl present without apiKey
+  command: test -f src/nodes/api/server.ts && grep -q 'getCustomProvider\|x-openai-base-url' src/nodes/api/server.ts && grep -q '/v1/embeddings' src/nodes/api/server.ts && grep -q 'baseUrl.*agent:loop\|embed' src/nodes/api/server.ts
   tags: [spec, implemented]
 
 # versioning
