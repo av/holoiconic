@@ -77,11 +77,30 @@ const html = `<!DOCTYPE html>
   .notification.success { background: #238636; color: #fff; }
   .notification.error { background: #da3633; color: #fff; }
   @keyframes fadeOut { 0%,70% { opacity: 1; } 100% { opacity: 0; } }
+  /* compact provider config form (non-blocking, persists, status) */
+  #provider-form { padding: 2px 8px; background: #161b22; border-bottom: 1px solid #21262d; font-size: 9px; display: flex; gap: 3px; align-items: center; flex-wrap: wrap; }
+  #provider-form input { background: #0d1117; border: 1px solid #30363d; color: #c9d1d9; padding: 1px 4px; border-radius: 2px; font-size: 8px; font-family: inherit; min-width: 60px; }
+  #provider-form input:focus { border-color: #58a6ff; outline: none; }
+  #provider-form .p-base { flex: 2; min-width: 140px; }
+  #provider-form .p-key { flex: 1; min-width: 70px; }
+  #provider-form .p-model { flex: 0.8; min-width: 50px; }
+  #provider-form button { background: #30363d; color: #c9d1d9; border: none; padding: 1px 5px; border-radius: 2px; font-size: 8px; cursor: pointer; }
+  #provider-form button:hover { background: #484f58; }
+  #provider-form .p-clear { background: #da363333; color: #f85149; }
+  #p-status { font-size: 8px; opacity: 0.7; margin-left: 4px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 140px; }
 </style>
 </head>
 <body>
 <div id="chat-panel">
-  <div class="panel-header">holoiconic chat <span id="prov" style="font-size:9px;opacity:0.85;background:#21262d;padding:1px 5px;border-radius:3px;cursor:pointer;margin-left:6px;vertical-align:middle;" title="Click to set custom OpenAI-compatible provider (baseUrl + key + model) for this session — uses per-req to api">default</span></div>
+  <div class="panel-header">holoiconic chat <span id="prov" style="font-size:9px;opacity:0.85;background:#21262d;padding:1px 5px;border-radius:3px;cursor:default;margin-left:6px;vertical-align:middle;" title="Custom provider status (set via form below)">default</span></div>
+  <div id="provider-form">
+    <input id="p-base" class="p-base" placeholder="baseUrl e.g. http://localhost:11434/v1 or https://api.groq.com/openai" />
+    <input id="p-key" class="p-key" placeholder="apiKey (blank=sk-local)" />
+    <input id="p-model" class="p-model" placeholder="model" />
+    <button id="p-set">set</button>
+    <button id="p-clear" class="p-clear">clear</button>
+    <span id="p-status"></span>
+  </div>
   <div id="messages"></div>
   <div id="input-row">
     <input id="input" type="text" placeholder="Type a message..." autocomplete="off" />
@@ -283,27 +302,63 @@ function addMsg(role, content) {
 sendBtn.onclick = send;
 input.onkeydown = (e) => { if (e.key === 'Enter') send(); };
 
-// Wire simple provider affordance (click the badge in header): uses native prompt for minimal code; stores in-memory; passes to /v1 body
+// Wire providerConfig as non-blocking inline form (below header): 3 inputs + set/clear; localStorage persist (load init, save set); masked status; auto-apply on send (replaces prompts)
 const provEl = document.getElementById('prov');
-if (provEl) {
-  provEl.onclick = () => {
-    const base = prompt('Custom baseUrl (e.g. https://api.groq.com/openai or http://localhost:11434/v1) — empty to clear:', (providerConfig && providerConfig.baseUrl) || '');
-    if (base === null) return; // cancel
-    if (!base.trim()) {
-      providerConfig = null;
-      provEl.textContent = 'default';
-      provEl.title = 'Click to set custom OpenAI-compatible provider (baseUrl + key + model) for this session — uses per-req to api';
-      notify('Provider reset to default', 'success');
-      return;
-    }
-    const key = prompt('API key (leave blank for sk-local on local servers):', (providerConfig && providerConfig.apiKey) || '') || '';
-    const mdl = prompt('Model name (optional, overrides default):', (providerConfig && providerConfig.model) || '') || '';
-    providerConfig = { baseUrl: base.trim(), apiKey: key.trim(), model: mdl.trim() };
-    provEl.textContent = (base.split('/')[2] || 'custom').slice(0, 20);
-    provEl.title = 'Custom → ' + base + (mdl ? ' @' + mdl : '');
-    notify('Custom provider active for WebUI chats (sent via body to api:server)', 'success');
-  };
+function maskKey(k) { if (!k) return ''; return k.slice(0,4) + '***' + (k.length > 6 ? k.slice(-2) : ''); }
+function shortBase(b) { if (!b) return ''; const h = (b.split('//')[1] || b).split('/')[0]; return h.slice(0,22); }
+function updateProviderStatus() {
+  const st = document.getElementById('p-status');
+  if (providerConfig && providerConfig.baseUrl) {
+    const sb = shortBase(providerConfig.baseUrl);
+    const mk = maskKey(providerConfig.apiKey);
+    const mm = providerConfig.model ? providerConfig.model.slice(0,10) : '';
+    if (provEl) { provEl.textContent = sb + (mm ? ':' + mm : ''); provEl.title = 'Custom: ' + providerConfig.baseUrl + (mk ? ' k:'+mk : ''); }
+    if (st) st.textContent = sb + (mk ? '·'+mk : '') + (mm ? '·'+mm : '');
+  } else {
+    if (provEl) { provEl.textContent = 'default'; provEl.title = 'Using default provider (set form to target custom OpenAI-compatible)'; }
+    if (st) st.textContent = '';
+  }
 }
+function loadProviderFromStorage() {
+  try {
+    const saved = localStorage.getItem('holo_providerConfig');
+    if (saved) {
+      providerConfig = JSON.parse(saved);
+      const bi = document.getElementById('p-base'); if (bi) bi.value = providerConfig.baseUrl || '';
+      const ki = document.getElementById('p-key'); if (ki) ki.value = providerConfig.apiKey || '';
+      const mi = document.getElementById('p-model'); if (mi) mi.value = providerConfig.model || '';
+    }
+  } catch {}
+  updateProviderStatus();
+}
+function wireProviderForm() {
+  const setB = document.getElementById('p-set');
+  const clrB = document.getElementById('p-clear');
+  const bi = document.getElementById('p-base');
+  const ki = document.getElementById('p-key');
+  const mi = document.getElementById('p-model');
+  if (setB) setB.onclick = () => {
+    const b = (bi && bi.value || '').trim();
+    if (!b) { notify('baseUrl is required for custom provider', 'error'); return; }
+    const k = (ki && ki.value || '').trim();
+    const m = (mi && mi.value || '').trim();
+    providerConfig = { baseUrl: b, apiKey: k, model: m };
+    try { localStorage.setItem('holo_providerConfig', JSON.stringify(providerConfig)); } catch {}
+    updateProviderStatus();
+    notify('Saved to localStorage — custom provider active on next send', 'success');
+  };
+  if (clrB) clrB.onclick = () => {
+    providerConfig = null;
+    try { localStorage.removeItem('holo_providerConfig'); } catch {}
+    if (bi) bi.value = ''; if (ki) ki.value = ''; if (mi) mi.value = '';
+    updateProviderStatus();
+    notify('Cleared — back to default provider', 'success');
+  };
+  // allow Enter in base to set quickly
+  if (bi) bi.onkeydown = (e) => { if (e.key === 'Enter' && setB) setB.onclick(); };
+}
+loadProviderFromStorage();
+wireProviderForm();
 
 function setEditMode(on) {
   editMode = on;

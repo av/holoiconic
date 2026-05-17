@@ -315,11 +315,16 @@
 - label: llm, embed and agent:loop catch network/fetch/HTTP errors for custom baseUrl providers (unreachable, auth, bad model) and rethrow clear actionable messages naming the baseUrl, original error, verify-URL/key/model advice and launch method (env/CLI/REPL/.provider/headers); mock paths unchanged; surfaces nicely via REPL and api/server error responses
   command: grep -q 'custom OpenAI-compatible provider' src/nodes/llm.ts src/nodes/embed.ts src/nodes/agent/loop.ts && grep -q 'Verify the base URL' src/nodes/llm.ts src/nodes/embed.ts src/nodes/agent/loop.ts
   tags: [spec, implemented]
-- web:ui chat panel provides trivial per-session custom OpenAI-compatible provider support via simple header affordance (clickable 'provider' label opens inline inputs for base URL / API key / model); when set, includes baseUrl/apiKey/model in the /v1/chat/completions fetch body (plus existing fields) so that api:server per-request extraction (body fields) routes the chat to the custom endpoint via agent:loop; falls back to default when unset; enables WebUI:3002 users to launch against custom providers without env/CLI/REPL @spec @implemented
+- label: web:ui chat panel provides trivial per-session custom OpenAI-compatible provider support via header badge opening a small non-blocking inline form (3 inputs for baseUrl + key + model + set/clear buttons, styled compactly); persists config to localStorage (loads on init, saves on set); shows status (masked key, short base); forwards baseUrl/apiKey/model in /v1/chat fetch body so api:server routes to custom via agent:loop; falls back to default when unset/cleared; enables convenient WebUI:3002 custom launches that survive reloads (no prompts)
+  command: grep -q 'provider-form' src/nodes/web/ui.ts && grep -q 'holo_providerConfig' src/nodes/web/ui.ts && grep -q 'loadProviderFromStorage' src/nodes/web/ui.ts && grep -q 'p-set' src/nodes/web/ui.ts
+  tags: [spec, implemented, polished, verified]
 - label: user-facing custom OpenAI launch complete across env/CLI/REPL/API/WebUI + tests + errors + docs
   id: final
   command: grep -q 'user-facing custom OpenAI launch complete across env/CLI/REPL/API/WebUI + tests + errors + docs' .facts && test -f /tmp/test-boot-final.log && grep -q '570 passed, 0 failed' /tmp/test-boot-final.log
   tags: [implemented, spec]
+- label: web:ui providerConfig affordance is a small non-blocking inline form (div w/ 3 text inputs for baseUrl/key/model + set/clear buttons) styled to fit header; loads from localStorage on init, saves on set; displays current status (masked key, short base hostname); auto-includes in send fetch body (replaces blocking prompt() UX); makes custom OpenAI launch in WebUI even more trivial across reloads
+  command: grep -q 'provider-form' src/nodes/web/ui.ts && grep -q "localStorage.getItem('holo_providerConfig')" src/nodes/web/ui.ts && grep -q 'updateProviderStatus' src/nodes/web/ui.ts && grep -q 'maskKey' src/nodes/web/ui.ts
+  tags: [spec, implemented, verified]
 
 # versioning
 - label: sys:compiler auto-saves the old source as a version via version:save whenever a source quad is removed
