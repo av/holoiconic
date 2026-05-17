@@ -100,6 +100,45 @@ Tests boot the full system against a local file DB — no mocking. Each test fun
 
 Without `ANTHROPIC_API_KEY` or `OPENAI_API_KEY`, `main` spawns the `mock:llm` node — a graph-resident mock server that registers a pi-ai faux provider for LLM completions and runs an HTTP server for OpenAI-compatible embeddings. The `llm`, `agent:loop`, and `embed` nodes route through it automatically. Without `TURSO_URL`/`TURSO_AUTH_TOKEN`, data is stored locally in `holoiconic.db`.
 
+**Custom OpenAI-compatible providers are first-class and trivial to launch against** (Groq, Ollama, vLLM, llama.cpp, local servers, Together, Fireworks, any OpenAI-/v1 endpoint). The nodes (main, llm, agent:loop, embed, api:server, repl) all support:
+
+- `OPENAI_BASE_URL` (or alias `OPENAI_API_BASE`) — target URL
+- `OPENAI_API_KEY` — key (dummy `sk-local` auto-used when base present, works for auth-less servers)
+- `HOLOICONIC_MODEL` (aliases: `OPENAI_MODEL`, `MODEL`)
+- Ports: `HOLO_API_PORT` (3001), `HOLO_WEB_PORT` (3002)
+- Also `ANTHROPIC_API_KEY`, `TURSO_URL`/`TURSO_AUTH_TOKEN`
+
+**Concrete launch examples for custom provider:**
+
+Env (simplest):
+```bash
+OPENAI_BASE_URL=https://api.groq.com/openai OPENAI_API_KEY=gsk_... HOLOICONIC_MODEL=llama-3.1-70b-versatile bun start
+```
+
+CLI flags (precedence highest; `bun start` requires `--` separator to pass args):
+```bash
+bun start -- --openai-base-url=https://api.groq.com/openai --openai-api-key=gsk_... --model=llama-3.1-8b-instant --api-port=3001
+bun src/boot.ts --openai-base-url=URL -b KEY -m MODEL --provider=openai-completions --help
+```
+
+REPL (per-session override after start; stored in `ctx._providerConfig`; affects subsequent calls):
+```text
+holo> .provider set --base https://api.groq.com/openai --key gsk_... --model llama-3.1-70b
+holo> .provider show
+holo> .provider clear
+```
+
+Per-request (dynamic, for any call to the OpenAI-compat API `:3001` or originating from WebUI):
+- Request body fields: `baseUrl` / `base_url` / `baseURL`, `apiKey` / `api_key`, `model`, `provider`
+- Headers: `x-openai-base-url`, `x-openai-api-key` (or `x-api-key`, `openai-base-url`), `Authorization: Bearer <key>`
+- Dummy key handling and forwarding to downstream nodes is automatic.
+
+Full list + precedence (CLI > env > default) + comments in the committed `.env.example` at repo root.
+
+Use `--help` (via CLI) to see all boot flags for trivial non-interactive custom launches.
+
+See also: README.md "Environment variables", `.facts` (providers section, facts 5l0/clp/l8u etc), and REPL `.help`.
+
 <!-- facts:start -->
 ## Fact-driven development
 
