@@ -10,6 +10,7 @@ bun start
 ```
 
 This boots the kernel, seeds an empty graph from the template, installs the reactive compiler, starts the supervisor, API server, WebUI, and REPL.
+See "Using custom OpenAI-compatible providers" below for `OPENAI_BASE_URL=...` etc (Groq, Ollama, vLLM...).
 
 ## Using custom OpenAI-compatible providers (Groq, Ollama, vLLM, OpenRouter, ...)
 
@@ -96,7 +97,7 @@ Body also accepts `baseUrl`, `apiKey`, `model` (and snake_case variants). `Autho
 | `TURSO_URL` | For cloud DB | Turso Cloud URL, for example `libsql://db-org.turso.io`. |
 | `TURSO_AUTH_TOKEN` | For cloud DB | Turso Cloud auth token. |
 
-Without LLM API keys, `main` spawns the graph-resident `mock:llm` node. It registers a pi-ai faux provider for completions and serves OpenAI-compatible mock embeddings. Without Turso credentials, data is stored locally in `holoiconic.db`.
+Without LLM API keys, `main` spawns the graph-resident `mock:llm` node. It registers a pi-ai faux provider for completions and serves OpenAI-compatible mock embeddings. Without Turso credentials, data is stored locally in `holoiconic.db`. For custom providers see 'Using custom OpenAI-compatible providers' section above (6 methods + table).
 
 ## Interfaces
 
