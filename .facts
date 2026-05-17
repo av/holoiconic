@@ -328,6 +328,7 @@
 - label: boot loads persistent config file (.holoiconic.json or holoiconic.config.json from cwd or home) early after parseCliArgs for default custom OpenAI provider; JSON {provider:{baseUrl,apiKey,model,provider}} or flat keys; sets process.env.OPENAI_* and ctx._providerConfig/_globalProvider so all paths pick up; precedence CLI > config > env; --help updated; makes custom provider default persist across bun start / restarts (complements CLI/REPL/env/per-req)
   command: grep -q 'holoiconic\.json\|loadConfigProvider\|configProv' src/boot.ts && grep -q 'CLI > config' src/boot.ts && grep -q '_providerConfig' src/boot.ts
   tags: [spec, implemented]
+- providers > README.md has high-quality 'Using custom OpenAI-compatible providers (Groq, Ollama, vLLM, OpenRouter, ...)' section for trivial launch UX: intro on 6 methods, precedence table CLI>config>env>defaults, 6 short examples (.holoiconic.json, CLI flags, env+.env.example, REPL .provider, WebUI form, per-req curl/API), notes on sk-local dummy/model/--help/error msgs, cross-refs to .env.example/CLAUDE.md/facts; style matches existing README (minimal markdown); completes user-facing docs (see l8u/c3t/final) @spec @implemented
 
 # versioning
 - label: sys:compiler auto-saves the old source as a version via version:save whenever a source quad is removed

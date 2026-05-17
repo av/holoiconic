@@ -11,6 +11,82 @@ bun start
 
 This boots the kernel, seeds an empty graph from the template, installs the reactive compiler, starts the supervisor, API server, WebUI, and REPL.
 
+## Using custom OpenAI-compatible providers (Groq, Ollama, vLLM, OpenRouter, ...)
+
+Trivial to launch against any OpenAI-compat endpoint via 6 methods.
+
+Precedence (highest wins): CLI flags > config file > environment variables > defaults (`mock:llm` only when neither key nor `baseUrl`).
+
+| Source | Example use | Scope |
+|--------|-------------|-------|
+| CLI flags | `bun start -- --openai-base-url=...` | per-invocation |
+| `.holoiconic.json` (or `holoiconic.config.json`) | persistent file (cwd or `~/`) | across restarts |
+| env vars | `OPENAI_BASE_URL=... bun start` | shell / `.env` |
+| REPL `.provider` | `.provider set --base ...` | REPL session |
+| WebUI form | inline inputs in chat header | browser tab |
+| per-request | body fields or `x-openai-*` headers | single API call |
+
+**1. Persistent config file** (`.holoiconic.json` or `holoiconic.config.json` in cwd or home dir):
+
+```json
+{
+  "provider": {
+    "baseUrl": "https://api.groq.com/openai",
+    "apiKey": "gsk_...",
+    "model": "llama-3.1-70b-versatile"
+  }
+}
+```
+(Flat top-level keys like `"baseUrl"` are also accepted.) `bun start` (or `bun src/boot.ts`) will load it automatically.
+
+**2. CLI flags** (pass after `--` for `bun start`; direct boot also supports):
+
+```bash
+bun start -- --openai-base-url=https://api.groq.com/openai \
+  --openai-api-key=gsk_... --model=llama-3.1-8b-instant
+# shorts: -b URL -k KEY -m MODEL ; also --provider, --api-port etc.
+bun src/boot.ts --help
+```
+
+**3. Environment variables** (copy `.env.example` to `.env` and edit):
+
+```bash
+OPENAI_BASE_URL=https://api.groq.com/openai \
+OPENAI_API_KEY=gsk_... \
+HOLOICONIC_MODEL=llama-3.1-70b-versatile \
+bun start
+```
+Supported: `OPENAI_BASE_URL` (or `OPENAI_API_BASE`), `OPENAI_API_KEY`, `HOLOICONIC_MODEL` (or `OPENAI_MODEL` / `MODEL`).
+
+**4. REPL** (per-session override, after boot):
+
+```
+holo> .provider set --base https://api.groq.com/openai --key gsk_... --model llama-3.1-70b
+holo> .provider show
+holo> .provider clear
+```
+
+**5. WebUI** (http://localhost:3002): the chat header includes a status badge. Use the compact form right below it (baseUrl, apiKey, model fields + set/clear buttons). Configuration is saved to localStorage and survives reloads; values are forwarded on each send.
+
+**6. Per-request** (overrides everything for one call to the OpenAI-compatible API on :3001):
+
+```bash
+curl -X POST http://localhost:3001/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -H "x-openai-base-url: https://api.groq.com/openai" \
+  -H "x-openai-api-key: gsk_..." \
+  -d '{"model":"llama-3.1-70b-versatile","messages":[{"role":"user","content":"hi"}]}'
+```
+Body also accepts `baseUrl`, `apiKey`, `model` (and snake_case variants). `Authorization: Bearer <key>` works for the key (base from header or body).
+
+**Notes**
+
+- When a `baseUrl` is supplied (any method), a dummy key `sk-local` is used automatically if none provided — this works for local servers (Ollama, llama.cpp, vLLM, etc.) that need no auth.
+- Specify the exact model name expected by your target endpoint.
+- `bun src/boot.ts --help` (or via `bun start -- --help`) shows the full flag list.
+- Custom provider errors are actionable: they report the attempted base URL, the original fetch/HTTP error, verification advice, and the configuration source (CLI / config / env / REPL / per-request / WebUI).
+- Cross-references: `.env.example` (detailed vars + snippets), CLAUDE.md ("Environment variables" section), `facts list --section providers --tags spec` (and `facts check --tags "spec"` for the full provider spec).
+
 ## Environment variables
 
 | Variable | Required | Description |
