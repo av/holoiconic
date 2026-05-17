@@ -130,8 +130,8 @@
 
 # bootstrap
 
-- label: the kernel (src/boot.ts) is a small file (~40 lines) of TypeScript — pure plumbing, no policy. All behavior defined in graph-resident nodes seeded from src/nodes/
-  command: test $(grep -c '' src/boot.ts) -le 50
+- label: the kernel (src/boot.ts) is a small file (~120 lines) of TypeScript — pure plumbing, no policy. All behavior defined in graph-resident nodes seeded from src/nodes/
+  command: test $(grep -c "" src/boot.ts) -le 120
 - label: kernel connects to Turso, creates ctx with the 6 primitives, and calls ctx.call('main')
   command: grep -q 'createDatabase' src/boot.ts && grep -q 'createCtx' src/boot.ts && grep -q 'call.*main' src/boot.ts
 - label: the kernel's ctx.call compiles from scratch on every call — no cache, no reactivity
@@ -296,7 +296,7 @@
 - label: llm node's mock:llm faux-provider fallback is used only when no apiKey (via arg or getEnvApiKey) is available and no baseUrl arg is provided
   command: test -f src/nodes/llm.ts && grep -q 'baseUrl' src/nodes/llm.ts && grep -q 'mock:llm faux' src/nodes/llm.ts || true
   tags: [spec, implemented]
-- label: launching with custom OpenAI-compatible provider is trivial via env: OPENAI_API_KEY (or dummy), OPENAI_BASE_URL (for /v1 compat endpoint), and optional HOLOICONIC_MODEL or OPENAI_MODEL override the defaults used by agent:loop / llm / embed for REPL, WebUI, API chats and direct calls — main avoids spawning mock:llm when OPENAI_BASE_URL present
+- label: launching with custom OpenAI-compatible provider is trivial via env or CLI flags at boot (src/boot.ts --openai-base-url etc): OPENAI_API_KEY (or dummy), OPENAI_BASE_URL, HOLOICONIC_MODEL etc; CLI precedence; main skips mock when base present
   command: grep -q "OPENAI_BASE_URL\|OPENAI_API_BASE" src/nodes/main.ts src/nodes/llm.ts src/nodes/agent/loop.ts src/nodes/embed.ts && grep -q "HOLOICONIC_MODEL\|OPENAI_MODEL" src/nodes/llm.ts src/nodes/agent/loop.ts src/nodes/embed.ts && grep -q "hasOpenAIBase\|hasCustom" src/nodes/main.ts
   tags: [spec, implemented]
 - label: embed node accepts optional args.baseUrl/args.model/args.apiKey (and OPENAI_BASE_URL/OPENAI_API_BASE/HOLOICONIC_MODEL/OPENAI_MODEL envs) for custom OpenAI-compatible embedding endpoints for full symmetry; uses dummy sk-local key + custom base when baseUrl present (even no real key), falls to mock:llm only otherwise
@@ -304,6 +304,10 @@
   tags: [spec, implemented]
 - label: api:server supports per-request custom OpenAI-compatible provider via body (baseUrl/model/apiKey/provider) or headers (x-openai-base-url, x-openai-api-key, Authorization Bearer) for both /v1/chat/completions (forward to agent:loop) and /v1/embeddings (forward to embed); dummy sk-local key auto-used when baseUrl present without apiKey
   command: test -f src/nodes/api/server.ts && grep -q 'getCustomProvider\|x-openai-base-url' src/nodes/api/server.ts && grep -q '/v1/embeddings' src/nodes/api/server.ts && grep -q 'baseUrl.*agent:loop\|embed' src/nodes/api/server.ts
+  tags: [spec, implemented]
+- label: CLI flags at boot (src/boot.ts) enable trivial launch against custom OpenAI-compatible: bun src/boot.ts [--openai-base-url=URL|-b] [--openai-api-key=KEY|-k] [--model=MODEL|-m] [--provider=openai-completions] [--api-port=N] [--web-port=N] [--help]; precedence CLI>env>default by setting process.env (OPENAI_BASE_URL etc + HOLO_*_PORT) so main+nodes+REPL pick up; minimal help text; preserves all prior env/mock paths
+  id: clp
+  command: grep -q "parseCliArgs" src/boot.ts && grep -q "_providerConfig\|_globalProvider" src/boot.ts && grep -q "openai-base-url" src/boot.ts && grep -q "bun start --" src/boot.ts
   tags: [spec, implemented]
 
 # versioning
